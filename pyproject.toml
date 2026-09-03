@@ -1,0 +1,17 @@
+[project]
+name = "ppai-assistant"
+version = "0.1.0"
+description = "Automotive AI Assistant demo"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6",
+    "crewai",
+    "crewai-core",
+    "qasync",
+    "structlog",
+    "omegaconf",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

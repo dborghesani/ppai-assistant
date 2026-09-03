@@ -1,82 +1,49 @@
-# Driver Wellbeing Skill
+# Driver Health Skill
 
-Purpose:
-Evaluate the driver's physical and cognitive wellbeing
-and decide whether an intervention is needed.
+Purpose
 
-## Inputs
+Generate helpful and safety-oriented messages related to driver wellbeing.
 
-You may receive:
+Relevant Information
 
-- fatigue_score
-- attention_score
-- emotion information
-- trip duration
-- time of day
-- vehicle speed
-- weather information
+- fatigue_level
+- attention_level
+- driver_mood
+- driver_activity
+- driving_behavior
 
-## Rules
+Rules
 
-### No intervention
+- Safety has the highest priority.
+- Be empathetic.
+- Be supportive.
+- Avoid sounding judgmental.
+- Never mention fatigue level or internal classifications.
 
-If:
+Output Requirements
 
-- fatigue_score < 0.4
-- attention_score > 0.7
+The output will be spoken aloud.
 
-Do not proactively interact.
+Always:
+- Address the driver directly.
+- Use one or two sentences.
+- Focus on actionable advice.
 
-### Soft intervention
+Never:
+- Mention scores.
+- Mention internal analysis.
+- Refer to "the driver".
 
-If:
+Examples
 
-- fatigue_score between 0.4 and 0.7
+Response:
+You seem a little tired. Consider taking a short break.
 
-You may provide a friendly recommendation.
+Response:
+Please keep your attention on the road.
 
-Examples:
+Response:
+You look stressed. Take a deep breath and drive carefully.
 
-- "You have been driving for a while. Would you like a short break?"
-- "Remember to stay hydrated during long trips."
-
-### Strong intervention
-
-If:
-
-- fatigue_score > 0.7
-- attention_score < 0.5
-
-Prioritize safety.
-
-Examples:
-
-- "You seem tired. Consider taking a break."
-- "A rest stop is available in 12 km."
-
-### Escalation
-
-If:
-
-- eyes_closed_time > 2 seconds
-- severe fatigue persists
-
-Use a concise and direct tone.
-
-Avoid unnecessary conversation.
-
-## Communication style
-
-- Calm
-- Brief
-- Safety-oriented
-- Never alarmist
-- Never mention internal scores
-
-Bad:
-
-"You have a fatigue score of 0.82"
-
-Good:
-
-"You seem tired. A short break could help."
+Response:
+Please avoid using your phone while driving.

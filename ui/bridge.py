@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any
+from typing import Any, Dict, List
 
 from PySide6.QtCore import QObject, Slot
 
@@ -26,28 +26,41 @@ class VehicleBridge(QObject):
 
         self.assistant_manager = AssistantManager()
 
+        # keep a queue of recent contexts for the assistant to use in its reasoning
+        # 3 at most
+        self.recent_contexts: Dict[SkillType,List[Any]] = {}
+
 
     def _send_event(self, event_type: str, value: Any):
         if not self._agent.is_listening:
             return
 
-        # update the assistant state with the new value
-        setattr(self.assistant_manager.assistant_state, event_type, value)
-        
-        context = self.assistant_manager.get_context_for_event(event_type)
         skills = self.assistant_manager.get_skills_for_event(event_type)
 
         for skill in skills:
+
+            # update the assistant state with the new value
+            setattr(self.assistant_manager.assistant_state, event_type, value)
+            context = self.assistant_manager.get_context_for_event(event_type)
+                
             event = CarEvent(
                 skill=skill.value,
                 event_name=event_type,
                 event_value=value,
                 context=context,
+                previous_contexts=self.recent_contexts.get(skill, []),
             )
             asyncio.run_coroutine_threadsafe(
                 self._event_queue.put(event),
                 self._loop,
             )
+
+            # update the recent contexts queue
+            if skill not in self.recent_contexts:
+                self.recent_contexts[skill] = []
+            self.recent_contexts[skill].append(context)
+            if len(self.recent_contexts[skill]) > 3:
+                self.recent_contexts[skill].pop(0)
 
     def _send_user_input(self, text: str):
         event = CarEvent(
@@ -65,11 +78,11 @@ class VehicleBridge(QObject):
 
     @Slot(float)
     def fatigueChanged(self, value):
-        self._send_event("fatigue_score", value)
+        self._send_event("fatigue_level", value)
 
     @Slot(float)
     def attentionChanged(self, value):
-        self._send_event("attention_score", value)
+        self._send_event("attention_level", value)
 
     @Slot(str)
     def vehicleStatusChanged(self, value):

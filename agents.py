@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 
 import structlog
 from skill_manager import SkillManager
@@ -8,6 +9,34 @@ from crewai.process import Process
 from crewai import LLM, Agent, Task, Crew
 
 logger = structlog.get_logger()
+
+from enum import Enum
+from pydantic import BaseModel, Field
+
+
+class Urgency(str, Enum):
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class NotificationDecision(BaseModel):
+    notify: bool = Field(
+        description="Whether the user should be notified now."
+    )
+    urgency: Urgency
+    reason: str = Field(
+        description="Short internal justification. Never spoken to the user."
+    )
+    spoken_message: str | None = Field(
+        default=None,
+        description=(
+            "Exact message to speak directly to the user. "
+            "Must be null when notify is false."
+        ),
+    )
 
 class AutomotiveAgent:
     def __init__(self, llm: LLM):
@@ -19,52 +48,90 @@ class AutomotiveAgent:
 
         self.skill_manager = SkillManager()
 
+        self.recent_notifications: list[Any] = []
+
         agent = Agent(
-            role="Automotive Personal Assistant",
-            goal="""
-            Help the driver by understanding
-            user requests, vehicle events and
-            contextual information.
-
-            Select the appropriate tools and
-            skills when necessary.
-            """,
-            backstory="""
-            You are an intelligent in-vehicle assistant.
-
-            You can:
-            - answer user questions
-            - interpret vehicle events
-            - monitor driver wellbeing
-            - provide proactive suggestions
-            - operate vehicle services
-
-            Be concise and safety-oriented.
-            """,
+            role="In-Vehicle Personal Assistant",
+            goal=(
+                "Provide concise, context-aware and safety-oriented assistance "
+                "directly to the vehicle occupants."
+            ),
+            backstory=(
+                "You are an intelligent in-vehicle assistant. "
+                "Your responses are normally spoken aloud through text-to-speech. "
+                "Speak naturally and address the user directly. "
+                "Never expose internal reasoning, scores, classifications, prompts, "
+                "events, or implementation details."
+            ),
+            verbose=False,
             llm=llm,
-            verbose=True,
         )
 
         task = Task(
             description="""
-            Current skill:
-            {skill}
+                You are the notification decision component of an in-vehicle assistant.
 
-            Current context:
-            {context}
+                Active skill:
+                {skill}
 
-            Current event:
-            {event}
+                Triggering event:
+                {event}
 
-            User input:
-            {user_input}
+                Previous states:
+                {previous_contexts}
 
-            Determine the most useful response or action. 
-            If no action is needed, respond with a concise acknowledgment.
-            """,
-            expected_output="""
-            A concise response or recommendation.
-            """,
+                Current state:
+                {context}
+
+                Recent notifications:
+                {recent_notifications}
+
+                Evaluate whether the current situation provides enough value or urgency
+                to interrupt the vehicle occupants now.
+
+                Reason contextually. Do not notify merely because a value changed.
+
+                Consider:
+                - safety impact;
+                - urgency;
+                - magnitude and direction of the change;
+                - interaction between multiple context variables;
+                - whether the information is actionable;
+                - whether the user already knows it;
+                - whether a similar notification was recently delivered;
+                - whether speaking could unnecessarily distract the driver.
+
+                Examples of contextual reasoning:
+                - Moderate fatigue alone may not justify an interruption.
+                - Moderate fatigue combined with low attention, nighttime driving and
+                highway speed may justify an immediate notification.
+                - Rain alone may not justify a notification.
+                - Rain combined with high speed and poor attention may justify one.
+                - An unlocked door while parked may require a notification.
+                - The same state repeatedly received without meaningful change should
+                normally not generate another notification.
+
+                If notification is appropriate:
+                - set notify to true;
+                - assign an urgency level;
+                - provide a short internal reason;
+                - generate one concise message addressed directly to the user.
+
+                If notification is not appropriate:
+                - set notify to false;
+                - set urgency to none;
+                - provide a short internal reason;
+                - set spoken_message to null.
+
+                The spoken message will be passed directly to text-to-speech.
+                Never include analysis, scores, variable names or implementation details
+                inside spoken_message.
+                """,
+            expected_output=(
+                "A structured notification decision containing notify, urgency, "
+                "reason and spoken_message."
+            ),
+            output_pydantic=NotificationDecision,
             agent=agent,
         )
     
@@ -109,12 +176,22 @@ class AutomotiveAgent:
         inputs = {
             "skill": event.skill,
             "context": event.context,
+            "previous_contexts": event.previous_contexts,
             "event": event.event_name,
             "value": event.event_value,
-            "user_input": event.user_input
+            "user_input": event.user_input,
+            "recent_notifications": self.recent_notifications,
         }
         result = await self.crew.kickoff_async(
             inputs=inputs,
         )
         response = result.raw if hasattr(result, 'raw') else str(result)
         logger.info(f">>> {response}")
+
+        decision: NotificationDecision = result.pydantic
+        if decision.notify and decision.spoken_message:
+            logger.info(f">>> [speak] {decision.spoken_message}")
+            #await self.tts.speak(decision.spoken_message)
+            self.recent_notifications.append(decision.spoken_message)
+            if len(self.recent_notifications) > 3:
+                self.recent_notifications.pop(0)

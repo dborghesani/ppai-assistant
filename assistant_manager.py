@@ -10,8 +10,8 @@ class AssistantState:
     driver_activity: str = "Idle"
     driver_mood: str = "Neutral"
 
-    fatigue_score: float = 0.0
-    attention_score: float = 1.0
+    fatigue_level: float = 0.0
+    attention_level: float = 1.0
 
     traffic: str = "No traffic"
     road_type: str = "Urban"
@@ -38,8 +38,8 @@ class AssistantManager:
         self.event_skill_map = {}
         self.event_skill_map["driver_mood"] = [SkillType.DRIVER_HEALTH]
         self.event_skill_map["driving_behavior"] = [SkillType.DRIVER_HEALTH]
-        self.event_skill_map["fatigue_score"] = [SkillType.DRIVER_HEALTH]
-        self.event_skill_map["attention_score"] = [SkillType.DRIVER_HEALTH]
+        self.event_skill_map["fatigue_level"] = [SkillType.DRIVER_HEALTH]
+        self.event_skill_map["attention_level"] = [SkillType.DRIVER_HEALTH]
         self.event_skill_map["driver_activity"] = [SkillType.DRIVER_HEALTH]
         self.event_skill_map["weather"] = [SkillType.PROACTIVE_SUGGESTIONS, SkillType.NAVIGATION]
         self.event_skill_map["external_temperature"] = [SkillType.PROACTIVE_SUGGESTIONS]
@@ -47,7 +47,7 @@ class AssistantManager:
         self.event_skill_map["speed"] = [SkillType.PROACTIVE_SUGGESTIONS]
         self.event_skill_map["traffic"] = [SkillType.PROACTIVE_SUGGESTIONS, SkillType.NAVIGATION]
         self.event_skill_map["road_type"] = [SkillType.PROACTIVE_SUGGESTIONS]
-        self.event_skill_map["time_of_day"] = [SkillType.PROACTIVE_SUGGESTIONS]
+        self.event_skill_map["time_of_day"] = [SkillType.PROACTIVE_SUGGESTIONS,SkillType.DRIVER_HEALTH]
         self.event_skill_map["detected_objects"] = [SkillType.PROACTIVE_SUGGESTIONS]
         self.event_skill_map["risky_area"] = [SkillType.PROACTIVE_SUGGESTIONS]
         self.event_skill_map["engine_running"] = [SkillType.VEHICLE]

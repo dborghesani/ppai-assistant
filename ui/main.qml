@@ -196,7 +196,7 @@ ApplicationWindow {
 
                     RowLayout {
                         Label {
-                            text: "Fatigue Score"
+                            text: "Fatigue Level"
                         }
 
                         Slider {
@@ -225,7 +225,7 @@ ApplicationWindow {
 
                     RowLayout {
                         Label {
-                            text: "Attention Score"
+                            text: "Attention Level"
                         }
 
                         Slider {

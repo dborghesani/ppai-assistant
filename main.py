@@ -4,8 +4,8 @@ import sys
 from crewai import LLM
 from config import ConfigAssistant
 from agents import AutomotiveAgent
+from ui import bridge
 from ui.bridge import VehicleBridge
-from ui.ui import CarDashboard
 import structlog
 from omegaconf import OmegaConf
 from PySide6.QtWidgets import QApplication

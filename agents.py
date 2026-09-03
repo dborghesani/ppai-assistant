@@ -65,6 +65,7 @@ class AutomotiveAgent:
             ),
             verbose=False,
             llm=llm,
+            tools=[],
         )
 
         task = Task(
@@ -141,7 +142,8 @@ class AutomotiveAgent:
             tasks=[task],
             verbose=False,
             tracing=False,
-            process=Process.sequential
+            process=Process.sequential,
+            memory=None,
         )
 
     async def run(self):

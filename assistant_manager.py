@@ -45,7 +45,7 @@ class AssistantManager:
         self.event_skill_map["external_temperature"] = [SkillType.PROACTIVE_SUGGESTIONS]
         self.event_skill_map["people_around"] = [SkillType.PROACTIVE_SUGGESTIONS]
         self.event_skill_map["speed"] = [SkillType.PROACTIVE_SUGGESTIONS]
-        self.event_skill_map["traffic"] = [SkillType.PROACTIVE_SUGGESTIONS, SkillType.NAVIGATION]
+        self.event_skill_map["traffic"] = [SkillType.PROACTIVE_SUGGESTIONS, SkillType.NAVIGATION, SkillType.DRIVER_HEALTH]
         self.event_skill_map["road_type"] = [SkillType.PROACTIVE_SUGGESTIONS]
         self.event_skill_map["time_of_day"] = [SkillType.PROACTIVE_SUGGESTIONS,SkillType.DRIVER_HEALTH]
         self.event_skill_map["detected_objects"] = [SkillType.PROACTIVE_SUGGESTIONS]

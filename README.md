@@ -25,6 +25,7 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
 - **Ollama**: Local LLM inference (default: `qwen2.5:3b-instruct`).
 - **OmegaConf**: Configuration management.
 - **structlog**: Structured logging.
+- **InfluxDB 2**: Time-series storage for vehicle/driver state history.
 
 ## 📂 Project Structure
 
@@ -34,10 +35,17 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
 ├── agents.py        # CrewAI Agent and Task definitions
 ├── config.py        # Configuration dataclasses
 ├── skill_manager.py # Manager for loading skill contexts
+├── knowledge_manager.py
+├── action_manager.py
+├── events.py
 ├── skills/          # Markdown files defining agent skills
+├── data/            # Dataclasses and InfluxDB persistence layer
+│   ├── assistant_dataclasses.py
+│   ├── database_manager.py
+│   └── skill_map.py
 ├── ui/              # QML interface and bridge to Python
 │   ├── main.qml
-│   └── ui.py
+│   └── bridge.py
 └── tools/           # Agent tools directory
 ```
 
@@ -60,6 +68,34 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
    ollama pull qwen2.5:3b-instruct
    ```
 
+4. **Run InfluxDB** (used by `data/database_manager.py` to persist vehicle/driver state):
+
+   Create a dedicated Docker network with a subnet that doesn't overlap with your VPN's range
+   (the default `172.17.0.0/16` used by Docker's bridge network conflicts with some VPN configs):
+   ```bash
+   docker network create --subnet=172.30.0.0/16 influx-net
+   ```
+
+   Then start the InfluxDB 2 container on that network:
+   ```bash
+   docker run -d \
+     --name influxdb \
+     --network influx-net \
+     --restart unless-stopped \
+     -p 8086:8086 \
+     -v influxdb-data:/var/lib/influxdb2 \
+     -e DOCKER_INFLUXDB_INIT_MODE=setup \
+     -e DOCKER_INFLUXDB_INIT_USERNAME=admin \
+     -e DOCKER_INFLUXDB_INIT_PASSWORD=admin123456 \
+     -e DOCKER_INFLUXDB_INIT_ORG=stellantis \
+     -e DOCKER_INFLUXDB_INIT_BUCKET=assistant-bucket \
+     -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-token \
+     influxdb:2
+   ```
+
+   The default values above match the ones in `config.py` (`influxdb_url`, `influxdb_token`, `influxdb_org`, `influxdb_bucket`).
+   If you change any of them, override the corresponding `influxdb_*` setting when running `main.py` (see [Configuration](#configuration)).
+
 ## 🚀 Usage
 
 ### Basic Run
@@ -78,6 +114,10 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `ollama_port` | Ollama server port | `11434` |
 | `ollama_llm` | LLM model to use | `ollama/qwen2.5:3b-instruct` |
 | `ollama_timeout` | LLM timeout in seconds | `1200` |
+| `influxdb_url` | InfluxDB server URL | `http://localhost:8086` |
+| `influxdb_token` | InfluxDB auth token | `my-super-secret-token` |
+| `influxdb_org` | InfluxDB organization | `stellantis` |
+| `influxdb_bucket` | InfluxDB bucket | `assistant-bucket` |
 
 **Example:**
 ```bash

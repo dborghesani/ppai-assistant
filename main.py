@@ -1,10 +1,12 @@
 import asyncio
+from datetime import datetime, timezone
 from logging import warning
 import sys
 from crewai import LLM
 from config import ConfigAssistant
 from agents import AutomotiveAgent
-from ui import bridge
+from data.database_manager import DatabaseManager
+from knowledge_manager import KnowledgeManager
 from ui.bridge import VehicleBridge
 import structlog
 from omegaconf import OmegaConf
@@ -28,16 +30,25 @@ async def main(opt: ConfigAssistant):
         base_url=f"http://{opt.ollama_host}:{opt.ollama_port}",
         timeout=opt.ollama_timeout,
     )
+
+    event_queue: asyncio.Queue = asyncio.Queue()
+
+    # initialize database manager for data storage and retrieve
+    database_manager = DatabaseManager(event_queue,opt)
+    database_manager.app_start_timestamp = datetime.now(timezone.utc).isoformat()  # type: ignore[assignment]
+
+    # initialize knowledge manager to extract knowledge from data
+    knowledge_manager = KnowledgeManager(database_manager=database_manager, event_queue=event_queue, opt=opt)
     
     # initialize Agent
-    agent = AutomotiveAgent(llm)
-
-    shutdown_event = asyncio.Event()
+    agent = AutomotiveAgent(llm=llm)
+    
     engine = QQmlApplicationEngine()
     bridge = VehicleBridge(
         agent=agent,
         loop=asyncio.get_running_loop(),
-        shutdown_event=shutdown_event
+        database_manager=database_manager,
+        opt=opt,
     )
     engine.rootContext().setContextProperty(
         "vehicleBridge",
@@ -58,16 +69,9 @@ async def main(opt: ConfigAssistant):
     # run everything concurrently
     tasks = [
         asyncio.create_task(agent.run()),
+        asyncio.create_task(knowledge_manager.run())
     ]
-
-    await shutdown_event.wait()
-    
-    agent.is_active = False
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-    logger.info("Shutting down Automotive AI Agent...")
+    await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
 

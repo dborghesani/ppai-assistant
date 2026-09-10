@@ -21,6 +21,27 @@ class Urgency(str, Enum):
     HIGH = "high"
     CRITICAL = "critical"
 
+class ActionType(str, Enum):
+    NONE = "none"
+    SUGGEST = "suggest"
+
+    INCREASE_TEMPERATURE = "increase_temperature"
+    DECREASE_TEMPERATURE = "decrease_temperature"
+
+    LOCK_DOORS = "lock_doors"
+
+    START_NAVIGATION = "start_navigation"
+
+    FIND_REST_AREA = "find_rest_area"
+
+    ENABLE_RECIRCULATION = "enable_recirculation"
+
+class Action(BaseModel):
+
+    action_type: ActionType
+
+    parameters: dict = {}
+
 
 class NotificationDecision(BaseModel):
     notify: bool = Field(
@@ -37,18 +58,38 @@ class NotificationDecision(BaseModel):
             "Must be null when notify is false."
         ),
     )
+    action: Action | None = None
 
 class AutomotiveAgent:
     def __init__(self, llm: LLM):
         self.llm = llm
         self.is_active = True
         self.event_queue: asyncio.Queue[CarEvent] = asyncio.Queue()
-        self.user_event_queue: asyncio.Queue[CarEvent] = asyncio.Queue()
         self.is_listening = False
 
         self.skill_manager = SkillManager()
 
         self.recent_notifications: list[Any] = []
+
+        self.available_actions = """
+            NONE
+            - do nothing
+
+            INCREASE_TEMPERATURE
+            - increase cabin temperature
+
+            DECREASE_TEMPERATURE
+            - decrease cabin temperature
+
+            LOCK_DOORS
+            - lock vehicle doors
+
+            START_NAVIGATION
+            - start route guidance
+
+            FIND_REST_AREA
+            - search for a nearby rest area
+            """
 
         agent = Agent(
             role="In-Vehicle Personal Assistant",
@@ -87,10 +128,16 @@ class AutomotiveAgent:
                 Recent notifications:
                 {recent_notifications}
 
+                Available actions:
+                {available_actions}
+
                 Evaluate whether the current situation provides enough value or urgency
                 to interrupt the vehicle occupants now.
 
-                Reason contextually. Do not notify merely because a value changed.
+                Reason contextually. Do not notify merely because a value changed. 
+                
+                Take into consideration the previous context. If the same notification has been
+                recently delivered, it may not warrant another notification.
 
                 Consider:
                 - safety impact;
@@ -127,6 +174,9 @@ class AutomotiveAgent:
                 The spoken message will be passed directly to text-to-speech.
                 Never include analysis, scores, variable names or implementation details
                 inside spoken_message.
+
+                All requests directly provided by the user as user_input should be treated as 
+                high-priority and handled promptly.
                 """,
             expected_output=(
                 "A structured notification decision containing notify, urgency, "
@@ -154,15 +204,8 @@ class AutomotiveAgent:
                 continue
             try:
 
-                if hasattr(self, 'user_event_queue') and not self.user_event_queue.empty():
-                    user_input: CarEvent = await self.user_event_queue.get()
-                    await self._process_event(user_input)
-
                 if hasattr(self, 'event_queue') and not self.event_queue.empty():
-                    event: CarEvent = await self.event_queue.get()
-                    if event.event_name == "shutdown":
-                        self.is_active = False
-                        break
+                    event = await self.event_queue.get()
                     await self._process_event(event)
 
                 # check for proactive events
@@ -183,6 +226,7 @@ class AutomotiveAgent:
             "value": event.event_value,
             "user_input": event.user_input,
             "recent_notifications": self.recent_notifications,
+            "available_actions": self.available_actions,
         }
         result = await self.crew.kickoff_async(
             inputs=inputs,
@@ -197,3 +241,8 @@ class AutomotiveAgent:
             self.recent_notifications.append(decision.spoken_message)
             if len(self.recent_notifications) > 3:
                 self.recent_notifications.pop(0)
+        if decision.action:
+            logger.info(f">>> [action] {decision.action.action_type}")
+            # handle the action accordingly
+            if decision.action.action_type is not ActionType.NONE:
+                logger.info(f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}")

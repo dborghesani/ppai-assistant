@@ -1,9 +1,10 @@
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from PySide6.QtCore import QObject, Slot
 
-from assistant_manager import AssistantManager
+from config import ConfigAssistant
+from data.database_manager import DatabaseManager
 from skill_manager import SkillType
 from agents import AutomotiveAgent
 from events import CarEvent
@@ -14,25 +15,23 @@ class VehicleBridge(QObject):
         self,
         agent: AutomotiveAgent,
         loop: asyncio.AbstractEventLoop,
-        shutdown_event: asyncio.Event,
+        opt: ConfigAssistant,
+        database_manager: DatabaseManager,
         parent=None,
     ):
         super().__init__(parent)
-        self._agent = agent
-        self._event_queue = agent.event_queue
-        self._user_event_queue = agent.user_event_queue
-        self._loop = loop
-        self._shutdown_event = shutdown_event
-
-        self.assistant_manager = AssistantManager()
+        self.opt = opt
+        self.agent = agent
+        self.loop = loop
+        self.database_manager = database_manager
 
         # keep a queue of recent contexts for the assistant to use in its reasoning
         # 3 at most
         self.recent_contexts: Dict[SkillType,List[Any]] = {}
 
-
-    def _send_event(self, event_type: str, value: Any):
-        if not self._agent.is_listening:
+    """
+    def send_event(self, event_type: str, value: Any):
+        if not self.agent.is_listening:
             return
 
         skills = self.assistant_manager.get_skills_for_event(event_type)
@@ -46,13 +45,14 @@ class VehicleBridge(QObject):
             event = CarEvent(
                 skill=skill.value,
                 event_name=event_type,
-                event_value=value,
+                event_value=value if event_type != "user_input" else None,
                 context=context,
                 previous_contexts=self.recent_contexts.get(skill, []),
+                user_input=value if event_type == "user_input" else None,
             )
             asyncio.run_coroutine_threadsafe(
-                self._event_queue.put(event),
-                self._loop,
+                self.event_queue.put(event),
+                self.loop,
             )
 
             # update the recent contexts queue
@@ -61,135 +61,142 @@ class VehicleBridge(QObject):
             self.recent_contexts[skill].append(context)
             if len(self.recent_contexts[skill]) > 3:
                 self.recent_contexts[skill].pop(0)
+    """
 
-    def _send_user_input(self, text: str):
-        event = CarEvent(
-            skill=SkillType.CONVERSATION.value,
-            event_name="user_input",
-            event_value=None,
-            context={}, 
-            user_input=text
-        )
+    def get_dataclass_from_ui_event_type(self, ui_event_type: str) -> Tuple[str, str] | None:
+        # assume that the event_type corresponds to classname.classmember
+        parts = ui_event_type.split(".")
+        if len(parts) != 2:
+            return None
+        (class_name, member_name) = parts
+        return (class_name, member_name)
+        
+    def send_event(self, ui_event_type: str, value: Any):
+        if not self.agent.is_listening:
+            return
 
-        asyncio.run_coroutine_threadsafe(
-            self._user_event_queue.put(event),
-            self._loop,
-        )
+        dataclass_info = self.get_dataclass_from_ui_event_type(ui_event_type)
+        if dataclass_info is None:
+            return
 
-    @Slot(float)
-    def fatigueChanged(self, value):
-        self._send_event("fatigue_level", value)
-
-    @Slot(float)
-    def attentionChanged(self, value):
-        self._send_event("attention_level", value)
-
-    @Slot(str)
-    def vehicleStatusChanged(self, value):
-        self._send_event("vehicle_status", value)
-
-    @Slot(str)
-    def drivingBehaviorChanged(self, value):
-        self._send_event("driving_behavior", value)
-
-    @Slot(str)
-    def driverActivityChanged(self, value):
-        self._send_event("driver_activity", value)
-
-    @Slot(str)
-    def driverMoodChanged(self, value):
-        self._send_event("driver_mood", value)
-
-    @Slot(str)
-    def drivingGoalChanged(self, value):
-        self._send_event("driving_goal", value)
-
-    @Slot(str)
-    def trafficChanged(self, value):
-        self._send_event("traffic", value)
-
-    @Slot(str)
-    def roadTypeChanged(self, value):
-        self._send_event("road_type", value)
-
-    @Slot(str)
-    def timeOfDayChanged(self, value):
-        self._send_event("time_of_day", value)
-
-    @Slot(str)
-    def weatherChanged(self, value):
-        self._send_event("weather", value)
-
-    @Slot(float)
-    def peopleAroundChanged(self, value):
-        self._send_event(
-            "people_around",
-            int(value)
-        )
-
-    @Slot(float)
-    def speedChanged(self, value):
-        self._send_event(
-            "speed",
-            float(value)
-        )
-
-    @Slot(float)
-    def temperatureChanged(self, value):
-        self._send_event(
-            "internal_temperature",
-            float(value)
-        )
-
-    @Slot(float)
-    def externalTemperatureChanged(self, value):
-        self._send_event(
-            "external_temperature",
-            float(value)
-        )
-
-    @Slot(bool)
-    def engineChanged(self, value):
-        self._send_event(
-            "engine_running",
-            bool(value)
-        )
-
-    @Slot(bool)
-    def doorsChanged(self, value):
-        self._send_event(
-            "doors_unlocked",
-            bool(value)
-        )
-    
-    @Slot(str)
-    def detectedObjectsChanged(self, value):
-        self._send_event(
-            "detected_objects",
-            value
-        )
-
-    @Slot(bool)
-    def riskyAreaChanged(self, value):
-        self._send_event(
-            "risky_area",
-            bool(value)
-        )
+        dataclass_class_name, dataclass_member = dataclass_info
+        self.database_manager.write_measure(dataclass_class_name, dataclass_member, value)
 
     @Slot(str)
     def userInput(self, text: str):
         text = text.strip()
         if not text:
             return
-        self._send_user_input(text)
-
-    # app shutdown
-    @Slot()
-    def shutdown(self):
-        self._loop.call_soon_threadsafe(
-            self._shutdown_event.set,
-        )
+        self.send_event("user_input", text)
 
     @Slot(bool)
     def eventProcessingChanged(self, enabled: bool):
-        self._agent.is_listening = enabled
+        self.agent.is_listening = enabled
+
+    # DriverState
+
+    @Slot(float)
+    def fatigueChanged(self, value):
+        self.send_event("DriverState.fatigue_level", value)
+
+    @Slot(float)
+    def attentionChanged(self, value):
+        self.send_event("DriverState.attention_level", value)
+
+    @Slot(float)
+    def aggressivenessChanged(self, value):
+        self.send_event("DriverState.aggressiveness_level", value)
+
+    @Slot(str)
+    def driverActivityChanged(self, value):
+        self.send_event("DriverState.activity", value)
+
+    @Slot(str)
+    def driverMoodChanged(self, value):
+        self.send_event("DriverState.mood", value)
+
+    # EnvironmentState
+
+    @Slot(str)
+    def weatherChanged(self, value):
+        self.send_event("EnvironmentState.weather", value)
+
+    @Slot(str)
+    def roadConditionChanged(self, value):
+        self.send_event("EnvironmentState.road_condition", value)
+
+    @Slot(str)
+    def timeOfDayChanged(self, value):
+        self.send_event("EnvironmentState.time_of_day", value)
+
+    @Slot(str)
+    def roadTypeChanged(self, value):
+        self.send_event("EnvironmentState.road_type", value)
+
+    @Slot(float)
+    def externalTemperatureChanged(self, value):
+        self.send_event(
+            "EnvironmentState.external_temperature",
+            float(value)
+        )
+
+    @Slot(str)
+    def riskLevelChanged(self, value):
+        self.send_event("EnvironmentState.risk_level", value)
+
+    @Slot(str)
+    def visibilityChanged(self, value):
+        self.send_event("EnvironmentState.visibility", value)
+
+    @Slot(str)
+    def trafficChanged(self, value):
+        self.send_event("EnvironmentState.traffic", value)
+
+    # VehicleState
+
+    @Slot(float)
+    def temperatureChanged(self, value):
+        self.send_event(
+            "VehicleState.internal_temperature",
+            float(value)
+        )
+
+    @Slot(bool)
+    def engineChanged(self, value):
+        self.send_event(
+            "VehicleState.engine_running",
+            bool(value)
+        )
+
+    @Slot(bool)
+    def doorsChanged(self, value):
+        self.send_event(
+            "VehicleState.doors_unlocked",
+            bool(value)
+        )
+
+    # VehicleMotion
+
+    @Slot(float)
+    def speedChanged(self, value):
+        self.send_event(
+            "VehicleMotion.speed",
+            float(value)
+        )
+
+    # DetectedObjects
+
+    @Slot(float)
+    def peopleAroundChanged(self, value):
+        self.send_event(
+            "DetectedObjects.people_around",
+            int(value)
+        )
+
+    @Slot(float)
+    def carsAroundChanged(self, value):
+        self.send_event(
+            "DetectedObjects.cars_around",
+            int(value)
+        )
+

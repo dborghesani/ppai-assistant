@@ -53,20 +53,19 @@ ApplicationWindow {
         GroupBox {
             width: parent.width
             height: parent.height*0.3
-            title: "DriverState"
+            title: "Driver State"
 
             Row {
                 id: driverStateRow
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.margins: 10
                 height: parent.height
                 spacing: 10
 
                 GroupBox {
-                    width: parent.width*0.33
+                    width: parent.width/3-spacing
                     height: parent.height
-                    title: "activity"
+                    title: "Driver Activity"
 
                     Column {
                         anchors.fill: parent
@@ -76,7 +75,7 @@ ApplicationWindow {
 
                             onCheckedButtonChanged: {
                                 if (activityGroup.checkedButton) {
-                                    vehicleBridge.driverActivityChanged(activityGroup.checkedButton.text)
+                                    vehicleBridge.stringChanged("DriverPhysicalState", "activity", ""+activityGroup.checkedButton.text)
                                 }
                             }
                         }
@@ -116,50 +115,238 @@ ApplicationWindow {
 
                 GroupBox {
                     id: moodGroupBox
-                    title: "mood"
-                    width: parent.width*0.33
+                    title: "Driver Emotion State"
+                    width: parent.width/3-spacing
                     height: parent.height
 
                     Column {
                         anchors.fill: parent
+                        spacing: 10
 
-                        ButtonGroup {
-                            id: moodGroup
+                        Row {
+                            width: parent.width
+                            spacing: 10
 
-                            onCheckedButtonChanged: {
-                                if (moodGroup.checkedButton) {
-                                    vehicleBridge.driverMoodChanged(moodGroup.checkedButton.text)
+                            Label {
+                                text: "Angry"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: angrySlider
+                                width: parent.width*0.5
+
+                                from: 0
+                                to: 1
+                                value: 0
+
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        vehicleBridge.floatChanged("DriverEmotionState", "angry", value)
+                                    }
                                 }
+
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: angrySlider.value.toFixed(2)
                             }
                         }
-                        RadioButton {
-                            text: "Neutral"
-                            ButtonGroup.group: moodGroup
-                            checked: true
+
+                        Row {
+                            width: parent.width
+                            spacing: 10
+
+                            Label {
+                                text: "Disgust"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: disgustSlider
+                                width: parent.width*0.5
+
+                                from: 0
+                                to: 1
+                                value: 0
+
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        vehicleBridge.floatChanged("DriverEmotionState", "disgust", value)
+                                    }
+                                }
+
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: disgustSlider.value.toFixed(2)
+                            }
                         }
-                        RadioButton {
-                            text: "Happy"
-                            ButtonGroup.group: moodGroup
+
+                        Row {
+                            width: parent.width
+                            spacing: 10
+
+                            Label {
+                                text: "Fear"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: fearSlider
+                                width: parent.width*0.5
+
+                                from: 0
+                                to: 1
+                                value: 0
+
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        vehicleBridge.floatChanged("DriverEmotionState", "fear", value)
+                                    }
+                                }
+
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: fearSlider.value.toFixed(2)
+                            }
                         }
-                        RadioButton {
-                            text: "Sad"
-                            ButtonGroup.group: moodGroup
+
+                        Row {
+                            width: parent.width
+                            spacing: 10
+
+                            Label {
+                                text: "Happy"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: happySlider
+                                width: parent.width*0.5
+
+                                from: 0
+                                to: 1
+                                value: 0
+
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        vehicleBridge.floatChanged("DriverEmotionState", "happy", value)
+                                    }
+                                }
+
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: happySlider.value.toFixed(2)
+                            }
                         }
-                        RadioButton {
-                            text: "Worried"
-                            ButtonGroup.group: moodGroup
+                        
+                        Row {
+                            width: parent.width
+                            spacing: 10
+
+                            Label {
+                                text: "Sad"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: sadSlider
+                                width: parent.width*0.5
+
+                                from: 0
+                                to: 1
+                                value: 0
+
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        vehicleBridge.floatChanged("DriverEmotionState", "sad", value)
+                                    }
+                                }
+
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: sadSlider.value.toFixed(2)
+                            }
                         }
-                        RadioButton {
-                            text: "Scared"
-                            ButtonGroup.group: moodGroup
+
+                        Row {
+                            width: parent.width
+                            spacing: 10
+
+                            Label {
+                                text: "Surprise"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: surpriseSlider
+                                width: parent.width*0.5
+
+                                from: 0
+                                to: 1
+                                value: 0
+
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        vehicleBridge.floatChanged("DriverEmotionState", "surprise", value)
+                                    }
+                                }
+
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: surpriseSlider.value.toFixed(2)
+                            }
                         }
+
+                        Row {
+                            width: parent.width
+                            spacing: 10
+
+                            Label {
+                                text: "Neutral"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: neutralSlider
+                                width: parent.width*0.5
+
+                                from: 0
+                                to: 1
+                                value: 1
+
+                                onPressedChanged: {
+                                    if (!pressed) {
+                                        vehicleBridge.floatChanged("DriverEmotionState", "neutral", value)
+                                    }
+                                }
+
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: neutralSlider.value.toFixed(2)
+                            }
+                        }
+                    
                     }
                 }
 
                 GroupBox {
-                    width: parent.width*0.33
+                    width: parent.width/3-spacing
                     height: parent.height
-                    title: " "
+                    title: "Other"
                     
                     Column {
                         width: parent.width
@@ -177,7 +364,7 @@ ApplicationWindow {
 
                             Slider {
                                 id: fatigueSlider
-                                width: parent.width*0.4
+                                width: parent.width*0.5
 
                                 from: 0
                                 to: 1
@@ -185,14 +372,14 @@ ApplicationWindow {
 
                                 onPressedChanged: {
                                     if (!pressed) {
-                                        vehicleBridge.fatigueChanged(value)
+                                        vehicleBridge.floatChanged("DriverPhysicalState", "fatigue_level", value)
                                     }
                                 }
 
                             }
 
                             Label {
-                                width: parent.width*0.3
+                                width: parent.width*0.2
                                 text: fatigueSlider.value.toFixed(2)
                             }
                         }
@@ -208,7 +395,7 @@ ApplicationWindow {
 
                             Slider {
                                 id: attentionSlider
-                                width: parent.width*0.4
+                                width: parent.width*0.5
 
                                 from: 0
                                 to: 1
@@ -216,13 +403,13 @@ ApplicationWindow {
 
                                 onPressedChanged: {
                                     if (!pressed) {
-                                        vehicleBridge.attentionChanged(value)
+                                        vehicleBridge.floatChanged("DriverPhysicalState", "attention_level", value)
                                     }
                                 }
                             }
 
                             Label {
-                                width: parent.width*0.3
+                                width: parent.width*0.2
                                 text: attentionSlider.value.toFixed(2)
                             }
                         }
@@ -238,20 +425,20 @@ ApplicationWindow {
 
                             Slider {
                                 id: aggressivenessSlider
-                                width: parent.width*0.4
+                                width: parent.width*0.5
                                 from: 0
                                 to: 1
                                 value: 0
 
                                 onPressedChanged: {
                                     if (!pressed) {
-                                        vehicleBridge.aggressivenessChanged(value)
+                                        vehicleBridge.floatChanged("DriverDrivingStyle", "aggressiveness_level", value)
                                     }
                                 }
                             }
 
                             Label {
-                                width: parent.width*0.3
+                                width: parent.width*0.2
                                 text: aggressivenessSlider.value.toFixed(2)
                             }
                         }
@@ -263,22 +450,21 @@ ApplicationWindow {
         GroupBox {
             width: parent.width
             height: parent.height*0.3
-            title: "EnvironmentState"
+            title: "Environmental State"
 
             Row {
                 id: environmentStateRow
                 anchors.left: parent.left
                 anchors.right: parent.right
-                anchors.margins: 10
                 height: parent.height
                 spacing: 10
 
-                property real groupColSizePerc: 0.12
+                property real groupColSizePerc: 0.11
 
                 GroupBox {
-                    width: parent.width*environmentStateRow.groupColSizePerc
+                    width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
                     height: parent.height
-                    title: "weather"
+                    title: "Weather"
 
                     Column {
                         anchors.fill: parent
@@ -288,7 +474,7 @@ ApplicationWindow {
 
                             onCheckedButtonChanged: {
                                 if (weatherGroup.checkedButton) {
-                                    vehicleBridge.weatherChanged(weatherGroup.checkedButton.text)
+                                    vehicleBridge.stringChanged("EnvironmentState","weather", weatherGroup.checkedButton.text)
                                 }
                             }
                         }
@@ -318,9 +504,9 @@ ApplicationWindow {
                 }
 
                 GroupBox {
-                    width: parent.width*environmentStateRow.groupColSizePerc
+                    width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
                     height: parent.height
-                    title: "traffic"
+                    title: "Traffic"
 
                     Column {
                         anchors.fill: parent
@@ -330,7 +516,7 @@ ApplicationWindow {
 
                             onCheckedButtonChanged: {
                                 if (trafficGroup.checkedButton) {
-                                    vehicleBridge.trafficChanged(trafficGroup.checkedButton.text)
+                                    vehicleBridge.stringChanged("EnvironmentState","traffic", trafficGroup.checkedButton.text)
                                 }
                             }
                         }
@@ -352,9 +538,9 @@ ApplicationWindow {
                 }
 
                 GroupBox {
-                    width: parent.width*environmentStateRow.groupColSizePerc
+                    width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
                     height: parent.height
-                    title: "road type"
+                    title: "Road Type"
 
                     Column {
                         anchors.fill: parent
@@ -364,7 +550,7 @@ ApplicationWindow {
 
                             onCheckedButtonChanged: {
                                 if (roadTypeGroup.checkedButton) {
-                                    vehicleBridge.roadTypeChanged(roadTypeGroup.checkedButton.text)
+                                    vehicleBridge.stringChanged("EnvironmentState","road_type", roadTypeGroup.checkedButton.text)
                                 }
                             }
                         }
@@ -390,9 +576,9 @@ ApplicationWindow {
                 }
 
                 GroupBox {
-                    width: parent.width*environmentStateRow.groupColSizePerc
+                    width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
                     height: parent.height
-                    title: "risk level"
+                    title: "Risk Level"
 
                     Column {
                         anchors.fill: parent
@@ -402,7 +588,7 @@ ApplicationWindow {
 
                             onCheckedButtonChanged: {
                                 if (riskLevelGroup.checkedButton) {
-                                    vehicleBridge.riskLevelChanged(riskLevelGroup.checkedButton.text)
+                                    vehicleBridge.stringChanged("EnvironmentState","risk_level", riskLevelGroup.checkedButton.text)
                                 }
                             }
                         }
@@ -426,7 +612,7 @@ ApplicationWindow {
                 GroupBox {
                     id: timeOfDayGroupBox
                     title: "Time of Day"
-                    width: parent.width*environmentStateRow.groupColSizePerc
+                    width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
                     height: parent.height
 
                     Column {
@@ -437,7 +623,7 @@ ApplicationWindow {
 
                             onCheckedButtonChanged: {
                                 if (timeOfDayGroup.checkedButton) {
-                                    vehicleBridge.timeOfDayChanged(timeOfDayGroup.checkedButton.text)
+                                    vehicleBridge.stringChanged("EnvironmentState","time_of_day", timeOfDayGroup.checkedButton.text)
                                 }
                             }
                         }
@@ -465,8 +651,9 @@ ApplicationWindow {
                 GroupBox {
                     id: roadCondition
                     title: "Road Condition"
-                    width: parent.width*environmentStateRow.groupColSizePerc
+                    width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
                     height: parent.height
+                    
                     Column {
                         anchors.fill: parent
 
@@ -475,7 +662,7 @@ ApplicationWindow {
 
                             onCheckedButtonChanged: {
                                 if (roadConditionGroup.checkedButton) {
-                                    vehicleBridge.roadConditionChanged(roadConditionGroup.checkedButton.text)
+                                    vehicleBridge.stringChanged("EnvironmentState","road_condition", roadConditionGroup.checkedButton.text)
                                 }
                             }
                         }
@@ -509,9 +696,9 @@ ApplicationWindow {
                 }
                 
                 GroupBox {
-                    width: parent.width*0.23
+                    width: parent.width*(1.0-environmentStateRow.groupColSizePerc*6)-environmentStateRow.spacing
                     height: parent.height
-                    title: " "
+                    title: "Other"
                     
                     Column {
                         width: parent.width
@@ -529,7 +716,7 @@ ApplicationWindow {
 
                             Slider {
                                 id: visibilitySlider
-                                width: parent.width*0.4
+                                width: parent.width*0.5
 
                                 from: 0
                                 to: 1
@@ -537,14 +724,14 @@ ApplicationWindow {
 
                                 onPressedChanged: {
                                     if (!pressed) {
-                                        vehicleBridge.visibilityChanged(value)
+                                        vehicleBridge.floatChanged("EnvironmentState","visibility", value)
                                     }
                                 }
 
                             }
 
                             Label {
-                                width: parent.width*0.3
+                                width: parent.width*0.2
                                 text: visibilitySlider.value + " %"
                             }
                         }
@@ -554,13 +741,13 @@ ApplicationWindow {
                             spacing: 10
 
                             Label {
-                                text: "Temperature"
+                                text: "Temperature (extl)"
                                 width: parent.width*0.3
                             }
 
                             Slider {
                                 id: externalTemperatureSlider
-                                width: parent.width*0.4
+                                width: parent.width*0.5
 
                                 from: 10
                                 to: 40
@@ -570,13 +757,13 @@ ApplicationWindow {
 
                                 onPressedChanged: {
                                     if (!pressed) {
-                                        vehicleBridge.externalTemperatureChanged(value)
+                                        vehicleBridge.floatChanged("EnvironmentState","external_temperature", value)
                                     }
                                 }
                             }
 
                             Label {
-                                width: parent.width*0.3
+                                width: parent.width*0.2
                                 text: externalTemperatureSlider.value.toFixed(1) + " °C"
                             }
                         }
@@ -592,15 +779,14 @@ ApplicationWindow {
             spacing: 10
 
             GroupBox {
-                width: parent.width*0.33
+                width: parent.width/3-spacing
                 height: parent.height
-                title: "VehicleState"
+                title: "Vehicle State"
 
                 Column {
                     id: vehicleStateRow
-                    anchors.left: parent.left
-                    anchors.right: parent.right
                     anchors.margins: 10
+                    width: parent.width
                     height: parent.height
                     spacing: 10
 
@@ -619,7 +805,7 @@ ApplicationWindow {
                             text: checked ? "ON" : "OFF"
 
                             onCheckedChanged: {
-                                vehicleBridge.engineChanged(checked)
+                                vehicleBridge.boolChanged("VehicleState", "engine_running", checked)
                             }
                         }
 
@@ -640,7 +826,7 @@ ApplicationWindow {
                             text: checked ? "Unlocked" : "Locked"
 
                             onCheckedChanged: {
-                                vehicleBridge.doorsChanged(checked)
+                                vehicleBridge.boolChanged("VehicleState", "doors_unlocked", checked)
                             }
                         }
                     }
@@ -650,14 +836,14 @@ ApplicationWindow {
                         spacing: 10
 
                         Label {
-                            text: "Temperature"
+                            text: "Temperature (intl)"
                             width: parent.width*0.3
                         }
 
                         Slider {
 
                             id: tempSlider
-                            width: parent.width*0.4
+                            width: parent.width*0.5
 
                             from: 10
                             to: 40
@@ -667,13 +853,13 @@ ApplicationWindow {
 
                             onPressedChanged: {
                                 if (!pressed) {
-                                    vehicleBridge.temperatureChanged(value)
+                                    vehicleBridge.floatChanged("VehicleState", "internal_temperature", value)
                                 }
                             }
                         }
 
                         Label {
-                            width: parent.width*0.3
+                            width: parent.width*0.2
                             text: tempSlider.value.toFixed(1) + " °C"
                         }
                     }
@@ -682,19 +868,19 @@ ApplicationWindow {
             }
 
             GroupBox {
-                width: parent.width*0.33
+                width: parent.width/3-spacing
                 height: parent.height
                 title: "VehicleMotion"
 
                 Column {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
                     anchors.margins: 10
                     height: parent.height
+                    width: parent.width
                     spacing: 10
 
                     Row {
                         width: parent.width
+                        height: parent.height
                         spacing: 10
 
                         Label {
@@ -705,7 +891,7 @@ ApplicationWindow {
                         Slider {
 
                             id: speedSlider
-                            width: parent.width*0.4
+                            width: parent.width*0.5
 
                             from: 0
                             to: 200
@@ -715,13 +901,13 @@ ApplicationWindow {
 
                             onPressedChanged: {
                                 if (!pressed) {
-                                    vehicleBridge.speedChanged(value)
+                                    vehicleBridge.floatChanged("VehicleMotion", "speed", value)
                                 }
                             }
                         }
 
                         Label {
-                            width: parent.width*0.3
+                            width: parent.width*0.2
                             text: speedSlider.value.toFixed(1) + " km/h"
                         }
                     }
@@ -730,13 +916,12 @@ ApplicationWindow {
             }
 
             GroupBox {
-                width: parent.width*0.33
+                width: parent.width/3-spacing
                 height: parent.height
                 title: "DetectedObjects"
 
                 Column {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
+                    width: parent.width
                     anchors.margins: 10
                     height: parent.height
                     spacing: 10
@@ -745,8 +930,14 @@ ApplicationWindow {
                         width: parent.width
                         spacing: 10
 
+                        Text {
+                            text: "People Around"
+                            width: parent.width*0.3
+                        }
+
                         Slider {
                             id: peopleSlider
+                            width: parent.width*0.5
                             from: 0
                             to: 10
                             value: 0
@@ -754,12 +945,13 @@ ApplicationWindow {
                             snapMode: Slider.SnapAlways
                             onPressedChanged: {
                                 if (!pressed) {
-                                    vehicleBridge.peopleAroundChanged(value)
+                                    vehicleBridge.intChanged("DetectedObjects", "people_around", value)
                                 }
                             }
                         }
 
                         Label {
+                            width: parent.width*0.2
                             text: Math.round(peopleSlider.value)
                         }
                     }
@@ -768,8 +960,14 @@ ApplicationWindow {
                         width: parent.width
                         spacing: 10
 
+                        Text {
+                            text: "Vehicles Around"
+                            width: parent.width*0.3
+                        }
+
                         Slider {
-                            id: carsSlider
+                            id: vehicleSlider
+                            width: parent.width*0.5
                             from: 0
                             to: 10
                             value: 0
@@ -777,20 +975,18 @@ ApplicationWindow {
                             snapMode: Slider.SnapAlways
                             onPressedChanged: {
                                 if (!pressed) {
-                                    vehicleBridge.carsAroundChanged(value)
+                                    vehicleBridge.intChanged("DetectedObjects", "vehicles_around", value)
                                 }
                             }
                         }
 
                         Label {
-                            text: Math.round(carsSlider.value)
-                        }
-                        
+                            width: parent.width*0.2
+                            text: Math.round(vehicleSlider.value)
+                        }   
                     }
-
                 }
             }
-
         }
         
         GroupBox {
@@ -804,6 +1000,7 @@ ApplicationWindow {
 
                 width: parent.width
                 height: parent.height
+                spacing: 10
 
                 TextArea {
                     id: inputField
@@ -820,7 +1017,7 @@ ApplicationWindow {
 
                 Button {
                     text: "Send"
-                    width: parent.width*0.1
+                    width: parent.width*0.1-spacing
                     height: parent.height
 
                     onClicked: {

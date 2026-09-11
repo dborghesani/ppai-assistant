@@ -1,53 +1,61 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 import quaternion
+
+
+def knowledge_field() -> Any:
+    return field(default=None, metadata={"knowledge": True})
+
 
 @dataclass
 class GPSData:
-    latitude: float  # degrees
-    latitudeHemisphere: str  # N or S
-    longitude: float  # degrees
-    longitudeHemisphere: str  # E or W
-    utcDate: str  # format: DDMMYYYY
-    utcTime: int  # format HHMMSS in UTC time
-    speed: float  # km/h
-    course: float  # degrees
-    magneticVariation: float  # unit unknown
+    latitude: float | None = None  # degrees
+    latitudeHemisphere: str | None = None  # N or S
+    longitude: float | None = None  # degrees
+    longitudeHemisphere: str | None = None  # E or W
+    utcDate: str | None = None  # format: DDMMYYYY
+    utcTime: int | None = None  # format HHMMSS in UTC time
+    speed: float | None = None  # km/h
+    course: float | None = None  # degrees
+    magneticVariation: float | None = None  # unit unknown
 
 @dataclass
 class GPSIMUData:
-    latitude: float  # degrees
-    latitudeHemisphere: str  # N or S
-    longitude: float  # degrees
-    longitudeHemisphere: str  # E or W
-    utcDate: str  # format: DDMMYYYY
-    utcTime: int  # format HHMMSS in UTC time
-    altitude: float  # m, GPS altitude
-    speed: float  # km/h
-    course: float  # degrees
-    magnetic_field: dict  # x, y, z (unit unknown)
-    pressure_pa: float  # Pa
-    altitude_m: float  # m, barometric altitude
-    quat: quaternion  # q0, q1, q2, q3
+    latitude: float | None = None  # degrees
+    latitudeHemisphere: str | None = None  # N or S
+    longitude: float | None = None  # degrees
+    longitudeHemisphere: str | None = None  # E or W
+    utcDate: str | None = None  # format: DDMMYYYY
+    utcTime: int | None = None  # format HHMMSS in UTC time
+    altitude: float | None = None  # m, GPS altitude
+    speed: float | None = None  # km/h
+    course: float | None = None  # degrees
+    magnetic_field_x: float | None = None  # x, y, z (unit unknown)
+    magnetic_field_y: float | None = None  # x, y, z (unit unknown)
+    magnetic_field_z: float | None = None  # x, y, z (unit unknown)
+    pressure_pa: float | None = None  # Pa
+    altitude_m: float | None = None  # m, barometric altitude
+    quat: quaternion.quaternion | None = None  # q0, q1, q2, q3
 
 @dataclass 
 class GPSIMUState:
-    satellitesCount: int
-    pdop: float
-    hdop: float
-    vdop: float
+    satellitesCount: int | None = None
+    pdop: float | None = None
+    hdop: float | None = None
+    vdop: float | None = None
 
 @dataclass
 class VehicleMotion:
-    speed: float | None = None  # km/h 
+    speed: float | None = knowledge_field()  # km/h, aggregated
     wheel_speed_front_left: float | None = None  # km/h
     wheel_speed_front_right: float | None = None  # km/h
     wheel_speed_rear_left: float | None = None  # km/h
     wheel_speed_rear_right: float | None = None  # km/h
-    yaw_speed: float | None = None  # deg/s
-    acceleration_longitudinal: float | None = None  # m/s^2
-    acceleration_lateral: float | None = None  # m/s^2
-    steering_angle: float | None = None  # degrees
-    engine_rpm: float | None = None  # rpm
+    yaw_speed: float | None = knowledge_field()  # deg/s
+    acceleration_longitudinal: float | None = knowledge_field()  # m/s^2
+    acceleration_lateral: float | None = knowledge_field()  # m/s^2
+    steering_angle: float | None = knowledge_field()  # degrees
+    engine_rpm: float | None = knowledge_field()  # rpm
     # from GPSIMU:
     acceleration_g_x: float | None = None  # g
     acceleration_g_y: float | None = None  # g
@@ -61,30 +69,30 @@ class VehicleMotion:
 
 @dataclass
 class VehicleState:
-    door_open_front_left: bool | None = None
-    door_open_front_right: bool | None = None
-    door_open_rear_left: bool | None = None
-    door_open_rear_right: bool | None = None
-    doors_unlocked: bool | None = None
-    lights_on_sidelights: bool | None = None
-    lights_on_low_beams: bool | None = None
-    lights_on_high_beams: bool | None = None
-    lights_on_fog_lights: bool | None = None
-    turn_signal: str | None = None  # ["Off", "Right", "Left", "Both"]
-    trunk_open: bool | None = None
-    lane_keep_assist: str | None = None  # ["Unavailable", "Unselected", "Selected", "Authorized", "Active", "Defect", "Collision_Risk_not_used_during_LPA"]
-    blind_spot_monitor: bool | None = None
-    engine_on: bool | None = None
-    internal_temperature: float | None = None  # °C
+    door_open_front_left: bool | None = knowledge_field()
+    door_open_front_right: bool | None = knowledge_field()
+    door_open_rear_left: bool | None = knowledge_field()
+    door_open_rear_right: bool | None = knowledge_field()
+    doors_unlocked: bool | None = knowledge_field()
+    lights_on_sidelights: bool | None = knowledge_field()
+    lights_on_low_beams: bool | None = knowledge_field()
+    lights_on_high_beams: bool | None = knowledge_field()
+    lights_on_fog_lights: bool | None = knowledge_field()
+    turn_signal: str | None = knowledge_field()  # ["Off", "Right", "Left", "Both"]
+    trunk_open: bool | None = knowledge_field()
+    lane_keep_assist: str | None = knowledge_field()  # ["Unavailable", "Unselected", "Selected", "Authorized", "Active", "Defect", "Collision_Risk_not_used_during_LPA"]
+    blind_spot_monitor: bool | None = knowledge_field()
+    engine_on: bool | None = knowledge_field()
+    internal_temperature: float | None = knowledge_field()  # °C
 
 @dataclass
 class LaneTrace:
     distance: float | None = None  # m
     heading_angle: float | None = None  # degrees
-    c0: float | None = None  # same value as distance
-    c1: float | None = None  # heading_angle converted to radians
-    c2: float | None = None
-    c3: float | None = None
+    C0: float | None = None  # same value as distance
+    C1: float | None = None  # heading_angle converted to radians
+    C2: float | None = None
+    C3: float | None = None
     type: str | None = None  # ["Undetermined", "Solid line", "Dotted line", "Double line", "Botts Dots", "Road Edge", "Barrier or curb", "Invalid"]
     confidence: int | None = None  # between 0-10
     view_range_start: float | None = None  # m
@@ -154,39 +162,60 @@ class RadarObject:
     prob_static: float | None = None  # %
     prob_instant_movement: float | None = None  # %
     prob_previous_movement: float | None = None  # %
+    lca_status: str | None = None
 
 @dataclass
 class TrafficSign:
-    speed_limit: float | None = None  # km/h
     type_id: int | None = None  # unknown map
     x_position: float | None = None  # m
     y_position: float | None = None  # m
     subsign_id: str | None = None  # ["None", "Unknown", "Time", "Distance Arrow", "Distance", "Remind"]
 
 @dataclass
-class DetectedObjects:
-    vision_objects: list[VisionObject] | None = None
-    radar: list[RadarObject] | None = None
-    traffic_signs: list[TrafficSign] | None = None  
-    people_around: int | None = None
-    dangerous_objects_around: int | None = None
+class TrafficSigns:
+    speed_limit: float | None = None  # km/h
+    sign_1: TrafficSign | None = field(default_factory=TrafficSign)
+    sign_2: TrafficSign | None = field(default_factory=TrafficSign)
+    sign_3: TrafficSign | None = field(default_factory=TrafficSign)
+    sign_4: TrafficSign | None = field(default_factory=TrafficSign)
 
 @dataclass
-class DriverState:
-    aggressiveness_level: float | None = None  # [0.0, 1.0] [safe, aggressive]
-    activity: str | None = None  # ["Idle", "Driving", "Talking", "Using Phone", "Eating", "Sleeping"]
-    attention_level: float | None = None  # [0.0, 1.0]
-    fatigue_level: float | None = None  # [0.0, 1.0]
-    mood: str | None = None  # ["Neutral", "Happy", "Sad", "Angry", "Tired"]
+class DetectedObjects:
+    vision_objects: list[VisionObject] | None = field(default_factory=list)
+    radar_objects: list[RadarObject] | None = field(default_factory=list)
+    traffic_signs: TrafficSigns | None = field(default_factory=TrafficSigns)
+    people_around: int | None = knowledge_field()
+    vehicles_around: int | None = knowledge_field()
+    dangerous_objects_around: int | None = knowledge_field()
+
+@dataclass
+class DriverPhysicalState:
+    activity: str | None = knowledge_field()  # ["Idle", "Driving", "Talking", "Using Phone", "Eating", "Sleeping"]
+    attention_level: float | None = knowledge_field()  # [0.0, 1.0]
+    fatigue_level: float | None = knowledge_field()  # [0.0, 1.0]
+
+@dataclass
+class DriverEmotionState:
+    angry: float | None = knowledge_field()
+    disgust: float | None = knowledge_field()
+    fear: float | None = knowledge_field()
+    happy: float | None = knowledge_field()
+    sad: float | None = knowledge_field()
+    surprise: float | None = knowledge_field()
+    neutral: float | None = knowledge_field()
+
+@dataclass
+class DriverDrivingStyle:
+    aggressiveness_level: float | None = knowledge_field()  # [0.0, 1.0] [safe, aggressive]
     
 @dataclass
 class EnvironmentState:
-    external_temperature: float | None = None  # °C
-    weather: str | None = None  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
-    time_of_day: str | None = None  # ["Morning", "Afternoon", "Evening", "Night"]
-    road_condition: str | None = None  # ["Dry", "Wet", "Icy", "Snowy", "Gravel"]
-    road_type: str | None = None  # ["Urban", "Rural", "Highway", "Residential"]
-    risk_level: str | None = None  # ["Low", "Medium", "High"]
-    visibility: str | None = None  # ["Clear", "Moderate", "Poor"]
-    traffic: str | None = None  # ["No traffic", "Light", "Heavy"]
+    external_temperature: float | None = knowledge_field()  # °C
+    weather: str | None = knowledge_field()  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
+    time_of_day: str | None = knowledge_field()  # ["Morning", "Afternoon", "Evening", "Night"]
+    road_condition: str | None = knowledge_field()  # ["Dry", "Wet", "Icy", "Snowy", "Gravel"]
+    road_type: str | None = knowledge_field()  # ["Urban", "Rural", "Highway", "Residential"]
+    risk_level: str | None = knowledge_field()  # ["Low", "Medium", "High"]
+    visibility: str | None = knowledge_field()  # ["Clear", "Moderate", "Poor"]
+    traffic: str | None = knowledge_field()  # ["No traffic", "Light", "Heavy"]
 

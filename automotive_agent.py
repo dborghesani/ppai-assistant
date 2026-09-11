@@ -2,7 +2,7 @@ import asyncio
 from typing import Any
 
 import structlog
-from skill_manager import SkillManager
+from skill_manager import SkillManager, SkillType
 from events import CarEvent
 from crewai import Agent, Task, Crew
 from crewai.process import Process
@@ -111,19 +111,25 @@ class AutomotiveAgent:
 
         task = Task(
             description="""
-                You are the notification decision component of an in-vehicle assistant.
+                You are the notification gate of an in-vehicle assistant.
 
                 Active skill:
                 {skill}
 
+                Skill instructions:
+                {skill_instructions}
+
                 Triggering event:
                 {event}
 
-                Previous states:
-                {previous_contexts}
+                Values that triggered this evaluation:
+                {value}
 
-                Current state:
+                Current extracted knowledge:
                 {context}
+
+                Direct user request, if any:
+                {user_input}
 
                 Recent notifications:
                 {recent_notifications}
@@ -131,52 +137,49 @@ class AutomotiveAgent:
                 Available actions:
                 {available_actions}
 
-                Evaluate whether the current situation provides enough value or urgency
-                to interrupt the vehicle occupants now.
+                                Default to silence. A knowledge update requests an evaluation, not a spoken
+                                response. Normal, safe, stable, informational or non-actionable conditions
+                                must produce notify=false.
 
-                Reason contextually. Do not notify merely because a value changed. 
-                
-                Take into consideration the previous context. If the same notification has been
-                recently delivered, it may not warrant another notification.
+                                Set notify=true only when at least one condition applies:
+                                - the user made a direct request that requires a response;
+                                - there is an immediate or developing safety risk;
+                                - a vehicle condition requires timely attention;
+                                - the occupant can take a useful, time-sensitive action now.
 
-                Consider:
-                - safety impact;
-                - urgency;
-                - magnitude and direction of the change;
-                - interaction between multiple context variables;
-                - whether the information is actionable;
-                - whether the user already knows it;
-                - whether a similar notification was recently delivered;
-                - whether speaking could unnecessarily distract the driver.
+                                Do not notify merely because a value changed, to confirm normal operation,
+                                to report that no problem was detected, or to say that no action is required.
+                                Routine controls such as turn signals, lights and normal engine state should
+                                remain silent unless their duration or surrounding context indicates a concrete
+                                risk. Stable or optimal conditions should remain silent. Do not repeat a recent
+                                notification unless the situation materially changed.
 
-                Examples of contextual reasoning:
-                - Moderate fatigue alone may not justify an interruption.
-                - Moderate fatigue combined with low attention, nighttime driving and
-                highway speed may justify an immediate notification.
-                - Rain alone may not justify a notification.
-                - Rain combined with high speed and poor attention may justify one.
-                - An unlocked door while parked may require a notification.
-                - The same state repeatedly received without meaningful change should
-                normally not generate another notification.
+                                Before setting notify=true, identify the concrete risk, required attention or
+                                useful immediate action that justifies interrupting the occupant. If none exists,
+                                set notify=false.
 
-                If notification is appropriate:
-                - set notify to true;
-                - assign an urgency level;
-                - provide a short internal reason;
-                - generate one concise message addressed directly to the user.
+                When notifying, set notify to true, choose an urgency, give a brief internal
+                reason, and produce one concise spoken message. When not notifying, set notify
+                to false, urgency to none, and spoken_message to null.
 
-                If notification is not appropriate:
-                - set notify to false;
-                - set urgency to none;
-                - provide a short internal reason;
-                - set spoken_message to null.
+                                Consistency requirements:
+                                - notify=false requires urgency=none and spoken_message=null;
+                                - notify=true requires urgency other than none and a concrete justification;
+                                - action_type=none with notify=true is valid only for a warning that still
+                                    requires the occupant's attention;
+                                - never notify with a message meaning that everything is normal, no urgent
+                                    condition exists, or no action is recommended.
 
-                The spoken message will be passed directly to text-to-speech.
-                Never include analysis, scores, variable names or implementation details
-                inside spoken_message.
+                                Negative example: a turn signal active for ten seconds while all other
+                                conditions are normal results in notify=false, urgency=none and no spoken
+                                message. Positive example: a turn signal that remains active for several
+                                minutes after a completed turn may justify a low-urgency reminder.
 
-                All requests directly provided by the user as user_input should be treated as 
-                high-priority and handled promptly.
+                The spoken message is sent directly to text-to-speech. Address the occupant
+                naturally; do not include analysis, scores, variable names, or implementation
+                details.
+
+                Requests provided as user_input are high-priority and should be handled promptly.
                 """,
             expected_output=(
                 "A structured notification decision containing notify, urgency, "
@@ -218,15 +221,20 @@ class AutomotiveAgent:
     async def _process_event(self, event: CarEvent):
         logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         logger.info(">>> generating...")
+        try:
+            skill_instructions = self.skill_manager.get_skill(SkillType(event.skill))
+        except ValueError:
+            skill_instructions = "No additional skill-specific instructions."
+
         inputs = {
             "skill": event.skill,
-            "context": event.context,
-            "previous_contexts": event.previous_contexts,
+            "skill_instructions": skill_instructions,
             "event": event.event_name,
+            "context": event.context,
             "value": event.event_value,
-            "user_input": event.user_input,
             "recent_notifications": self.recent_notifications,
             "available_actions": self.available_actions,
+            "user_input": event.user_input,
         }
         result = await self.crew.kickoff_async(
             inputs=inputs,

@@ -3,8 +3,18 @@ from typing import Any
 import quaternion
 
 
-def knowledge_field() -> Any:
-    return field(default=None, metadata={"knowledge": True})
+def knowledge_field(
+    *,
+    change_threshold: float | None = None,
+    change_ratio: float | None = None,
+    notify_on_trend_change: bool = True,
+) -> Any:
+    return field(default=None, metadata={
+        "knowledge": True,
+        "change_threshold": change_threshold,
+        "change_ratio": change_ratio,
+        "notify_on_trend_change": notify_on_trend_change,
+    })
 
 
 @dataclass
@@ -46,16 +56,16 @@ class GPSIMUState:
 
 @dataclass
 class VehicleMotion:
-    speed: float | None = knowledge_field()  # km/h, aggregated
+    speed: float | None = knowledge_field(change_threshold=5.0)  # km/h, aggregated
     wheel_speed_front_left: float | None = None  # km/h
     wheel_speed_front_right: float | None = None  # km/h
     wheel_speed_rear_left: float | None = None  # km/h
     wheel_speed_rear_right: float | None = None  # km/h
-    yaw_speed: float | None = knowledge_field()  # deg/s
-    acceleration_longitudinal: float | None = knowledge_field()  # m/s^2
-    acceleration_lateral: float | None = knowledge_field()  # m/s^2
-    steering_angle: float | None = knowledge_field()  # degrees
-    engine_rpm: float | None = knowledge_field()  # rpm
+    yaw_speed: float | None = None  # deg/s
+    acceleration_longitudinal: float | None = knowledge_field(change_threshold=0.5)  # m/s^2
+    acceleration_lateral: float | None = knowledge_field(change_threshold=0.5)  # m/s^2
+    steering_angle: float | None = knowledge_field(change_threshold=5.0)  # degrees
+    engine_rpm: float | None = knowledge_field(change_threshold=250.0)  # rpm
     # from GPSIMU:
     acceleration_g_x: float | None = None  # g
     acceleration_g_y: float | None = None  # g
@@ -83,7 +93,10 @@ class VehicleState:
     lane_keep_assist: str | None = knowledge_field()  # ["Unavailable", "Unselected", "Selected", "Authorized", "Active", "Defect", "Collision_Risk_not_used_during_LPA"]
     blind_spot_monitor: bool | None = knowledge_field()
     engine_on: bool | None = knowledge_field()
-    internal_temperature: float | None = knowledge_field()  # °C
+    internal_temperature: float | None = knowledge_field(
+        change_threshold=1.0,
+        notify_on_trend_change=False,
+    )  # °C
 
 @dataclass
 class LaneTrace:
@@ -184,33 +197,36 @@ class DetectedObjects:
     vision_objects: list[VisionObject] | None = field(default_factory=list)
     radar_objects: list[RadarObject] | None = field(default_factory=list)
     traffic_signs: TrafficSigns | None = field(default_factory=TrafficSigns)
-    people_around: int | None = knowledge_field()
-    vehicles_around: int | None = knowledge_field()
-    dangerous_objects_around: int | None = knowledge_field()
+    people_around: int | None = knowledge_field(change_threshold=1.0)
+    vehicles_around: int | None = knowledge_field(change_threshold=1.0)
+    dangerous_objects_around: int | None = knowledge_field(change_threshold=1.0)
 
 @dataclass
 class DriverPhysicalState:
     activity: str | None = knowledge_field()  # ["Idle", "Driving", "Talking", "Using Phone", "Eating", "Sleeping"]
-    attention_level: float | None = knowledge_field()  # [0.0, 1.0]
-    fatigue_level: float | None = knowledge_field()  # [0.0, 1.0]
+    attention_level: float | None = knowledge_field(change_threshold=0.1)  # [0.0, 1.0]
+    fatigue_level: float | None = knowledge_field(change_threshold=0.1)  # [0.0, 1.0]
 
 @dataclass
 class DriverEmotionState:
-    angry: float | None = knowledge_field()
-    disgust: float | None = knowledge_field()
-    fear: float | None = knowledge_field()
-    happy: float | None = knowledge_field()
-    sad: float | None = knowledge_field()
-    surprise: float | None = knowledge_field()
-    neutral: float | None = knowledge_field()
+    angry: float | None = knowledge_field(change_threshold=0.15)
+    disgust: float | None = knowledge_field(change_threshold=0.15)
+    fear: float | None = knowledge_field(change_threshold=0.15)
+    happy: float | None = knowledge_field(change_threshold=0.15)
+    sad: float | None = knowledge_field(change_threshold=0.15)
+    surprise: float | None = knowledge_field(change_threshold=0.15)
+    neutral: float | None = knowledge_field(change_threshold=0.15)
 
 @dataclass
 class DriverDrivingStyle:
-    aggressiveness_level: float | None = knowledge_field()  # [0.0, 1.0] [safe, aggressive]
+    aggressiveness_level: float | None = knowledge_field(change_threshold=0.1)  # [0.0, 1.0] [safe, aggressive]
     
 @dataclass
 class EnvironmentState:
-    external_temperature: float | None = knowledge_field()  # °C
+    external_temperature: float | None = knowledge_field(
+        change_threshold=2.0,
+        notify_on_trend_change=False,
+    )  # °C
     weather: str | None = knowledge_field()  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
     time_of_day: str | None = knowledge_field()  # ["Morning", "Afternoon", "Evening", "Night"]
     road_condition: str | None = knowledge_field()  # ["Dry", "Wet", "Icy", "Snowy", "Gravel"]

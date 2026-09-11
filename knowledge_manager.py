@@ -1,4 +1,4 @@
-from typing import Any, List
+from typing import Any, List, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from omegaconf import OmegaConf
 import structlog
@@ -149,7 +149,25 @@ class KnowledgeManager:
         self.logger.info("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
 
-    def _is_significant_change(self, key: str, value: Any, trend: str | None = None) -> bool:
+    @staticmethod
+    def _knowledge_metadata(name: str, measure: str) -> Mapping[str, Any] | None:
+        data_class = getattr(assistant_dataclasses, name, None)
+        if data_class is None or not is_dataclass(data_class):
+            return None
+
+        for item in fields(data_class):
+            if item.name == measure and item.metadata.get("knowledge", False):
+                return item.metadata
+        return None
+
+    def _is_significant_change(
+        self,
+        name: str,
+        measure: str,
+        key: str,
+        value: Any,
+        trend: str | None = None,
+    ) -> bool:
         previous = self._last_evaluated.get(key)
         current = KnowledgeState(value=value, trend=trend)
         self._last_evaluated[key] = current
@@ -160,9 +178,22 @@ class KnowledgeManager:
             return value != previous.value
 
         if isinstance(value, (int, float)) and isinstance(previous.value, (int, float)):
+            metadata = self._knowledge_metadata(name, measure) or {}
+            trend_changed = (
+                metadata.get("notify_on_trend_change", True)
+                and trend != previous.trend
+            )
+            absolute_change = abs(value - previous.value)
+            change_threshold = metadata.get("change_threshold")
+            if isinstance(change_threshold, (int, float)):
+                return trend_changed or absolute_change >= change_threshold
+
             scale = max(abs(value), abs(previous.value), 1.0)
-            relative_change = abs(value - previous.value) / scale
-            return trend != previous.trend or relative_change >= self.opt.knowledge_numeric_change_ratio
+            relative_change = absolute_change / scale
+            change_ratio = metadata.get("change_ratio")
+            if not isinstance(change_ratio, (int, float)):
+                change_ratio = self.opt.knowledge_numeric_change_ratio
+            return trend_changed or relative_change >= change_ratio
 
         if isinstance(value, str) and isinstance(previous.value, str):
             return value != previous.value
@@ -185,14 +216,7 @@ class KnowledgeManager:
 
     @staticmethod
     def _generates_knowledge(name: str, measure: str) -> bool:
-        data_class = getattr(assistant_dataclasses, name, None)
-        if data_class is None or not is_dataclass(data_class):
-            return False
-
-        return any(
-            item.name == measure and item.metadata.get("knowledge", False)
-            for item in fields(data_class)
-        )
+        return KnowledgeManager._knowledge_metadata(name, measure) is not None
 
     @staticmethod
     def _collect_event(event: dict[str, Any], pending: dict[tuple[str, str], Any]) -> None:
@@ -248,8 +272,9 @@ class KnowledgeManager:
                 continue
 
             self.context[key] = knowledge
-            self.logger.info("context updated", knowledge=knowledge)
-            if self._is_significant_change(key, value, trend):
+            self.logger.debug("context updated", knowledge=knowledge)
+            if self._is_significant_change(name, measure, key, value, trend):
+                self.logger.debug("significant change detected", name=name, measure=measure, value=value, trend=trend)
                 significant_changes.setdefault(name, {})[measure] = value
 
         for name, changes in significant_changes.items():

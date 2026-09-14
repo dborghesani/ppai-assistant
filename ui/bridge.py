@@ -1,8 +1,14 @@
 import asyncio
+import json
 from typing import Any, Dict, List, Tuple
 
 from PySide6.QtCore import QObject, Slot, Signal, Property
 from PySide6.QtGui import QGuiApplication, Qt
+
+try:
+    import aiomqtt
+except ImportError:
+    aiomqtt = None  # type: ignore[assignment]
 
 from config import ConfigAssistant
 from data.database_manager import DatabaseManager
@@ -35,6 +41,10 @@ class VehicleBridge(QObject):
         self.agent.on_response = self.responseReceived.emit
         self._check_dark_mode()
 
+        self._mqtt_queue: asyncio.Queue[tuple[str, str, str, Any]] = asyncio.Queue()
+        if self.opt.mqtt_enabled and aiomqtt is not None:
+            self.loop.create_task(self._mqtt_publisher_loop())
+
         style_hints = QGuiApplication.styleHints()
         if style_hints is not None:
             style_hints.colorSchemeChanged.connect(self._on_color_scheme_changed)
@@ -64,6 +74,39 @@ class VehicleBridge(QObject):
             return None
         (class_name, member_name) = parts
         return (class_name, member_name)
+
+    async def _mqtt_publisher_loop(self):
+        """Persistent connection for publishing UI telemetry events to the MQTT broker."""
+        await asyncio.sleep(1.0)  # wait for broker startup
+        while True:
+            try:
+                async with aiomqtt.Client(
+                    hostname=self.opt.mqtt_host,
+                    port=self.opt.mqtt_port,
+                    username=self.opt.mqtt_username,
+                    password=self.opt.mqtt_password,
+                ) as client:
+                    while True:
+                        topic, payload, class_name, value = await self._mqtt_queue.get()
+                        try:
+                            await client.publish(topic, payload)
+                            self.logger.debug("Published to MQTT broker", topic=topic, class_name=class_name)
+                        except Exception as pub_err:
+                            self.logger.warning("Failed to publish over MQTT, writing locally", error=str(pub_err))
+                            self.database_manager.write_measure(class_name, json.loads(payload)["data"].keys(), value)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self.logger.debug("MQTT publisher reconnecting...", error=str(e))
+                await asyncio.sleep(2.0)
+
+    def _publish_mqtt(self, class_name: str, member_name: str, value: Any):
+        topic = f"telemetry/{class_name}"
+        payload = json.dumps({
+            "name": class_name,
+            "data": {member_name: value}
+        })
+        self._mqtt_queue.put_nowait((topic, payload, class_name, value))
         
     def send_event(self, ui_event_type: str, value: Any):
         if not self.agent.is_listening:
@@ -74,6 +117,13 @@ class VehicleBridge(QObject):
             return
 
         dataclass_class_name, dataclass_member = dataclass_info
+
+        # Route DriverDrivingStyle and DriverEmotionState through MQTT broker when enabled
+        if dataclass_class_name in ("DriverDrivingStyle", "DriverEmotionState"):
+            if self.opt.mqtt_enabled and aiomqtt is not None:
+                self._publish_mqtt(dataclass_class_name, dataclass_member, value)
+                return
+
         self.database_manager.write_measure(dataclass_class_name, dataclass_member, value)
 
     @Slot(str)

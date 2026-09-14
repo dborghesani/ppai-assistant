@@ -12,6 +12,8 @@ dependencies = [
     "omegaconf",
     "influxdb-client",
     "websockets",
+    "aiomqtt",
+    "amqtt",
 ]
 
 [build-system]

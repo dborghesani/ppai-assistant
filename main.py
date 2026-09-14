@@ -21,6 +21,10 @@ from crewai_core.printer import set_suppress_console_output
 import logging
 
 logging.basicConfig(level=logging.INFO)
+# Silence noisy third-party libraries
+logging.getLogger("transitions").setLevel(logging.WARNING)
+logging.getLogger("amqtt").setLevel(logging.WARNING)
+
 structlog.configure(
     wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
 )
@@ -157,6 +161,10 @@ async def main(opt: ConfigAssistant):
         asyncio.create_task(database_manager.run()),
         asyncio.create_task(source_manager.run()),
     ]
+    if opt.mqtt_enabled:
+        if opt.mqtt_embedded_broker:
+            tasks.append(asyncio.create_task(source_manager.run_embedded_broker()))
+        tasks.append(asyncio.create_task(source_manager.run_mqtt()))
     if opt.data_replay_folder:
         tasks.append(asyncio.create_task(source_manager.run_replay()))
     await asyncio.gather(*tasks)

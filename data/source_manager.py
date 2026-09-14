@@ -8,6 +8,14 @@ from urllib.parse import urlparse
 
 import structlog
 import websockets
+try:
+    import aiomqtt
+except ImportError:
+    aiomqtt = None  # type: ignore[assignment]
+try:
+    from amqtt.broker import Broker
+except ImportError:
+    Broker = None  # type: ignore[assignment]
 
 from data import assistant_dataclasses
 from config import ConfigAssistant
@@ -21,7 +29,9 @@ from data.assistant_dataclasses import (
     GPSIMUState,
     TrafficSigns,
     LaneTracing,
-    VehicleState
+    VehicleState,
+    DriverEmotionState,
+    DriverDrivingStyle,
 )
 
 
@@ -199,9 +209,9 @@ class SourceManager:
                     vehicle_motion.wheel_speed_rear_left,
                     vehicle_motion.wheel_speed_rear_right,
                 ]
-                wheel_speeds = [ws for ws in wheel_speeds if ws is not None]
-                if wheel_speeds:
-                    vehicle_motion.speed = sum(wheel_speeds) / len(wheel_speeds)
+                valid_wheel_speeds: list[float] = [ws for ws in wheel_speeds if ws is not None]
+                if valid_wheel_speeds:
+                    vehicle_motion.speed = sum(valid_wheel_speeds) / len(valid_wheel_speeds)
                 await self.data_event_queue.put({"type": "data_received", "data": vehicle_motion})
         if "gpsimu_data" in payload:
             gpsimu_data = self.deserialize_gpsimu_data(payload["gpsimu_data"])
@@ -255,6 +265,22 @@ class SourceManager:
             vehicle_state = self.deserialize_vehicle_state(payload["vehicle_state"])
             if vehicle_state is not None:
                 await self.data_event_queue.put({"type": "data_received", "data": vehicle_state})
+        if "driver_emotion_state" in payload or "DriverEmotionState" in payload or payload.get("name") == "DriverEmotionState":
+            data = payload.get("driver_emotion_state") or payload.get("DriverEmotionState") or payload.get("data")
+            if isinstance(data, dict):
+                valid_fields = {f.name for f in fields(DriverEmotionState)}
+                driver_emotion = DriverEmotionState(**{k: v for k, v in data.items() if k in valid_fields})
+                await self.data_event_queue.put({"type": "data_received", "data": driver_emotion})
+        if "driver_driving_style" in payload or "DriverDrivingStyle" in payload or payload.get("name") == "DriverDrivingStyle":
+            data = payload.get("driver_driving_style") or payload.get("DriverDrivingStyle") or payload.get("data")
+            if isinstance(data, dict):
+                valid_fields = {f.name for f in fields(DriverDrivingStyle)}
+                driver_style = DriverDrivingStyle(**{k: v for k, v in data.items() if k in valid_fields})
+                await self.data_event_queue.put({"type": "data_received", "data": driver_style})
+        if "name" in payload and "data" in payload:
+            generic_obj = self.deserialize(payload)
+            if generic_obj is not None:
+                await self.data_event_queue.put({"type": "data_received", "data": generic_obj})
 
     async def _send_replay(
         self,
@@ -263,16 +289,19 @@ class SourceManager:
     ) -> None:
         previous_timestamp: int | None = None
         self.logger.info("Replay consumer connected...", file_count=len(files))
-        for index, path in enumerate(files):
-            timestamp = int(path.stem.split("_")[-1])
-            if previous_timestamp is not None:
-                await asyncio.sleep(max(0, timestamp - previous_timestamp) / 1e6)
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            await websocket.send(json.dumps(payload))
-            self.logger.debug(f"[{index + 1}/{len(files)}] Sent {path.name}")
-            previous_timestamp = timestamp
-        self.logger.info("Finished sending all replay files")
-        await websocket.wait_closed()
+        try:
+            for index, path in enumerate(files):
+                timestamp = int(path.stem.split("_")[-1])
+                if previous_timestamp is not None:
+                    await asyncio.sleep(max(0, timestamp - previous_timestamp) / 1e6)
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                await websocket.send(json.dumps(payload))
+                self.logger.debug(f"[{index + 1}/{len(files)}] Sent {path.name}")
+                previous_timestamp = timestamp
+            self.logger.info("Finished sending all replay files")
+            await websocket.wait_closed()
+        except websockets.exceptions.ConnectionClosed:
+            self.logger.info("Replay consumer disconnected")
 
     async def run_replay(self) -> None:
         files = sorted(
@@ -300,6 +329,78 @@ class SourceManager:
                 await asyncio.Future()
             finally:
                 self.server_ready.clear()
+
+    async def run_embedded_broker(self) -> None:
+        if Broker is None:
+            self.logger.error("amqtt is not installed, cannot start embedded MQTT broker")
+            return
+
+        broker_config = {
+            "listeners": {
+                "default": {
+                    "type": "tcp",
+                    "bind": f"{self.opt.mqtt_host}:{self.opt.mqtt_port}",
+                }
+            },
+            "sys_interval": 0,
+            "plugins": {
+                "amqtt.plugins.authentication.AnonymousAuthPlugin": {
+                    "allow_anonymous": True
+                }
+            },
+            "topic_check": {
+                "enabled": False
+            },
+        }
+        self.logger.info("Starting embedded MQTT broker", host=self.opt.mqtt_host, port=self.opt.mqtt_port)
+        broker = Broker(broker_config)
+        await broker.start()
+        self.logger.info("Embedded MQTT broker running", host=self.opt.mqtt_host, port=self.opt.mqtt_port)
+        try:
+            await asyncio.Future()
+        finally:
+            await broker.shutdown()
+
+    async def run_mqtt(self) -> None:
+        if aiomqtt is None:
+            self.logger.error("aiomqtt is not installed, cannot start MQTT client")
+            return
+
+        if self.opt.mqtt_embedded_broker:
+            # Short grace period to ensure the embedded broker listener is bound
+            await asyncio.sleep(0.5)
+
+        while True:
+            try:
+                self.logger.info(
+                    "Connecting to MQTT broker",
+                    host=self.opt.mqtt_host,
+                    port=self.opt.mqtt_port,
+                    topic=self.opt.mqtt_topic,
+                )
+                async with aiomqtt.Client(
+                    hostname=self.opt.mqtt_host,
+                    port=self.opt.mqtt_port,
+                    username=self.opt.mqtt_username,
+                    password=self.opt.mqtt_password,
+                ) as client:
+                    await client.subscribe(self.opt.mqtt_topic)
+                    self.logger.info("Connected to MQTT broker and subscribed", topic=self.opt.mqtt_topic)
+                    async for message in client.messages:
+                        payload = message.payload
+                        msg_str: str | bytes
+                        if isinstance(payload, bytes):
+                            msg_str = payload.decode("utf-8")
+                        elif isinstance(payload, str):
+                            msg_str = payload
+                        else:
+                            msg_str = str(payload)
+                        await self.process_message(msg_str)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.logger.warning("MQTT broker disconnected or error occurred", error=str(error))
+                await asyncio.sleep(5)
 
     async def run(self) -> None:
         if self.opt.data_replay_folder:

@@ -20,6 +20,15 @@ class ConfigAssistant:
     data_websocket_url: str = "ws://localhost:4545/socket"
     data_replay_folder: str = ""
 
+    # MQTT broker configuration
+    mqtt_enabled: bool = False
+    mqtt_embedded_broker: bool = False
+    mqtt_host: str = "127.0.0.1"
+    mqtt_port: int = 1883
+    mqtt_topic: str = "telemetry/#"
+    mqtt_username: str | None = None
+    mqtt_password: str | None = None
+
     knowledge_update_interval: float = 1.0
     knowledge_numeric_change_ratio: float = 0.05
 

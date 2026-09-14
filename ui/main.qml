@@ -11,6 +11,18 @@ ApplicationWindow {
     minimumHeight: 1000
     title: "Automotive AI Dashboard"
 
+    readonly property bool isDark: vehicleBridge ? vehicleBridge.isDarkMode : false
+
+    palette.window: isDark ? "#1e1e1e" : "#f5f5f7"
+    palette.windowText: isDark ? "#ffffff" : "#1a1a1a"
+    palette.base: isDark ? "#2b2b2b" : "#ffffff"
+    palette.text: isDark ? "#ffffff" : "#1a1a1a"
+    palette.button: isDark ? "#3a3a3c" : "#e5e5ea"
+    palette.buttonText: isDark ? "#ffffff" : "#1a1a1a"
+    palette.highlight: "#0a84ff"
+    palette.highlightedText: "#ffffff"
+    palette.mid: isDark ? "#48484a" : "#d1d1d6"
+
     Row {
         width: parent.width
         height: parent.height

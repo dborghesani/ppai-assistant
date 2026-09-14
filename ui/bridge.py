@@ -1,7 +1,8 @@
 import asyncio
 from typing import Any, Dict, List, Tuple
 
-from PySide6.QtCore import QObject, Slot, Signal
+from PySide6.QtCore import QObject, Slot, Signal, Property
+from PySide6.QtGui import QGuiApplication, Qt
 
 from config import ConfigAssistant
 from data.database_manager import DatabaseManager
@@ -13,6 +14,7 @@ import structlog
 
 class VehicleBridge(QObject):
     responseReceived = Signal(str)
+    isDarkModeChanged = Signal(bool)
 
     def __init__(
         self,
@@ -31,6 +33,29 @@ class VehicleBridge(QObject):
         self.database_manager = database_manager
         self.knowledge_manager = knowledge_manager
         self.agent.on_response = self.responseReceived.emit
+        self._check_dark_mode()
+
+        style_hints = QGuiApplication.styleHints()
+        if style_hints is not None:
+            style_hints.colorSchemeChanged.connect(self._on_color_scheme_changed)
+
+    def _check_dark_mode(self) -> bool:
+        style_hints = QGuiApplication.styleHints()
+        if style_hints is not None:
+            self._is_dark_mode = style_hints.colorScheme() == Qt.ColorScheme.Dark
+        else:
+            self._is_dark_mode = False
+        return self._is_dark_mode
+
+    def _on_color_scheme_changed(self, scheme):
+        is_dark = scheme == Qt.ColorScheme.Dark
+        if is_dark != self._is_dark_mode:
+            self._is_dark_mode = is_dark
+            self.isDarkModeChanged.emit(self._is_dark_mode)
+
+    @Property(bool, notify=isDarkModeChanged)
+    def isDarkMode(self) -> bool:
+        return self._is_dark_mode
 
     def get_dataclass_from_ui_event_type(self, ui_event_type: str) -> Tuple[str, str] | None:
         # assume that the event_type corresponds to classname.classmember

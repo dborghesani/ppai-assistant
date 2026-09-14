@@ -280,6 +280,12 @@ class KnowledgeManager:
         for name, changes in significant_changes.items():
             await self._notify_agent(name, changes)
 
+    def dump_knowledge(self) -> str:
+        output_knowledge = ""
+        for key, value in self.context.items():
+            output_knowledge += f"{key}: {value}\n"
+        return output_knowledge
+
 if __name__ == "__main__":
     logger = structlog.get_logger()
     opt_cli = OmegaConf.from_cli()

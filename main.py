@@ -95,6 +95,7 @@ async def main(opt: ConfigAssistant):
         agent=agent,
         loop=asyncio.get_running_loop(),
         database_manager=database_manager,
+        knowledge_manager=knowledge_manager,
         opt=opt,
     )
     engine.rootContext().setContextProperty(

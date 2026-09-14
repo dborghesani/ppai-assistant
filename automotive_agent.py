@@ -69,7 +69,7 @@ class AutomotiveAgent:
 
         self.skill_manager = SkillManager()
 
-        self.recent_notifications: list[Any] = []
+        self.recent_notifications: list[dict[str, Any]] = []
 
         self.available_actions = """
             NONE
@@ -137,43 +137,54 @@ class AutomotiveAgent:
                 Available actions:
                 {available_actions}
 
-                                Default to silence. A knowledge update requests an evaluation, not a spoken
-                                response. Normal, safe, stable, informational or non-actionable conditions
-                                must produce notify=false.
+                Default to silence. A knowledge update requests an evaluation, not a spoken
+                response. Normal, safe, stable, informational or non-actionable conditions
+                must produce notify=false.
 
-                                Set notify=true only when at least one condition applies:
-                                - the user made a direct request that requires a response;
-                                - there is an immediate or developing safety risk;
-                                - a vehicle condition requires timely attention;
-                                - the occupant can take a useful, time-sensitive action now.
+                Set notify=true only when at least one condition applies:
+                - the user made a direct request that requires a response;
+                - there is an immediate or developing safety risk;
+                - a vehicle condition requires timely attention;
+                - the occupant can take a useful, time-sensitive action now.
 
-                                Do not notify merely because a value changed, to confirm normal operation,
-                                to report that no problem was detected, or to say that no action is required.
-                                Routine controls such as turn signals, lights and normal engine state should
-                                remain silent unless their duration or surrounding context indicates a concrete
-                                risk. Stable or optimal conditions should remain silent. Do not repeat a recent
-                                notification unless the situation materially changed.
+                Do not notify merely because a value changed, to confirm normal operation,
+                to report that no problem was detected, or to say that no action is required.
+                Routine controls such as turn signals, lights and normal engine state should
+                remain silent unless their duration or surrounding context indicates a concrete
+                risk. Stable or optimal conditions should remain silent.
 
-                                Before setting notify=true, identify the concrete risk, required attention or
-                                useful immediate action that justifies interrupting the occupant. If none exists,
-                                set notify=false.
+                Deduplication & Repetition Rules:
+                - ALWAYS examine "Recent notifications" before deciding to notify.
+                - If the condition, topic, or advice has already been communicated in "Recent notifications", you MUST set notify=false, UNLESS there is a critical escalation in urgency (e.g., from low/medium to high/critical) or new critical information that requires immediate intervention.
+                - Minor value variations or ongoing states of an already-notified condition MUST NOT trigger a new notification.
+                - If a notification would repeat or rephrase any recent notification without an urgency escalation, output notify=false, urgency=none, spoken_message=null, reason="Condition already notified recently."
+
+                Before setting notify=true, identify the concrete risk, required attention or
+                useful immediate action that justifies interrupting the occupant. If none exists,
+                set notify=false.
 
                 When notifying, set notify to true, choose an urgency, give a brief internal
                 reason, and produce one concise spoken message. When not notifying, set notify
                 to false, urgency to none, and spoken_message to null.
 
-                                Consistency requirements:
-                                - notify=false requires urgency=none and spoken_message=null;
-                                - notify=true requires urgency other than none and a concrete justification;
-                                - action_type=none with notify=true is valid only for a warning that still
-                                    requires the occupant's attention;
-                                - never notify with a message meaning that everything is normal, no urgent
-                                    condition exists, or no action is recommended.
+                Consistency requirements:
+                - notify=false requires urgency=none and spoken_message=null;
+                - notify=true requires urgency other than none and a concrete justification;
+                - action_type=none with notify=true is valid only for a warning that still
+                    requires the occupant's attention;
+                - never notify with a message meaning that everything is normal, no urgent
+                    condition exists, or no action is recommended.
 
-                                Negative example: a turn signal active for ten seconds while all other
-                                conditions are normal results in notify=false, urgency=none and no spoken
-                                message. Positive example: a turn signal that remains active for several
-                                minutes after a completed turn may justify a low-urgency reminder.
+                Negative example 1 (Routine update): a turn signal active for ten seconds while all other
+                conditions are normal results in notify=false, urgency=none and no spoken
+                message.
+                Negative example 2 (Duplicate notification):
+                Recent notifications:
+                - [Urgency: LOW] Topic/Skill: vehicle (knowledge_updated) | Spoken: "The cabin temperature is twenty-two degrees Celsius."
+                Current context: internal_temperature is 22.3°C.
+                Output: notify=false, urgency=none, spoken_message=null, reason="Temperature condition was already communicated recently and has not escalated in urgency."
+                Positive example: a turn signal that remains active for several
+                minutes after a completed turn may justify a low-urgency reminder.
 
                 The spoken message is sent directly to text-to-speech. Address the occupant
                 naturally; do not include analysis, scores, variable names, or implementation
@@ -218,6 +229,18 @@ class AutomotiveAgent:
                 logger.error(f"Error in agent loop: {e}")
                 
 
+    def _format_recent_notifications(self) -> str:
+        if not self.recent_notifications:
+            return "None (no recent notifications spoken yet)"
+        lines = []
+        for n in self.recent_notifications:
+            urgency = n.get("urgency", "unknown").upper()
+            skill = n.get("skill", "general")
+            event = n.get("event", "update")
+            msg = n.get("message", "")
+            lines.append(f"- [Urgency: {urgency}] Topic/Skill: {skill} ({event}) | Spoken: \"{msg}\"")
+        return "\n".join(lines)
+
     async def _process_event(self, event: CarEvent):
         logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         logger.info(">>> generating...")
@@ -232,7 +255,7 @@ class AutomotiveAgent:
             "event": event.event_name,
             "context": event.context,
             "value": event.event_value,
-            "recent_notifications": self.recent_notifications,
+            "recent_notifications": self._format_recent_notifications(),
             "available_actions": self.available_actions,
             "user_input": event.user_input,
         }
@@ -246,8 +269,13 @@ class AutomotiveAgent:
         if decision.notify and decision.spoken_message:
             logger.info(f">>> [speak] {decision.spoken_message}")
             #await self.tts.speak(decision.spoken_message)
-            self.recent_notifications.append(decision.spoken_message)
-            if len(self.recent_notifications) > 3:
+            self.recent_notifications.append({
+                "urgency": decision.urgency.value,
+                "message": decision.spoken_message,
+                "skill": event.skill,
+                "event": event.event_name,
+            })
+            if len(self.recent_notifications) > 5:
                 self.recent_notifications.pop(0)
         if decision.action:
             logger.info(f">>> [action] {decision.action.action_type}")

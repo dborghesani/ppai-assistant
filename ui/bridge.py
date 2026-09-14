@@ -5,6 +5,7 @@ from PySide6.QtCore import QObject, Slot
 
 from config import ConfigAssistant
 from data.database_manager import DatabaseManager
+from knowledge_manager import KnowledgeManager
 from skill_manager import SkillType
 from automotive_agent import AutomotiveAgent
 import structlog
@@ -17,6 +18,7 @@ class VehicleBridge(QObject):
         loop: asyncio.AbstractEventLoop,
         opt: ConfigAssistant,
         database_manager: DatabaseManager,
+        knowledge_manager: KnowledgeManager,
         parent=None,
     ):
         super().__init__(parent)
@@ -25,10 +27,7 @@ class VehicleBridge(QObject):
         self.agent = agent
         self.loop = loop
         self.database_manager = database_manager
-
-        # keep a queue of recent contexts for the assistant to use in its reasoning
-        # 3 at most
-        self.recent_contexts: Dict[SkillType,List[Any]] = {}
+        self.knowledge_manager = knowledge_manager
 
     def get_dataclass_from_ui_event_type(self, ui_event_type: str) -> Tuple[str, str] | None:
         # assume that the event_type corresponds to classname.classmember
@@ -77,4 +76,6 @@ class VehicleBridge(QObject):
     def boolChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)
 
-
+    @Slot(result=str)
+    def dumpKnowledge(self) -> str:
+        return self.knowledge_manager.dump_knowledge()

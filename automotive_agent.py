@@ -1,6 +1,6 @@
 import asyncio
 import time
-from typing import Any
+from typing import Any, Callable
 
 import structlog
 from skill_manager import SkillManager, SkillType
@@ -69,6 +69,8 @@ class AutomotiveAgent:
         self.is_listening = False
 
         self.skill_manager = SkillManager()
+
+        self.on_response: Callable[[str], None] | None = None
 
         self.recent_notifications: list[dict[str, Any]] = []
 
@@ -341,9 +343,13 @@ class AutomotiveAgent:
                 })
                 if len(self.recent_notifications) > 5:
                     self.recent_notifications.pop(0)
+                if decision.action:
+                    logger.info(f">>> [action] {decision.action.action_type}")
+                    # handle the action accordingly
+                    if decision.action.action_type is not ActionType.NONE:
+                        logger.info(f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}")
 
-            if decision.action:
-                logger.info(f">>> [action] {decision.action.action_type}")
-                # handle the action accordingly
-                if decision.action.action_type is not ActionType.NONE:
-                    logger.info(f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}")
+                if self.on_response is not None:
+                    response = decision.spoken_message + "\n"
+                    response += f"Action: {decision.action.action_type}, Parameters: {decision.action.parameters}\n" if decision.action else "no action required\n"
+                    self.on_response(response)

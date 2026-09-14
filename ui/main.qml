@@ -5,10 +5,10 @@ import QtQuick.Layouts
 ApplicationWindow {
     id: root
     width: 1800
-    height: 900
+    height: 1000
     visible: true
     minimumWidth: 1800
-    minimumHeight: 900
+    minimumHeight: 1000
     title: "Automotive AI Dashboard"
 
     Row {
@@ -27,7 +27,7 @@ ApplicationWindow {
 
             Row {
                 width: parent.width
-                height: parent.height*0.05
+                height: parent.height*0.02
 
                 Switch {
 
@@ -782,7 +782,7 @@ ApplicationWindow {
 
             Row {
                 width: parent.width
-                height: parent.height*0.2-spacing
+                height: parent.height*0.18-spacing
                 spacing: 10
 
                 GroupBox {
@@ -1030,6 +1030,39 @@ ApplicationWindow {
                         onClicked: {
                             vehicleBridge.userInput(inputField.text)
                             inputField.clear()
+                        }
+                    }
+                }
+            }
+
+            Row {
+
+                width: parent.width
+                height: parent.height*0.05
+                spacing: 10
+
+                TextArea {
+                    id: responseField
+                    width: parent.width
+                    height: parent.height
+                    readOnly: true
+                    placeholderText: "Agent response..."
+
+                    Timer {
+                        id: resetReponseFiled
+                        interval: 5000
+                        repeat: false
+                        running: false
+                        onTriggered: {
+                            responseField.clear()
+                        }
+                    }
+
+                    Connections {
+                        target: vehicleBridge
+                        function onResponseReceived(message) {
+                            responseField.text = message
+                            resetReponseFiled.start()
                         }
                     }
                 }

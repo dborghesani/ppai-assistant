@@ -262,14 +262,14 @@ class SourceManager:
         files: list[Path],
     ) -> None:
         previous_timestamp: int | None = None
-        self.logger.info("Replay consumer connected", file_count=len(files))
+        self.logger.info("Replay consumer connected...", file_count=len(files))
         for index, path in enumerate(files):
             timestamp = int(path.stem.split("_")[-1])
             if previous_timestamp is not None:
                 await asyncio.sleep(max(0, timestamp - previous_timestamp) / 1e6)
             payload = json.loads(path.read_text(encoding="utf-8"))
             await websocket.send(json.dumps(payload))
-            self.logger.info(f"[{index + 1}/{len(files)}] Sent {path.name}")
+            self.logger.debug(f"[{index + 1}/{len(files)}] Sent {path.name}")
             previous_timestamp = timestamp
         self.logger.info("Finished sending all replay files")
         await websocket.wait_closed()

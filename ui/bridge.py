@@ -1,16 +1,18 @@
 import asyncio
 from typing import Any, Dict, List, Tuple
 
-from PySide6.QtCore import QObject, Slot
+from PySide6.QtCore import QObject, Slot, Signal
 
 from config import ConfigAssistant
 from data.database_manager import DatabaseManager
+from events import CarEvent
 from knowledge_manager import KnowledgeManager
 from skill_manager import SkillType
 from automotive_agent import AutomotiveAgent
 import structlog
 
 class VehicleBridge(QObject):
+    responseReceived = Signal(str)
 
     def __init__(
         self,
@@ -28,6 +30,7 @@ class VehicleBridge(QObject):
         self.loop = loop
         self.database_manager = database_manager
         self.knowledge_manager = knowledge_manager
+        self.agent.on_response = self.responseReceived.emit
 
     def get_dataclass_from_ui_event_type(self, ui_event_type: str) -> Tuple[str, str] | None:
         # assume that the event_type corresponds to classname.classmember
@@ -53,7 +56,14 @@ class VehicleBridge(QObject):
         text = text.strip()
         if not text:
             return
-        self.send_event("user_input", text)
+        event = CarEvent(
+            skill=SkillType.CONVERSATION.value,
+            event_name="user_input",
+            event_value=text,
+            context=self.knowledge_manager.context,
+            user_input=text,
+        )
+        self.agent.event_queue.put_nowait(event)
 
     @Slot(bool)
     def eventProcessingChanged(self, enabled: bool):

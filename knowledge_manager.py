@@ -37,6 +37,48 @@ class KnowledgeManager:
         return f"{value:.2f}".rstrip("0").rstrip(".")
 
     @staticmethod
+    def _display_measure(measure: str) -> str:
+        names = {
+            "speed": "vehicle speed",
+            "acceleration_longitudinal": "longitudinal acceleration",
+            "acceleration_lateral": "lateral acceleration",
+            "steering_angle": "steering angle",
+            "engine_rpm": "engine speed",
+            "people_around": "nearby people",
+            "vehicles_around": "nearby vehicles",
+            "dangerous_objects_around": "nearby hazardous objects",
+            "door_open_front_left": "front-left door",
+            "door_open_front_right": "front-right door",
+            "door_open_rear_left": "rear-left door",
+            "door_open_rear_right": "rear-right door",
+            "turn_signal": "turn signal",
+            "lane_keep_assist": "lane-keeping assist",
+            "blind_spot_monitor": "blind-spot monitor",
+            "engine_on": "engine",
+            "internal_temperature": "cabin temperature",
+        }
+        return names.get(measure, measure.replace("_", " "))
+
+    @staticmethod
+    def _window_label(window: str) -> str:
+        return window.lstrip("-")
+
+    @staticmethod
+    def _duration_sentence(duration: int | None) -> str:
+        if duration is None:
+            return ""
+        unit = "second" if int(duration) == 1 else "seconds"
+        return f" The current state has lasted {int(duration)} {unit}."
+
+    @staticmethod
+    def _boolean_state(measure: str, value: bool) -> str:
+        if "door_open" in measure:
+            return "open" if value else "closed"
+        if "light" in measure or measure == "turn_signal":
+            return "on" if value else "off"
+        return "active" if value else "inactive"
+
+    @staticmethod
     def _trend_label(mean_derivative: float, threshold: float = 1e-6) -> str:
         if mean_derivative > threshold:
             return "increasing"
@@ -52,9 +94,11 @@ class KnowledgeManager:
         window: str,
     ) -> tuple[str, str | None]:
         sample_count = self.database_manager.count(name, measure, window)
+        display_measure = self._display_measure(measure)
         if sample_count is None or sample_count < 3:
             return (
-                f"{measure} is currently {self._format_value(value)}; insufficient recent samples for a trend.",
+                f"Current {display_measure}: {self._format_value(value)}. "
+                "There are not enough recent samples to determine a trend.",
                 None,
             )
 
@@ -73,49 +117,51 @@ class KnowledgeManager:
             or mean_derivative is None
             or stddev_derivative is None
         ):
-            knowledge = f"{measure} is currently {self._format_value(value)}; recent statistics are incomplete."
-            self.logger.info("extracted knowledge", knowledge=knowledge)
+            knowledge = (
+                f"Current {display_measure}: {self._format_value(value)}. "
+                "Recent statistics are incomplete."
+            )
+            self.logger.debug("extracted knowledge", knowledge=knowledge)
             return knowledge, None
 
         trend = self._trend_label(mean_derivative)
-        variability = "steadily" if abs(stddev_derivative) <= abs(mean_derivative) else "with fluctuations"
-        extracted_knowledge = (
-            f"Over the last {window.lstrip('-')}, {measure} averaged {self._format_value(mean)} "
-            f"(range {self._format_value(minimum)}-{self._format_value(maximum)}, "
-            f"standard deviation {self._format_value(stddev)}, {int(sample_count)} samples). "
-            f"It is {trend} {variability}. Current value: {self._format_value(value)}."
-        )
-        self.logger.info("extracted knowledge", knowledge=extracted_knowledge)
+        if trend == "stable":
+            trend_sentence = f"It has remained stable over the last {self._window_label(window)}."
+        else:
+            trend_description = "steadily" if abs(stddev_derivative) <= abs(mean_derivative) else "with fluctuations"
+            trend_sentence = (
+                f"It has been {trend} {trend_description} over the last "
+                f"{self._window_label(window)}, ranging from "
+                f"{self._format_value(minimum)} to {self._format_value(maximum)}."
+            )
+        variability = f" Variation was approximately {self._format_value(stddev)}." if trend != "stable" and stddev > 0 else ""
+        extracted_knowledge = f"Current {display_measure}: {self._format_value(value)}. {trend_sentence}{variability}"
+        self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge, trend
 
     def _categorical_knowledge(self, name: str, measure: str, value: str, window: str) -> str:
+        display_measure = self._display_measure(measure)
         first_value = self.database_manager.first_value(name, measure, window)
         current_value = self.database_manager.last_value(name, measure, window) or value
         value_counts = self.database_manager.value_counts(name, measure, window)
         current_duration = self.database_manager.current_value_duration(name, measure, current_value, window)
 
         if not value_counts:
-            return f"{measure} is currently {current_value}; insufficient recent samples for a temporal summary."
+            return f"The current {display_measure} is {current_value}. There are not enough recent samples for a temporal summary."
 
         sample_count = sum(value_counts.values())
-        prevalent_value, prevalent_count = max(value_counts.items(), key=lambda item: item[1])
-        extracted_knowledge = (
-            f"Over the last {window.lstrip('-')}, {measure} was most often {prevalent_value} "
-            f"({prevalent_count} of {sample_count} samples). "
-        )
+        extracted_knowledge = f"The current {display_measure} is {current_value}. "
         if first_value is not None and first_value != current_value:
-            extracted_knowledge += f"It changed from {first_value} to {current_value}. "
+            extracted_knowledge += f"It changed from {first_value} during the last {self._window_label(window)}. "
         else:
-            extracted_knowledge += f"It remained {current_value}. "
-        if current_duration is not None:
-            extracted_knowledge += f"The current state has lasted {int(current_duration)} seconds."
-        else:
-            extracted_knowledge += f"Current value: {current_value}."
+            extracted_knowledge += f"It remained unchanged during the last {self._window_label(window)}."
+        extracted_knowledge += self._duration_sentence(current_duration)
 
-        self.logger.info("extracted knowledge", knowledge=extracted_knowledge)
+        self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
 
     def _boolean_knowledge(self, name: str, measure: str, value: bool, window: str) -> str:
+        display_measure = self._display_measure(measure)
         first_value = self.database_manager.first_value(name, measure, window)
         last_value = self.database_manager.last_value(name, measure, window)
         current_value = last_value if isinstance(last_value, bool) else value
@@ -125,28 +171,33 @@ class KnowledgeManager:
 
         sample_count = sum(value_counts.values())
         if sample_count == 0:
-            return f"{measure} is currently {str(current_value).lower()}; insufficient recent samples for a temporal summary."
+            return (
+                f"The current {display_measure} state is {str(current_value).lower()}. "
+                "There are not enough recent samples for a temporal summary."
+            )
 
-        true_count = value_counts.get(True, 0)
-        extracted_knowledge = (
-            f"Over the last {window.lstrip('-')}, {measure} was true for "
-            f"{true_count} of {sample_count} samples. "
-        )
+        current_state = self._boolean_state(measure, current_value)
+        extracted_knowledge = f"The {display_measure} is {current_state}."
         if isinstance(first_value, bool) and first_value != current_value:
             extracted_knowledge += (
-                f"It changed from {str(first_value).lower()} to {str(current_value).lower()}. "
+                f" It changed from {self._boolean_state(measure, first_value)} during the last "
+                f"{self._window_label(window)}."
             )
         elif transitions is not None:
-            extracted_knowledge += f"It changed state {transitions} times. "
-        if current_duration is not None:
-            extracted_knowledge += (
-                f"It is currently {str(current_value).lower()} and has remained so for "
-                f"{int(current_duration)} seconds."
-            )
-        else:
-            extracted_knowledge += f"It is currently {str(current_value).lower()}."
+            if transitions == 0:
+                extracted_knowledge += f" It has remained {current_state} for the last {self._window_label(window)}."
+            else:
+                extracted_knowledge += (
+                    f" It changed state {transitions} times during the last "
+                    f"{self._window_label(window)}."
+                )
+        if transitions != 0:
+            extracted_knowledge += self._duration_sentence(current_duration)
+        elif current_duration is not None:
+            unit = "second" if int(current_duration) == 1 else "seconds"
+            extracted_knowledge += f" It has remained {current_state} for {int(current_duration)} {unit}."
 
-        self.logger.info("extracted knowledge", knowledge=extracted_knowledge)
+        self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
 
     @staticmethod
@@ -272,9 +323,8 @@ class KnowledgeManager:
                 continue
 
             self.context[key] = knowledge
-            self.logger.debug("context updated", knowledge=knowledge)
             if self._is_significant_change(name, measure, key, value, trend):
-                self.logger.debug("significant change detected", name=name, measure=measure, value=value, trend=trend)
+                self.logger.info("significant change detected", name=name, measure=measure, value=value, trend=trend)
                 significant_changes.setdefault(name, {})[measure] = value
 
         for name, changes in significant_changes.items():
@@ -283,66 +333,6 @@ class KnowledgeManager:
     def dump_knowledge(self) -> str:
         output_knowledge = ""
         for key, value in self.context.items():
-            output_knowledge += f"{key}: {value}\n"
+            output_knowledge += f"{key}: {value}\n\n"
         return output_knowledge
 
-if __name__ == "__main__":
-    logger = structlog.get_logger()
-    opt_cli = OmegaConf.from_cli()
-    opt_default = OmegaConf.structured(ConfigAssistant())
-    merged = OmegaConf.merge(opt_default, opt_cli)
-    opt = OmegaConf.structured(merged)
-
-    database_manager = DatabaseManager(None, opt)
-    logger.info("Database manager initialized", database_manager=database_manager)
-
-    name = "DriverState"
-    measure = "fatigue_level"
-    range = "-1h"
-
-    # extract knowledge from the database
-    if database_manager:
-        mean_value = database_manager.mean(name, measure, range)
-        max_value = database_manager.max(name, measure, range)
-        min_value = database_manager.min(name, measure, range)
-        stddev_value = database_manager.stddev(name, measure, range)
-        count_value = database_manager.count(name, measure, range)
-        logger.info("Extracted knowledge from the database",
-                    mean_value=mean_value,
-                    max_value=max_value,
-                    min_value=min_value,
-                    stddev_value=stddev_value,
-                    count_value=count_value)
-        derivative_value = database_manager.derivative(name, measure, range)
-        mean_derivative_value = database_manager.mean_derivative(name, measure, range)
-        stddev_derivative_value = database_manager.stddev_derivative(name, measure, range)
-        logger.info("Extracted trend knowledge from the database",
-                    derivative_value=derivative_value,
-                    mean_derivative_value=mean_derivative_value,
-                    stddev_derivative_value=stddev_derivative_value)
-
-        if derivative_value is not None:
-            if derivative_value > 0:
-                logger.info(f"{measure} has increasing trend")
-            elif derivative_value < 0:
-                logger.info(f"{measure} has decreasing trend")
-            else:
-                logger.info(f"{measure} has stable trend")
-
-        if mean_derivative_value is not None:
-            if mean_derivative_value > 0:
-                logger.info(f"{measure} has increasing trend on average")
-            elif mean_derivative_value < 0:
-                logger.info(f"{measure} has decreasing trend on average")
-            else:
-                logger.info(f"{measure} has stable trend on average")
-
-        if stddev_derivative_value is not None:
-            if stddev_derivative_value > 0:
-                logger.info(f"{measure} has high variability in the trend")
-            elif stddev_derivative_value < 0:
-                logger.info(f"{measure} has decreasing variability in the trend")
-            else:
-                logger.info(f"{measure} has stable trend with no variability")
-
-    database_manager.close()

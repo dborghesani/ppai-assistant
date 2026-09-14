@@ -4,10 +4,10 @@ import QtQuick.Layouts
 
 ApplicationWindow {
     id: root
-    width: 1600
+    width: 1800
     height: 900
     visible: true
-    minimumWidth: 1600
+    minimumWidth: 1800
     minimumHeight: 900
     title: "Automotive AI Dashboard"
 
@@ -21,7 +21,7 @@ ApplicationWindow {
         spacing: 10
 
         Column {
-            width: parent.width*0.8-leftPadding-rightPadding-spacing
+            width: parent.width*0.7-leftPadding-rightPadding-spacing
             height: parent.height-topPadding-bottomPadding-spacing
             spacing: parent.spacing
 
@@ -1037,7 +1037,7 @@ ApplicationWindow {
         }
 
         Column {
-            width: parent.width*0.2-leftPadding-rightPadding-spacing*2
+            width: parent.width*0.3-leftPadding-rightPadding-spacing*2
             height: parent.height-topPadding-bottomPadding-spacing*2
             spacing: parent.spacing
 
@@ -1051,17 +1051,51 @@ ApplicationWindow {
                     repeat: true
                     running: true
                     onTriggered: {
-                        knowledgeTextArea.text = vehicleBridge.dumpKnowledge()
+                        knowledgeTextArea.updateKnowledge()
                     }
                 }
 
-                TextArea {
-                    id: knowledgeTextArea
+                ScrollView {
+                    id: knowledgeScrollView
                     width: parent.width
                     height: parent.height
-                    readOnly: true
-                    wrapMode: TextArea.WordWrap
-                    text: "updating knowledge..."
+                    clip: true
+
+                    ScrollBar.vertical.policy: ScrollBar.AsNeeded
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                    TextArea {
+                        id: knowledgeTextArea
+                        width: knowledgeScrollView.availableWidth
+                        readOnly: true
+                        wrapMode: TextArea.WordWrap
+                        text: "updating knowledge..."
+                        font.family: "Courier New"
+                        font.pixelSize: 12
+                        selectByMouse: true
+
+                        function updateKnowledge() {
+                            var flickable = knowledgeScrollView.contentItem
+                            if (!flickable) {
+                                return
+                            }
+
+                            var oldMaximum = Math.max(0, flickable.contentHeight - flickable.height)
+                            var wasAtBottom = oldMaximum - flickable.contentY < 4
+                            var savedContentY = flickable.contentY
+                            var updatedText = vehicleBridge.dumpKnowledge()
+                            if (text !== updatedText) {
+                                text = updatedText
+                            }
+
+                            Qt.callLater(function() {
+                                var newMaximum = Math.max(0, flickable.contentHeight - flickable.height)
+                                flickable.contentY = wasAtBottom
+                                    ? newMaximum
+                                    : Math.min(savedContentY, newMaximum)
+                            })
+                        }
+                    }
                 }
                 
             }

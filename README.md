@@ -21,32 +21,35 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
 - **Python**: Core logic.
 - **CrewAI**: Agent framework.
 - **PySide6**: UI framework (Qt for Python).
-- **QML**: Declarative UI language.
+- **QML**: Declarative UI language (with automatic OS Dark/Light theme switching).
 - **Ollama**: Local LLM inference (default: `qwen2.5:3b-instruct`).
 - **OmegaConf**: Configuration management.
 - **structlog**: Structured logging.
 - **InfluxDB 2**: Time-series storage for vehicle/driver state history.
+- **MQTT (aiomqtt & amqtt)**: Real-time telemetry broker and messaging support (with embedded broker option).
+- **WebSockets**: Ingress and replay streaming for sensor telemetry.
 
 ## 📂 Project Structure
 
 ```text
 .
-├── main.py          # Application entry point
-├── agents.py        # CrewAI Agent and Task definitions
-├── config.py        # Configuration dataclasses
-├── skill_manager.py # Manager for loading skill contexts
-├── knowledge_manager.py
-├── action_manager.py
-├── events.py
-├── skills/          # Markdown files defining agent skills
-├── data/            # Dataclasses and InfluxDB persistence layer
-│   ├── assistant_dataclasses.py
-│   ├── database_manager.py
-│   └── skill_map.py
-├── ui/              # QML interface and bridge to Python
-│   ├── main.qml
-│   └── bridge.py
-└── tools/           # Agent tools directory
+├── main.py              # Application entry point and async lifecycle
+├── automotive_agent.py  # CrewAI Agent, Task and notification logic
+├── config.py            # Configuration dataclasses (OmegaConf)
+├── skill_manager.py     # Manager for loading skill contexts
+├── knowledge_manager.py # Statistical knowledge extraction from telemetry
+├── action_manager.py    # Vehicle action dispatching
+├── events.py            # Event models (CarEvent)
+├── skills/              # Markdown files defining agent skills
+├── data/                # Data ingest, dataclasses and InfluxDB persistence layer
+│   ├── assistant_dataclasses.py # Vehicle, driver, and environment models
+│   ├── database_manager.py      # InfluxDB persistence and query layer
+│   ├── skill_map.py             # Event-to-skill routing map
+│   └── source_manager.py        # WebSocket/MQTT source and replay manager
+├── ui/                  # QML interface and Qt Bridge
+│   ├── main.qml         # Dashboard UI with dark/light mode and agent response display
+│   └── bridge.py        # PySide6 VehicleBridge communicating with async agent/broker
+└── tools/               # Agent tools directory
 ```
 
 ## ⚙️ Setup & Installation
@@ -114,22 +117,40 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `ollama_port` | Ollama server port | `11434` |
 | `ollama_llm` | LLM model to use | `ollama/qwen2.5:3b-instruct` |
 | `ollama_timeout` | LLM timeout in seconds | `1200` |
+| `data_websocket_url` | WebSocket URL for telemetry source | `ws://localhost:4545/socket` |
+| `data_replay_folder` | Path to JSON dataset folder for telemetry replay | `""` |
+| `mqtt_enabled` | Enable MQTT telemetry broker and client integration | `False` |
+| `mqtt_embedded_broker` | Run built-in embedded MQTT broker (amqtt) when MQTT is enabled | `True` |
+| `mqtt_host` | MQTT broker host | `127.0.0.1` |
+| `mqtt_port` | MQTT broker port | `1883` |
+| `mqtt_topic` | MQTT subscribe topic | `telemetry/#` |
+| `knowledge_update_interval` | Interval (seconds) for batching telemetry updates | `1.0` |
 | `influxdb_url` | InfluxDB server URL | `http://localhost:8086` |
 | `influxdb_token` | InfluxDB auth token | `my-super-secret-token` |
 | `influxdb_org` | InfluxDB organization | `stellantis` |
 | `influxdb_bucket` | InfluxDB bucket | `assistant-bucket` |
 
-**Example:**
+**Examples:**
 ```bash
-python main.py ollama_host="192.168.1.50" ollama_llm="mistral"
+# Run with custom model and replay dataset
+python main.py ollama_llm="ollama/qwen2.5:7b-instruct" data_replay_folder="../Dataset/assistant/json_output"
+
+# Run with embedded MQTT broker enabled
+python main.py mqtt_enabled=True
 ```
 
 ## 🧠 How It Works
 
-1. **Initialization**: The app starts a PySide6 event loop and an async loop using `qasync`.
-2. **Agent Creation**: An `AutomotiveAgent` is initialized with a CrewAI setup (Agent, Task, Crew).
-3. **Event Loop**: The agent continuously listens for:
-   - **User Events**: Inputs from the QML UI via the `VehicleBridge`.
-   - **System Events**: Simulated or connected vehicle telemetry (e.g., "low_battery", "driver_fatigue").
-4. **Processing**: The CrewAI processes the event against the relevant `Skill` context and returns a response.
-5. **UI Update**: The response is pushed back to the QML interface.
+1. **Initialization**: The app starts a PySide6 event loop alongside an async loop using `qasync`.
+2. **Ingress & Source Management**:
+   - Telemetry from WebSockets or MQTT is received, deserialized into strongly-typed dataclasses, and routed into `data_event_queue`.
+   - UI adjustments (e.g. `DriverEmotionState`, `DriverDrivingStyle`) are routed via MQTT or direct database writes.
+3. **Storage & Knowledge Extraction**:
+   - `DatabaseManager` writes telemetry time-series into InfluxDB and notifies `KnowledgeManager`.
+   - `KnowledgeManager` computes statistical trends, windowed aggregations, and detects significant changes.
+4. **Agent Orchestration**:
+   - `AutomotiveAgent` evaluates significant events and user inputs using CrewAI against domain skills (`skills/*.md`).
+   - Applies deduplication and urgency-based cooldowns to prevent alert fatigue.
+5. **UI & Speech Output**:
+   - Spoken responses and actions are published back to `VehicleBridge` and displayed live in `responseField` in [ui/main.qml](ui/main.qml).
+   - The UI automatically synchronizes its color palette with the operating system's Dark/Light mode theme.

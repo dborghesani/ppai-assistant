@@ -14,6 +14,9 @@ class ConfigAssistant:
     ollama_llm: str = "ollama/qwen2.5:3b-instruct"
     ollama_timeout: int = 1200
 
+    max_tokens: int = 1024
+    context_window_size: int = 4096
+
     data_websocket_url: str = "ws://localhost:4545/socket"
     data_replay_folder: str = ""
 

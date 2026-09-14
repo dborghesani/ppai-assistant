@@ -28,12 +28,45 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
-def _load_ollama_model(opt: ConfigAssistant) -> None:
-    model = opt.ollama_llm.removeprefix("ollama/")
+def _load_ollama_model(opt: ConfigAssistant) -> str:
+    raw_model = opt.ollama_llm.removeprefix("ollama/")
+    if "-ctx" in raw_model or opt.context_window_size <= 4096:
+        model_to_use = raw_model
+    else:
+        model_to_use = f"{raw_model}-ctx{opt.context_window_size}"
+        create_req = Request(
+            url=f"http://{opt.ollama_host}:{opt.ollama_port}/api/create",
+            data=json.dumps({
+                "model": model_to_use,
+                "from": raw_model,
+                "parameters": {
+                    "num_ctx": opt.context_window_size,
+                },
+                "stream": False,
+            }).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(create_req, timeout=opt.ollama_timeout):
+                logger.info(
+                    "Configured Ollama context window",
+                    base_model=raw_model,
+                    model=model_to_use,
+                    num_ctx=opt.context_window_size,
+                )
+        except Exception as error:
+            logger.warning(
+                "Unable to create model with custom context window via Ollama API, using base model",
+                base_model=raw_model,
+                error=str(error),
+            )
+            model_to_use = raw_model
+
     request = Request(
         url=f"http://{opt.ollama_host}:{opt.ollama_port}/api/generate",
         data=json.dumps({
-            "model": model,
+            "model": model_to_use,
             "prompt": "",
             "stream": False,
             "keep_alive": "30m",
@@ -43,9 +76,11 @@ def _load_ollama_model(opt: ConfigAssistant) -> None:
     )
     try:
         with urlopen(request, timeout=opt.ollama_timeout):
-            logger.info("Ollama model loaded", model=model)
+            logger.info("Ollama model loaded", model=model_to_use)
     except (URLError, TimeoutError, OSError) as error:
-        logger.warning("Unable to warm up Ollama model", model=model, error=str(error))
+        logger.warning("Unable to warm up Ollama model", model=model_to_use, error=str(error))
+
+    return f"ollama/{model_to_use}"
 
 
 async def main(opt: ConfigAssistant):
@@ -56,12 +91,13 @@ async def main(opt: ConfigAssistant):
 
     # initialize LLM (Ollama example)
     # ensure ollama is running: ollama serve
-    await asyncio.to_thread(_load_ollama_model, opt)
+    actual_model = await asyncio.to_thread(_load_ollama_model, opt)
 
     llm = LLM(
-        model=opt.ollama_llm,
+        model=actual_model,
         base_url=f"http://{opt.ollama_host}:{opt.ollama_port}",
         timeout=opt.ollama_timeout,
+        max_tokens=opt.max_tokens,
     )
 
     data_event_queue: asyncio.Queue = asyncio.Queue()

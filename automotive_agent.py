@@ -1,4 +1,5 @@
 import asyncio
+import time
 from typing import Any
 
 import structlog
@@ -154,10 +155,14 @@ class AutomotiveAgent:
                 risk. Stable or optimal conditions should remain silent.
 
                 Deduplication & Repetition Rules:
-                - ALWAYS examine "Recent notifications" before deciding to notify.
-                - If the condition, topic, or advice has already been communicated in "Recent notifications", you MUST set notify=false, UNLESS there is a critical escalation in urgency (e.g., from low/medium to high/critical) or new critical information that requires immediate intervention.
-                - Minor value variations or ongoing states of an already-notified condition MUST NOT trigger a new notification.
-                - If a notification would repeat or rephrase any recent notification without an urgency escalation, output notify=false, urgency=none, spoken_message=null, reason="Condition already notified recently."
+                - ALWAYS examine "Recent notifications" FIRST before deciding to notify.
+                - If the condition, topic, or advice has already been communicated in "Recent notifications", you MUST set notify=false.
+                - Repeating warnings or advice creates dangerous driver distraction and alert fatigue.
+                - Minor value variations or ongoing persistent states of an already-notified condition MUST NOT trigger a new notification.
+                - You may ONLY notify again if:
+                  1. The user explicitly asked a question (user_input); OR
+                  2. There is a critical escalation in urgency (e.g., from LOW/MEDIUM to HIGH/CRITICAL).
+                - In all other duplicate cases, output notify=false, urgency=none, spoken_message=null, reason="Condition already notified recently."
 
                 Before setting notify=true, identify the concrete risk, required attention or
                 useful immediate action that justifies interrupting the occupant. If none exists,
@@ -233,13 +238,58 @@ class AutomotiveAgent:
         if not self.recent_notifications:
             return "None (no recent notifications spoken yet)"
         lines = []
+        now = time.time()
         for n in self.recent_notifications:
             urgency = n.get("urgency", "unknown").upper()
             skill = n.get("skill", "general")
             event = n.get("event", "update")
             msg = n.get("message", "")
-            lines.append(f"- [Urgency: {urgency}] Topic/Skill: {skill} ({event}) | Spoken: \"{msg}\"")
+            elapsed = int(now - n.get("timestamp", now))
+            lines.append(f"- [{elapsed}s ago | Urgency: {urgency}] Topic/Skill: {skill} ({event}) | Spoken: \"{msg}\"")
         return "\n".join(lines)
+
+    def _is_duplicate_or_cooling_down(
+        self,
+        message: str,
+        urgency: Urgency,
+        skill: str,
+        cooldown_seconds: float = 60.0,
+    ) -> tuple[bool, str]:
+        """Deterministic safety filter: prevent repeating duplicate or same-topic notifications within cooldown."""
+        now = time.time()
+        urgency_ranks = {
+            Urgency.NONE: 0,
+            Urgency.LOW: 1,
+            Urgency.MEDIUM: 2,
+            Urgency.HIGH: 3,
+            Urgency.CRITICAL: 4,
+        }
+        current_rank = urgency_ranks.get(urgency, 1)
+
+        norm_message = message.strip().lower()
+
+        for prev in reversed(self.recent_notifications):
+            prev_time = prev.get("timestamp", 0)
+            elapsed = now - prev_time
+
+            if elapsed > cooldown_seconds:
+                continue
+
+            prev_norm_msg = prev.get("message", "").strip().lower()
+            prev_urgency_str = prev.get("urgency", "none").lower()
+            prev_rank = urgency_ranks.get(Urgency(prev_urgency_str), 1)
+
+            # 1. Exact or near-exact identical message within cooldown
+            if norm_message == prev_norm_msg or norm_message in prev_norm_msg or prev_norm_msg in norm_message:
+                if current_rank <= prev_rank:
+                    return True, f"Identical/similar message spoken {int(elapsed)}s ago with same or higher urgency"
+
+            # 2. Same skill topic within cooldown unless urgency escalated to critical/high
+            if prev.get("skill") == skill and elapsed < (cooldown_seconds / 2):
+                if current_rank <= prev_rank and current_rank < urgency_ranks[Urgency.HIGH]:
+                    return True, f"Recent notification for '{skill}' already spoken {int(elapsed)}s ago"
+
+        return False, ""
 
     async def _process_event(self, event: CarEvent):
         logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
@@ -267,18 +317,33 @@ class AutomotiveAgent:
 
         decision: NotificationDecision = result.pydantic
         if decision.notify and decision.spoken_message:
-            logger.info(f">>> [speak] {decision.spoken_message}")
-            #await self.tts.speak(decision.spoken_message)
-            self.recent_notifications.append({
-                "urgency": decision.urgency.value,
-                "message": decision.spoken_message,
-                "skill": event.skill,
-                "event": event.event_name,
-            })
-            if len(self.recent_notifications) > 5:
-                self.recent_notifications.pop(0)
-        if decision.action:
-            logger.info(f">>> [action] {decision.action.action_type}")
-            # handle the action accordingly
-            if decision.action.action_type is not ActionType.NONE:
-                logger.info(f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}")
+            # Check deterministic cooldown / deduplication unless user explicitly asked a question
+            if not event.user_input:
+                suppressed, reason = self._is_duplicate_or_cooling_down(
+                    message=decision.spoken_message,
+                    urgency=decision.urgency,
+                    skill=event.skill,
+                )
+            else:
+                suppressed, reason = False, ""
+
+            if suppressed:
+                logger.info(f">>> [suppressed duplicate] {reason}")
+            else:
+                logger.info(f">>> [speak] {decision.spoken_message}")
+                # await self.tts.speak(decision.spoken_message)
+                self.recent_notifications.append({
+                    "urgency": decision.urgency.value,
+                    "message": decision.spoken_message,
+                    "skill": event.skill,
+                    "event": event.event_name,
+                    "timestamp": time.time(),
+                })
+                if len(self.recent_notifications) > 5:
+                    self.recent_notifications.pop(0)
+
+            if decision.action:
+                logger.info(f">>> [action] {decision.action.action_type}")
+                # handle the action accordingly
+                if decision.action.action_type is not ActionType.NONE:
+                    logger.info(f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}")

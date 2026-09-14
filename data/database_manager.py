@@ -81,32 +81,6 @@ class DatabaseManager:
                 "values": values,
             })
 
-    def load_last_state(self, name: str) -> Any:
-        # load the last state of the given measurement (class name) from the database
-        # add filter with timestamp starting from when the app is started
-        query = f"""
-        from(bucket: "{self.opt.influxdb_bucket}")
-        |> range(start: time(v: "{self.app_start_timestamp}"))
-        |> filter(fn: (r) => r._measurement == "{name}")
-        |> last()
-        """
-        tables = self.client.query_api().query(query)
-        if len(tables) == 0:
-            return None
-        try:
-            obj = globals()[name]()
-        except KeyError:
-            self.logger.error(f"Class {name} not found in assistant_dataclasses.py")
-            return None
-        valid_fields = {field.name for field in obj.__dataclass_fields__.values()}
-        # each field of the dataclass comes back in its own table/record, so merge them all
-        for table in tables:
-            for record in table.records:
-                field_name = record.get_field()
-                if field_name in valid_fields:
-                    setattr(obj, field_name, record.get_value())
-        return obj
-
     def write_measure(self, name: str, measure: str, value: Any):
         if name not in self.current_state:
             # create an object of type name and store it in the current state
@@ -117,16 +91,8 @@ class DatabaseManager:
                 self.logger.error(f"Class {name} not found in assistant_dataclasses.py")
                 return
         setattr(self.current_state[name], measure, value)
-        last_state = self.load_last_state(name)
-        if last_state:
-            # merge in fields from the last persisted state, without overwriting the value just set
-            for field_name in last_state.__dataclass_fields__:
-                if field_name != measure:
-                    setattr(self.current_state[name], field_name, getattr(last_state, field_name))
-        point = Point(self.current_state[name].__class__.__name__)
-        for field_name, field_value in self.current_state[name].__dict__.items():
-            if field_value is not None:
-                point.field(field_name, self._influx_field_value(field_value))
+        point = Point(name)
+        point.field(measure, self._influx_field_value(value))
         self.logger.info(f"Writing point for {name}.{measure} with value {value}")
         self.write_point(point)
 

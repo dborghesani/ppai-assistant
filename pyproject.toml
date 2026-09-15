@@ -1,7 +1,7 @@
 [project]
 name = "ppai-assistant"
 version = "0.1.0"
-description = "Automotive AI Assistant demo"
+description = "Automotive AI Assistant demo with CrewAI, PySide6/QML and Kyutai voice (TTS/STT)"
 requires-python = ">=3.10"
 dependencies = [
     "PySide6",
@@ -14,6 +14,7 @@ dependencies = [
     "websockets",
     "aiomqtt",
     "amqtt",
+    # Voice: Kyutai TTS/STT (Delayed Streams Modeling, PyTorch backend)
     "moshi",
     "torch",
     "sphn",

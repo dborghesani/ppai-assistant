@@ -264,19 +264,23 @@ class AutomotiveAgent:
             urgency = n.get("urgency", "unknown").upper()
             skill = n.get("skill", "general")
             event = n.get("event", "update")
+            measures = n.get("measures") or []
+            measures_str = f", measure(s): {', '.join(measures)}" if measures else ""
             msg = n.get("message", "")
             elapsed = int(now - n.get("timestamp", now))
-            lines.append(f"- [{elapsed}s ago | Urgency: {urgency}] Topic/Skill: {skill} ({event}) | Spoken: \"{msg}\"")
+            lines.append(
+                f"- [{elapsed}s ago | Urgency: {urgency}] Topic/Skill: {skill} ({event}{measures_str}) | Spoken: \"{msg}\""
+            )
         return "\n".join(lines)
 
     def _is_duplicate_or_cooling_down(
         self,
         message: str,
         urgency: Urgency,
-        skill: str,
+        measures: set[str],
         cooldown_seconds: float = 60.0,
     ) -> tuple[bool, str]:
-        """Deterministic safety filter: prevent repeating duplicate or same-topic notifications within cooldown."""
+        """Deterministic safety filter: prevent repeating duplicate or same-measure notifications within cooldown."""
         now = time.time()
         urgency_ranks = {
             Urgency.NONE: 0,
@@ -305,10 +309,14 @@ class AutomotiveAgent:
                 if current_rank <= prev_rank:
                     return True, f"Identical/similar message spoken {int(elapsed)}s ago with same or higher urgency"
 
-            # 2. Same skill topic within cooldown unless urgency escalated to critical/high
-            if prev.get("skill") == skill and elapsed < (cooldown_seconds / 2):
+            # 2. Same underlying measure(s) within cooldown unless urgency escalated to critical/high.
+            # Skill is too coarse (e.g. "vehicle" covers doors, temperature, engine, ...): only
+            # suppress if the notifications actually concern at least one common measure.
+            prev_measures = set(prev.get("measures") or [])
+            if measures and prev_measures and measures & prev_measures and elapsed < (cooldown_seconds / 2):
                 if current_rank <= prev_rank and current_rank < urgency_ranks[Urgency.HIGH]:
-                    return True, f"Recent notification for '{skill}' already spoken {int(elapsed)}s ago"
+                    shared = ", ".join(sorted(measures & prev_measures))
+                    return True, f"Recent notification for measure(s) '{shared}' already spoken {int(elapsed)}s ago"
 
         return False, ""
 
@@ -316,6 +324,9 @@ class AutomotiveAgent:
         logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         logger.info(">>> generating...")
         llm_start = time.time()
+        measures: set[str] = (
+            set(event.event_value.keys()) if isinstance(event.event_value, dict) else set()
+        )
         try:
             skill_instructions = self.skill_manager.get_skill(SkillType(event.skill))
         except ValueError:
@@ -346,7 +357,7 @@ class AutomotiveAgent:
                 suppressed, reason = self._is_duplicate_or_cooling_down(
                     message=decision.spoken_message,
                     urgency=decision.urgency,
-                    skill=event.skill,
+                    measures=measures,
                 )
             else:
                 suppressed, reason = False, ""
@@ -364,6 +375,7 @@ class AutomotiveAgent:
                     "message": decision.spoken_message,
                     "skill": event.skill,
                     "event": event.event_name,
+                    "measures": sorted(measures),
                     "timestamp": time.time(),
                 })
                 if len(self.recent_notifications) > 5:

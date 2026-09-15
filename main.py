@@ -1,24 +1,30 @@
 import asyncio
+import json
+import logging
+
+# fake openAI api key
+import os
+import sys
 from datetime import datetime, timezone
 from logging import warning
-import json
-import sys
 from urllib.error import URLError
 from urllib.request import Request, urlopen
-from crewai import LLM
-from config import ConfigAssistant
+
+import structlog
 from automotive_agent import AutomotiveAgent
+from config import ConfigAssistant
+from crewai import LLM
+from crewai_core.printer import set_suppress_console_output
 from data.database_manager import DatabaseManager
 from data.source_manager import SourceManager
 from knowledge_manager import KnowledgeManager
-from ui.bridge import VehicleBridge
-import structlog
 from omegaconf import OmegaConf
-from PySide6.QtWidgets import QApplication
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtWidgets import QApplication
 from qasync import QEventLoop
-from crewai_core.printer import set_suppress_console_output
-import logging
+from ui.bridge import VehicleBridge
+
+os.environ["OPENAI_API_KEY"] = "sk-fakeapikey"
 
 logging.basicConfig(level=logging.INFO)
 # Silence noisy third-party libraries
@@ -40,14 +46,16 @@ def _load_ollama_model(opt: ConfigAssistant) -> str:
         model_to_use = f"{raw_model}-ctx{opt.context_window_size}"
         create_req = Request(
             url=f"http://{opt.ollama_host}:{opt.ollama_port}/api/create",
-            data=json.dumps({
-                "model": model_to_use,
-                "from": raw_model,
-                "parameters": {
-                    "num_ctx": opt.context_window_size,
-                },
-                "stream": False,
-            }).encode(),
+            data=json.dumps(
+                {
+                    "model": model_to_use,
+                    "from": raw_model,
+                    "parameters": {
+                        "num_ctx": opt.context_window_size,
+                    },
+                    "stream": False,
+                }
+            ).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -69,12 +77,14 @@ def _load_ollama_model(opt: ConfigAssistant) -> str:
 
     request = Request(
         url=f"http://{opt.ollama_host}:{opt.ollama_port}/api/generate",
-        data=json.dumps({
-            "model": model_to_use,
-            "prompt": "",
-            "stream": False,
-            "keep_alive": "30m",
-        }).encode(),
+        data=json.dumps(
+            {
+                "model": model_to_use,
+                "prompt": "",
+                "stream": False,
+                "keep_alive": "30m",
+            }
+        ).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -82,7 +92,9 @@ def _load_ollama_model(opt: ConfigAssistant) -> str:
         with urlopen(request, timeout=opt.ollama_timeout):
             logger.info("Ollama model loaded", model=model_to_use)
     except (URLError, TimeoutError, OSError) as error:
-        logger.warning("Unable to warm up Ollama model", model=model_to_use, error=str(error))
+        logger.warning(
+            "Unable to warm up Ollama model", model=model_to_use, error=str(error)
+        )
 
     return f"ollama/{model_to_use}"
 
@@ -129,7 +141,7 @@ async def main(opt: ConfigAssistant):
 
     # initialize source manager
     source_manager = SourceManager(data_event_queue=data_event_queue, opt=opt)
-    
+
     engine = QQmlApplicationEngine()
     bridge = VehicleBridge(
         agent=agent,
@@ -143,16 +155,9 @@ async def main(opt: ConfigAssistant):
         bridge,
     )
     engine.load("ui/main.qml")
-    engine.warnings.connect(
-        lambda warnings: [
-            print(w.toString())
-            for w in warnings
-        ]
-    )
+    engine.warnings.connect(lambda warnings: [print(w.toString()) for w in warnings])
     if not engine.rootObjects():
-        raise RuntimeError(
-            "Failed to load main.qml"
-        )
+        raise RuntimeError("Failed to load main.qml")
 
     # run everything concurrently
     tasks = [
@@ -167,10 +172,13 @@ async def main(opt: ConfigAssistant):
         tasks.append(asyncio.create_task(source_manager.run_mqtt()))
     if opt.data_replay_folder:
         tasks.append(asyncio.create_task(source_manager.run_replay()))
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        await asyncio.to_thread(database_manager.close)
+
 
 if __name__ == "__main__":
-
     opt_cli = OmegaConf.from_cli()
     opt_default = OmegaConf.structured(ConfigAssistant())
     merged = OmegaConf.merge(opt_default, opt_cli)

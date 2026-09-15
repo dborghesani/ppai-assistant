@@ -17,7 +17,7 @@ class ConfigAssistant:
     max_tokens: int = 1024
     context_window_size: int = 4096
 
-    data_websocket_url: str = "ws://localhost:4545/socket"
+    data_websocket_url: str = "ws://localhost:4545/stream"
     data_replay_folder: str = ""
 
     # MQTT broker configuration
@@ -32,7 +32,7 @@ class ConfigAssistant:
     knowledge_update_interval: float = 1.0
     knowledge_numeric_change_ratio: float = 0.05
 
-    #influxDB
+    # influxDB
     influxdb_url: str = "http://localhost:8086"
     influxdb_token: str = "my-super-secret-token"
     influxdb_org: str = "stellantis"

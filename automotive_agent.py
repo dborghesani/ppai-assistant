@@ -5,7 +5,7 @@ from typing import Any, Callable
 import structlog
 from skill_manager import SkillManager, SkillType
 from events import CarEvent
-from tools.tts_manager import TTSManager
+from voice.tts_manager import TTSManager
 from crewai import Agent, Task, Crew
 from crewai.process import Process
 from crewai import LLM, Agent, Task, Crew

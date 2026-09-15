@@ -16,7 +16,7 @@ from events import CarEvent
 from knowledge_manager import KnowledgeManager
 from skill_manager import SkillType
 from automotive_agent import AutomotiveAgent
-from tools.stt_manager import STTManager
+from voice.stt_manager import STTManager
 import structlog
 
 class VehicleBridge(QObject):

@@ -8,6 +8,7 @@ dependencies = [
     "crewai",
     "crewai-core",
     "qasync",
+    "numpy-quaternion",
     "structlog",
     "omegaconf",
     "influxdb-client",
@@ -21,7 +22,3 @@ dependencies = [
     "sounddevice",
     "numpy",
 ]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"

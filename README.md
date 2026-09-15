@@ -118,8 +118,25 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
      influxdb:2
    ```
 
-   The default values above match the ones in `config.py` (`influxdb_url`, `influxdb_token`, `influxdb_org`, `influxdb_bucket`).
-   If you change any of them, override the corresponding `influxdb_*` setting when running `main.py` (see [Configuration](#configuration)).
+   or on powershell:
+
+   ```powershell
+   docker run -d `
+   --name influxdb `
+   --network influx-net `
+   --restart unless-stopped `
+   -p 8086:8086 `
+   -v influxdb-data:/var/lib/influxdb2 `
+   -e DOCKER_INFLUXDB_INIT_MODE=setup `
+   -e DOCKER_INFLUXDB_INIT_USERNAME=admin `
+   -e DOCKER_INFLUXDB_INIT_PASSWORD=admin123456 `
+   -e DOCKER_INFLUXDB_INIT_ORG=stellantis `
+   -e DOCKER_INFLUXDB_INIT_BUCKET=assistant-bucket `
+   -e DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-token `
+   influxdb:2
+
+The default values above match the ones in `config.py` (`influxdb_url`, `influxdb_token`, `influxdb_org`, `influxdb_bucket`).
+If you change any of them, override the corresponding `influxdb_*` setting when running `main.py` (see [Configuration](#configuration)).
 
 ## 🚀 Usage
 

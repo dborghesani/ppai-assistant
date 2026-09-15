@@ -1,13 +1,13 @@
-
 import asyncio
-from dataclasses import fields, is_dataclass
 import json
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import structlog
 import websockets
+
 try:
     import aiomqtt
 except ImportError:
@@ -17,21 +17,21 @@ try:
 except ImportError:
     Broker = None  # type: ignore[assignment]
 
-from data import assistant_dataclasses
 from config import ConfigAssistant
+from data import assistant_dataclasses
 from data.assistant_dataclasses import (
-    GPSData, 
-    VehicleMotion, 
-    GPSIMUData, 
-    RadarObject, 
-    VisionObject, 
     DetectedObjects,
-    GPSIMUState,
-    TrafficSigns,
-    LaneTracing,
-    VehicleState,
-    DriverEmotionState,
     DriverDrivingStyle,
+    DriverEmotionState,
+    GPSData,
+    GPSIMUData,
+    GPSIMUState,
+    LaneTracing,
+    RadarObject,
+    TrafficSigns,
+    VehicleMotion,
+    VehicleState,
+    VisionObject,
 )
 
 
@@ -71,9 +71,7 @@ class SourceManager:
 
         valid_fields = {field.name for field in fields(VehicleMotion)}
         normalized = {
-            key: value
-            for key, value in values.items()
-            if key in valid_fields
+            key: value for key, value in values.items() if key in valid_fields
         }
         nested_fields = {
             "wheel_speed": {
@@ -118,9 +116,7 @@ class SourceManager:
 
         valid_fields = {field.name for field in fields(GPSIMUData)}
         normalized = {
-            key: value
-            for key, value in values.items()
-            if key in valid_fields
+            key: value for key, value in values.items() if key in valid_fields
         }
         magnetic_field = values.get("magnetic_field")
         if isinstance(magnetic_field, dict):
@@ -137,9 +133,7 @@ class SourceManager:
 
         valid_fields = {field.name for field in fields(VehicleState)}
         normalized = {
-            key: value
-            for key, value in values.items()
-            if key in valid_fields
+            key: value for key, value in values.items() if key in valid_fields
         }
         nested_fields = {
             "door_open": {
@@ -194,7 +188,7 @@ class SourceManager:
             self.logger.warning("Ignoring WebSocket payload that is not an object")
             return
 
-        #data = self.deserialize(payload)
+        # data = self.deserialize(payload)
         # enumerate payload
         if "gps_data" in payload:
             gps_data = GPSData(**payload["gps_data"])  # type: ignore[name-defined]
@@ -209,18 +203,32 @@ class SourceManager:
                     vehicle_motion.wheel_speed_rear_left,
                     vehicle_motion.wheel_speed_rear_right,
                 ]
-                valid_wheel_speeds: list[float] = [ws for ws in wheel_speeds if ws is not None]
+                valid_wheel_speeds: list[float] = [
+                    ws for ws in wheel_speeds if ws is not None
+                ]
                 if valid_wheel_speeds:
-                    vehicle_motion.speed = sum(valid_wheel_speeds) / len(valid_wheel_speeds)
-                await self.data_event_queue.put({"type": "data_received", "data": vehicle_motion})
+                    vehicle_motion.speed = sum(valid_wheel_speeds) / len(
+                        valid_wheel_speeds
+                    )
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": vehicle_motion}
+                )
         if "gpsimu_data" in payload:
             gpsimu_data = self.deserialize_gpsimu_data(payload["gpsimu_data"])
             if gpsimu_data is not None:
-                await self.data_event_queue.put({"type": "data_received", "data": gpsimu_data})
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": gpsimu_data}
+                )
         if "gpsimu_state" in payload:
             gpsimu_state = GPSIMUState(**payload["gpsimu_state"])  # type: ignore[name-defined]
-            await self.data_event_queue.put({"type": "data_received", "data": gpsimu_state})
-        if "radar_objects" in payload or "objects" in payload or "traffic_signs" in payload:
+            await self.data_event_queue.put(
+                {"type": "data_received", "data": gpsimu_state}
+            )
+        if (
+            "radar_objects" in payload
+            or "objects" in payload
+            or "traffic_signs" in payload
+        ):
             radar_objects: list[RadarObject] = []
             vision_objects: list[VisionObject] = []
             if "radar_objects" in payload:
@@ -239,7 +247,10 @@ class SourceManager:
                 people_around = 0
                 dangerous_objects_around = 0
                 for vision_object in vision_objects:
-                    if vision_object.category == "Car" or vision_object.category == "Truck":
+                    if (
+                        vision_object.category == "Car"
+                        or vision_object.category == "Truck"
+                    ):
                         vehicles_around += 1
                     elif vision_object.category == "Pedestrian":
                         people_around += 1
@@ -250,37 +261,71 @@ class SourceManager:
                 vision_objects=vision_objects,
                 vehicles_around=vehicles_around if "objects" in payload else None,
                 people_around=people_around if "objects" in payload else None,
-                dangerous_objects_around=dangerous_objects_around if "objects" in payload else None,
+                dangerous_objects_around=dangerous_objects_around
+                if "objects" in payload
+                else None,
             )
             if "traffic_signs" in payload:
                 traffic_signs = TrafficSigns(**payload["traffic_signs"])  # type: ignore[name-defined]
                 detected_objects.traffic_signs = traffic_signs
             # TODO: futher analyze detected objects if necessary
-            await self.data_event_queue.put({"type": "data_received", "data": detected_objects})
+            await self.data_event_queue.put(
+                {"type": "data_received", "data": detected_objects}
+            )
         if "lane_tracing" in payload:
             lane_tracing = LaneTracing(**payload["lane_tracing"])  # type: ignore[name-defined]
             # TODO: verify if nesting works
-            await self.data_event_queue.put({"type": "data_received", "data": lane_tracing})
+            await self.data_event_queue.put(
+                {"type": "data_received", "data": lane_tracing}
+            )
         if "vehicle_state" in payload:
             vehicle_state = self.deserialize_vehicle_state(payload["vehicle_state"])
             if vehicle_state is not None:
-                await self.data_event_queue.put({"type": "data_received", "data": vehicle_state})
-        if "driver_emotion_state" in payload or "DriverEmotionState" in payload or payload.get("name") == "DriverEmotionState":
-            data = payload.get("driver_emotion_state") or payload.get("DriverEmotionState") or payload.get("data")
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": vehicle_state}
+                )
+        if (
+            "driver_emotion_state" in payload
+            or "DriverEmotionState" in payload
+            or payload.get("name") == "DriverEmotionState"
+        ):
+            data = (
+                payload.get("driver_emotion_state")
+                or payload.get("DriverEmotionState")
+                or payload.get("data")
+            )
             if isinstance(data, dict):
                 valid_fields = {f.name for f in fields(DriverEmotionState)}
-                driver_emotion = DriverEmotionState(**{k: v for k, v in data.items() if k in valid_fields})
-                await self.data_event_queue.put({"type": "data_received", "data": driver_emotion})
-        if "driver_driving_style" in payload or "DriverDrivingStyle" in payload or payload.get("name") == "DriverDrivingStyle":
-            data = payload.get("driver_driving_style") or payload.get("DriverDrivingStyle") or payload.get("data")
+                driver_emotion = DriverEmotionState(
+                    **{k: v for k, v in data.items() if k in valid_fields}
+                )
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": driver_emotion}
+                )
+        if (
+            "driver_driving_style" in payload
+            or "DriverDrivingStyle" in payload
+            or payload.get("name") == "DriverDrivingStyle"
+        ):
+            data = (
+                payload.get("driver_driving_style")
+                or payload.get("DriverDrivingStyle")
+                or payload.get("data")
+            )
             if isinstance(data, dict):
                 valid_fields = {f.name for f in fields(DriverDrivingStyle)}
-                driver_style = DriverDrivingStyle(**{k: v for k, v in data.items() if k in valid_fields})
-                await self.data_event_queue.put({"type": "data_received", "data": driver_style})
+                driver_style = DriverDrivingStyle(
+                    **{k: v for k, v in data.items() if k in valid_fields}
+                )
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": driver_style}
+                )
         if "name" in payload and "data" in payload:
             generic_obj = self.deserialize(payload)
             if generic_obj is not None:
-                await self.data_event_queue.put({"type": "data_received", "data": generic_obj})
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": generic_obj}
+                )
 
     async def _send_replay(
         self,
@@ -294,7 +339,9 @@ class SourceManager:
                 timestamp = int(path.stem.split("_")[-1])
                 if previous_timestamp is not None:
                     await asyncio.sleep(max(0, timestamp - previous_timestamp) / 1e6)
-                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload = json.loads(
+                    await asyncio.to_thread(path.read_text, encoding="utf-8")
+                )
                 await websocket.send(json.dumps(payload))
                 self.logger.debug(f"[{index + 1}/{len(files)}] Sent {path.name}")
                 previous_timestamp = timestamp
@@ -305,7 +352,8 @@ class SourceManager:
 
     async def run_replay(self) -> None:
         files = sorted(
-            Path(self.opt.data_replay_folder).glob("*.json"), key=lambda path: int(path.stem.split("_")[-1])
+            Path(self.opt.data_replay_folder).glob("*.json"),
+            key=lambda path: int(path.stem.split("_")[-1]),
         )
         if not files:
             self.logger.warning(f"No JSON files found in {self.opt.data_replay_folder}")
@@ -313,10 +361,14 @@ class SourceManager:
 
         parsed_url = urlparse(self.websocket_url)
         if parsed_url.scheme != "ws" or parsed_url.hostname is None:
-            raise ValueError(f"Replay WebSocket URL must use ws:// and include a host: {self.websocket_url}")
+            raise ValueError(
+                f"Replay WebSocket URL must use ws:// and include a host: {self.websocket_url}"
+            )
 
         port = parsed_url.port or 80
-        self.logger.info("Starting replay WebSocket server", host=parsed_url.hostname, port=port)
+        self.logger.info(
+            "Starting replay WebSocket server", host=parsed_url.hostname, port=port
+        )
         async with websockets.serve(
             lambda websocket: self._send_replay(websocket, files),
             parsed_url.hostname,
@@ -324,7 +376,9 @@ class SourceManager:
             ping_interval=20,
         ):
             self.server_ready.set()
-            self.logger.info("Replay WebSocket server listening", url=self.websocket_url)
+            self.logger.info(
+                "Replay WebSocket server listening", url=self.websocket_url
+            )
             try:
                 await asyncio.Future()
             finally:
@@ -332,7 +386,9 @@ class SourceManager:
 
     async def run_embedded_broker(self) -> None:
         if Broker is None:
-            self.logger.error("amqtt is not installed, cannot start embedded MQTT broker")
+            self.logger.error(
+                "amqtt is not installed, cannot start embedded MQTT broker"
+            )
             return
 
         broker_config = {
@@ -348,14 +404,20 @@ class SourceManager:
                     "allow_anonymous": True
                 }
             },
-            "topic_check": {
-                "enabled": False
-            },
+            "topic_check": {"enabled": False},
         }
-        self.logger.info("Starting embedded MQTT broker", host=self.opt.mqtt_host, port=self.opt.mqtt_port)
+        self.logger.info(
+            "Starting embedded MQTT broker",
+            host=self.opt.mqtt_host,
+            port=self.opt.mqtt_port,
+        )
         broker = Broker(broker_config)
         await broker.start()
-        self.logger.info("Embedded MQTT broker running", host=self.opt.mqtt_host, port=self.opt.mqtt_port)
+        self.logger.info(
+            "Embedded MQTT broker running",
+            host=self.opt.mqtt_host,
+            port=self.opt.mqtt_port,
+        )
         try:
             await asyncio.Future()
         finally:
@@ -385,7 +447,10 @@ class SourceManager:
                     password=self.opt.mqtt_password,
                 ) as client:
                     await client.subscribe(self.opt.mqtt_topic)
-                    self.logger.info("Connected to MQTT broker and subscribed", topic=self.opt.mqtt_topic)
+                    self.logger.info(
+                        "Connected to MQTT broker and subscribed",
+                        topic=self.opt.mqtt_topic,
+                    )
                     async for message in client.messages:
                         payload = message.payload
                         msg_str: str | bytes
@@ -399,7 +464,9 @@ class SourceManager:
             except asyncio.CancelledError:
                 raise
             except Exception as error:
-                self.logger.warning("MQTT broker disconnected or error occurred", error=str(error))
+                self.logger.warning(
+                    "MQTT broker disconnected or error occurred", error=str(error)
+                )
                 await asyncio.sleep(5)
 
     async def run_socket(self) -> None:
@@ -408,9 +475,15 @@ class SourceManager:
 
         while True:
             try:
-                self.logger.info("Connecting to WebSocket source", url=self.websocket_url)
-                async with websockets.connect(self.websocket_url, ping_interval=20) as websocket:
-                    self.logger.info("Connected to WebSocket source", url=self.websocket_url)
+                self.logger.info(
+                    "Connecting to WebSocket source", url=self.websocket_url
+                )
+                async with websockets.connect(
+                    self.websocket_url, ping_interval=20
+                ) as websocket:
+                    self.logger.info(
+                        "Connected to WebSocket source", url=self.websocket_url
+                    )
                     async for message in websocket:
                         await self.process_message(message)
             except asyncio.CancelledError:

@@ -1023,7 +1023,7 @@ ApplicationWindow {
 
                     TextArea {
                         id: inputField
-                        width: parent.width*0.9
+                        width: parent.width*0.75
                         height: parent.height
 
                         placeholderText: "Ask something..."
@@ -1031,6 +1031,21 @@ ApplicationWindow {
                         Keys.onReturnPressed: {
                             vehicleBridge.userInput(text)
                             clear()
+                        }
+                    }
+
+                    Button {
+                        id: pushToTalkButton
+                        text: pressed ? "Listening..." : "🎤 Hold to talk"
+                        width: parent.width*0.15-spacing
+                        height: parent.height
+
+                        onPressedChanged: {
+                            if (pressed) {
+                                vehicleBridge.startVoiceInput()
+                            } else {
+                                vehicleBridge.stopVoiceInput()
+                            }
                         }
                     }
 

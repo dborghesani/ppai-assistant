@@ -32,6 +32,19 @@ class ConfigAssistant:
     knowledge_update_interval: float = 1.0
     knowledge_numeric_change_ratio: float = 0.05
 
+    # Text-to-speech (Kyutai TTS, Delayed Streams Modeling)
+    tts_enabled: bool = False
+    tts_hf_repo: str = "kyutai/tts-0.75b-en-public"  # smaller 0.75B, English-only model
+    tts_voice: str = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
+    tts_device: str = "cuda"
+    tts_n_q: int = 16
+    tts_cfg_coef: float = 3.0
+
+    # Speech-to-text (Kyutai STT, push-to-talk, Delayed Streams Modeling)
+    stt_enabled: bool = False
+    stt_hf_repo: str = "kyutai/stt-1b-en_fr"
+    stt_device: str = "cuda"
+
     #influxDB
     influxdb_url: str = "http://localhost:8086"
     influxdb_token: str = "my-super-secret-token"

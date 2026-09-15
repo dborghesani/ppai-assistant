@@ -16,6 +16,7 @@ from events import CarEvent
 from knowledge_manager import KnowledgeManager
 from skill_manager import SkillType
 from automotive_agent import AutomotiveAgent
+from tools.stt_manager import STTManager
 import structlog
 
 class VehicleBridge(QObject):
@@ -29,6 +30,7 @@ class VehicleBridge(QObject):
         opt: ConfigAssistant,
         database_manager: DatabaseManager,
         knowledge_manager: KnowledgeManager,
+        stt_manager: STTManager | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -38,6 +40,7 @@ class VehicleBridge(QObject):
         self.loop = loop
         self.database_manager = database_manager
         self.knowledge_manager = knowledge_manager
+        self.stt_manager = stt_manager
         self.agent.on_response = self.responseReceived.emit
         self._check_dark_mode()
 
@@ -143,6 +146,23 @@ class VehicleBridge(QObject):
     @Slot(bool)
     def eventProcessingChanged(self, enabled: bool):
         self.agent.is_listening = enabled
+
+    @Slot()
+    def startVoiceInput(self):
+        if not self.agent.is_listening or self.stt_manager is None:
+            return
+        self.stt_manager.start_recording()
+
+    @Slot()
+    def stopVoiceInput(self):
+        if not self.agent.is_listening or self.stt_manager is None:
+            return
+        self.loop.create_task(self._transcribe_and_send())
+
+    async def _transcribe_and_send(self):
+        text = await asyncio.to_thread(self.stt_manager.stop_and_transcribe)
+        if text:
+            self.userInput(text)
 
     # generic slots
     @Slot(str, str, float)

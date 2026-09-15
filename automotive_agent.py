@@ -5,6 +5,7 @@ from typing import Any, Callable
 import structlog
 from skill_manager import SkillManager, SkillType
 from events import CarEvent
+from tools.tts_manager import TTSManager
 from crewai import Agent, Task, Crew
 from crewai.process import Process
 from crewai import LLM, Agent, Task, Crew
@@ -62,11 +63,12 @@ class NotificationDecision(BaseModel):
     action: Action | None = None
 
 class AutomotiveAgent:
-    def __init__(self, llm: LLM):
+    def __init__(self, llm: LLM, tts_manager: TTSManager | None = None):
         self.llm = llm
         self.is_active = True
         self.event_queue: asyncio.Queue[CarEvent] = asyncio.Queue()
         self.is_listening = False
+        self.tts_manager = tts_manager
 
         self.skill_manager = SkillManager()
 
@@ -333,7 +335,8 @@ class AutomotiveAgent:
                 logger.info(f">>> [suppressed duplicate] {reason}")
             else:
                 logger.info(f">>> [speak] {decision.spoken_message}")
-                # await self.tts.speak(decision.spoken_message)
+                if self.tts_manager is not None:
+                    await self.tts_manager.speak(decision.spoken_message)
                 self.recent_notifications.append({
                     "urgency": decision.urgency.value,
                     "message": decision.spoken_message,

@@ -12,6 +12,8 @@ from data.database_manager import DatabaseManager
 from data.source_manager import SourceManager
 from knowledge_manager import KnowledgeManager
 from ui.bridge import VehicleBridge
+from tools.tts_manager import TTSManager
+from tools.stt_manager import STTManager
 import structlog
 from omegaconf import OmegaConf
 from PySide6.QtWidgets import QApplication
@@ -116,8 +118,19 @@ async def main(opt: ConfigAssistant):
     database_manager = DatabaseManager(data_event_queue, opt, measurement_event_queue)
     database_manager.app_start_timestamp = datetime.now(timezone.utc).isoformat()  # type: ignore[assignment]
 
-    # initialize Agent
-    agent = AutomotiveAgent(llm=llm)
+    # initialize tts
+    tts_manager = await asyncio.to_thread(
+        TTSManager,
+        enabled=opt.tts_enabled,
+        hf_repo=opt.tts_hf_repo,
+        voice=opt.tts_voice,
+        device=opt.tts_device,
+        n_q=opt.tts_n_q,
+        cfg_coef=opt.tts_cfg_coef,
+    )
+
+    # initialize Agent (model loading is blocking, run off the event loop)
+    agent = AutomotiveAgent(llm=llm, tts_manager=tts_manager)
 
     # initialize knowledge manager to extract knowledge from data
     knowledge_manager = KnowledgeManager(
@@ -131,11 +144,18 @@ async def main(opt: ConfigAssistant):
     source_manager = SourceManager(data_event_queue=data_event_queue, opt=opt)
     
     engine = QQmlApplicationEngine()
+    stt_manager = await asyncio.to_thread(
+        STTManager,
+        enabled=opt.stt_enabled,
+        hf_repo=opt.stt_hf_repo,
+        device=opt.stt_device,
+    )
     bridge = VehicleBridge(
         agent=agent,
         loop=asyncio.get_running_loop(),
         database_manager=database_manager,
         knowledge_manager=knowledge_manager,
+        stt_manager=stt_manager,
         opt=opt,
     )
     engine.rootContext().setContextProperty(

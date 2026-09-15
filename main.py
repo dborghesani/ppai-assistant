@@ -171,7 +171,7 @@ async def main(opt: ConfigAssistant):
     engine.load("ui/main.qml")
     engine.warnings.connect(
         lambda warnings: [
-            print(w.toString())
+            logger.warning(w.toString())
             for w in warnings
         ]
     )
@@ -185,8 +185,9 @@ async def main(opt: ConfigAssistant):
         asyncio.create_task(agent.run()),
         asyncio.create_task(knowledge_manager.run()),
         asyncio.create_task(database_manager.run()),
-        asyncio.create_task(source_manager.run()),
     ]
+    if opt.is_socket_enabled:
+        tasks.append(asyncio.create_task(source_manager.run_socket()))
     if opt.mqtt_enabled:
         if opt.mqtt_embedded_broker:
             tasks.append(asyncio.create_task(source_manager.run_embedded_broker()))

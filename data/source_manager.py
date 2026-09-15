@@ -402,7 +402,7 @@ class SourceManager:
                 self.logger.warning("MQTT broker disconnected or error occurred", error=str(error))
                 await asyncio.sleep(5)
 
-    async def run(self) -> None:
+    async def run_socket(self) -> None:
         if self.opt.data_replay_folder:
             await self.server_ready.wait()
 

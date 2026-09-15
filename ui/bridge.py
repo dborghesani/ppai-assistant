@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from typing import Any, Dict, List, Tuple
 
 from PySide6.QtCore import QObject, Slot, Signal, Property
@@ -22,6 +23,7 @@ import structlog
 class VehicleBridge(QObject):
     responseReceived = Signal(str)
     isDarkModeChanged = Signal(bool)
+    conversationModeChanged = Signal(bool)
 
     def __init__(
         self,
@@ -160,9 +162,73 @@ class VehicleBridge(QObject):
         self.loop.create_task(self._transcribe_and_send())
 
     async def _transcribe_and_send(self):
+        stt_start = time.time()
         text = await asyncio.to_thread(self.stt_manager.stop_and_transcribe)
+        self.logger.info(f">>> STT transcription took {time.time() - stt_start:.2f}s", text=text)
         if text:
             self.userInput(text)
+
+    @Slot()
+    def startConversation(self):
+        self.logger.info("Starting conversation mode")
+        """Enter always-listening mode: turn-taking, auto-timeout and barge-in."""
+        if not self.agent.is_listening:
+            self.logger.warning("Cannot start conversation: event processing is disabled")
+            return
+        if self.stt_manager is None:
+            self.logger.warning("Cannot start conversation: STT manager is not configured")
+            return
+        if not self.stt_manager.enabled:
+            self.logger.warning("Cannot start conversation: STT manager failed to load/is disabled")
+            return
+        try:
+            self.stt_manager.start_conversation(
+                on_utterance=self._on_conversation_utterance,
+                on_speech_start=self._on_conversation_speech_start,
+                on_session_timeout=self._on_conversation_timeout,
+                vad_head_index=self.opt.conversation_vad_head_index,
+                vad_threshold=self.opt.conversation_vad_threshold,
+                session_silence_timeout=self.opt.conversation_session_silence_timeout,
+                pause_seconds=self.opt.conversation_pause_seconds,
+                is_tts_speaking=lambda: bool(
+                    self.agent.tts_manager is not None and self.agent.tts_manager.is_speaking
+                ),
+                mute_mic_during_tts=self.opt.conversation_mute_mic_during_tts,
+                barge_in_energy_threshold=self.opt.conversation_barge_in_energy_threshold,
+                barge_in_min_frames=self.opt.conversation_barge_in_min_frames,
+                get_tts_reference=(
+                    self.agent.tts_manager.get_recent_playback
+                    if self.agent.tts_manager is not None
+                    else None
+                ),
+                echo_correlation_threshold=self.opt.conversation_echo_correlation_threshold,
+            )
+        except Exception as e:
+            self.logger.error("Failed to start conversation mode", error=str(e), exc_info=True)
+
+    @Slot()
+    def stopConversation(self):
+        self.logger.info("Stopping conversation mode")
+        if self.stt_manager is not None:
+            self.stt_manager.stop_conversation()
+
+    def _on_conversation_utterance(self, text: str):
+        # Called from the STT background thread; hop back onto the event loop.
+        self.loop.call_soon_threadsafe(self.userInput, text)
+
+    def _on_conversation_speech_start(self):
+        # Called from the STT background thread: barge-in, stop any TTS playback now.
+        if self.agent.tts_manager is not None and self.agent.tts_manager.is_speaking:
+            self.agent.tts_manager.stop()
+
+    def _on_conversation_timeout(self):
+        # Called from the STT background thread after prolonged silence.
+        self.loop.call_soon_threadsafe(self._handle_conversation_timeout)
+
+    def _handle_conversation_timeout(self):
+        if self.stt_manager is not None:
+            self.stt_manager.stop_conversation()
+        self.conversationModeChanged.emit(False)
 
     # generic slots
     @Slot(str, str, float)

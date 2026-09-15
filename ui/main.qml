@@ -1035,28 +1035,36 @@ ApplicationWindow {
                     }
 
                     Button {
-                        id: pushToTalkButton
-                        text: pressed ? "Listening..." : "🎤 Hold to talk"
-                        width: parent.width*0.15-spacing
-                        height: parent.height
-
-                        onPressedChanged: {
-                            if (pressed) {
-                                vehicleBridge.startVoiceInput()
-                            } else {
-                                vehicleBridge.stopVoiceInput()
-                            }
-                        }
-                    }
-
-                    Button {
                         text: "Send"
-                        width: parent.width*0.1-spacing
+                        width: parent.width*0.1-parent.spacing
                         height: parent.height
 
                         onClicked: {
                             vehicleBridge.userInput(inputField.text)
                             inputField.clear()
+                        }
+                    }
+
+                    Button {
+                        id: conversationButton
+                        checkable: true
+                        text: checked ? "🎙️ Conversation ON" : "🎙️ Conversation"
+                        width: parent.width*0.15-parent.spacing
+                        height: parent.height
+
+                        onCheckedChanged: {
+                            if (checked) {
+                                vehicleBridge.startConversation()
+                            } else {
+                                vehicleBridge.stopConversation()
+                            }
+                        }
+
+                        Connections {
+                            target: vehicleBridge
+                            function onConversationModeChanged(active) {
+                                conversationButton.checked = active
+                            }
                         }
                     }
                 }

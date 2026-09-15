@@ -142,12 +142,22 @@ class AutomotiveAgent:
                 Available actions:
                 {available_actions}
 
+                ABSOLUTE RULE, no exceptions: if "Direct user request" above is not empty, the
+                user directly spoke or typed to you. You MUST set notify=true and produce a
+                spoken_message that responds to their request. This overrides "Default to
+                silence", the deduplication rules, and every other instruction below. Never
+                output notify=false when user_input is non-empty.
+
+                The rest of this section (default to silence, deduplication) applies only
+                when user_input is empty, i.e. this evaluation was triggered by a knowledge/
+                vehicle-event update and not by something the user said.
+
                 Default to silence. A knowledge update requests an evaluation, not a spoken
                 response. Normal, safe, stable, informational or non-actionable conditions
                 must produce notify=false.
 
-                Set notify=true only when at least one condition applies:
-                - the user made a direct request that requires a response;
+                Set notify=true when at least one condition applies:
+                - user_input is non-empty (always, per the absolute rule above);
                 - there is an immediate or developing safety risk;
                 - a vehicle condition requires timely attention;
                 - the occupant can take a useful, time-sensitive action now.
@@ -158,15 +168,15 @@ class AutomotiveAgent:
                 remain silent unless their duration or surrounding context indicates a concrete
                 risk. Stable or optimal conditions should remain silent.
 
-                Deduplication & Repetition Rules:
+                Deduplication & Repetition Rules (only when user_input is empty):
                 - ALWAYS examine "Recent notifications" FIRST before deciding to notify.
                 - If the condition, topic, or advice has already been communicated in "Recent notifications", you MUST set notify=false.
                 - Repeating warnings or advice creates dangerous driver distraction and alert fatigue.
                 - Minor value variations or ongoing persistent states of an already-notified condition MUST NOT trigger a new notification.
-                - You may ONLY notify again if:
-                  1. The user explicitly asked a question (user_input); OR
-                  2. There is a critical escalation in urgency (e.g., from LOW/MEDIUM to HIGH/CRITICAL).
-                - In all other duplicate cases, output notify=false, urgency=none, spoken_message=null, reason="Condition already notified recently."
+                - These deduplication rules NEVER apply when user_input is non-empty: a direct
+                  user request always gets notify=true and a real answer, even if the topic or
+                  wording resembles a recent notification.
+                - In all other duplicate cases (user_input empty), output notify=false, urgency=none, spoken_message=null, reason="Condition already notified recently."
 
                 Before setting notify=true, identify the concrete risk, required attention or
                 useful immediate action that justifies interrupting the occupant. If none exists,
@@ -194,12 +204,19 @@ class AutomotiveAgent:
                 Output: notify=false, urgency=none, spoken_message=null, reason="Temperature condition was already communicated recently and has not escalated in urgency."
                 Positive example: a turn signal that remains active for several
                 minutes after a completed turn may justify a low-urgency reminder.
+                Positive example (user_input overrides everything): user_input is "What's the
+                cabin temperature?" and Recent notifications already contains an identical
+                temperature notification from moments ago. Output: notify=true, urgency=low,
+                spoken_message="It's twenty-two degrees Celsius in the cabin.", reason="Direct
+                user request, always answered regardless of recent notifications."
 
                 The spoken message is sent directly to text-to-speech. Address the occupant
                 naturally; do not include analysis, scores, variable names, or implementation
                 details.
 
-                Requests provided as user_input are high-priority and should be handled promptly.
+                Requests provided as user_input are high-priority and MUST always receive a
+                notify=true response with a real, on-topic spoken_message — never silence, and
+                never a generic acknowledgement that avoids answering the request.
                 """,
             expected_output=(
                 "A structured notification decision containing notify, urgency, "
@@ -226,17 +243,17 @@ class AutomotiveAgent:
                 await asyncio.sleep(0.1)
                 continue
             try:
-
-                if hasattr(self, 'event_queue') and not self.event_queue.empty():
-                    event = await self.event_queue.get()
-                    await self._process_event(event)
-
-                # check for proactive events
-                await asyncio.sleep(1)
-
+                event = await asyncio.wait_for(self.event_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
             except Exception as e:
                 logger.error(f"Error in agent loop: {e}")
-                
+                continue
+
+            try:
+                await self._process_event(event)
+            except Exception as e:
+                logger.error(f"Error in agent loop: {e}")
 
     def _format_recent_notifications(self) -> str:
         if not self.recent_notifications:
@@ -298,6 +315,7 @@ class AutomotiveAgent:
     async def _process_event(self, event: CarEvent):
         logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         logger.info(">>> generating...")
+        llm_start = time.time()
         try:
             skill_instructions = self.skill_manager.get_skill(SkillType(event.skill))
         except ValueError:
@@ -316,6 +334,8 @@ class AutomotiveAgent:
         result = await self.crew.kickoff_async(
             inputs=inputs,
         )
+        llm_elapsed = time.time() - llm_start
+        logger.info(f">>> LLM generation took {llm_elapsed:.2f}s")
         response = result.raw if hasattr(result, 'raw') else str(result)
         logger.info(f">>> {response}")
 
@@ -336,7 +356,9 @@ class AutomotiveAgent:
             else:
                 logger.info(f">>> [speak] {decision.spoken_message}")
                 if self.tts_manager is not None:
+                    tts_start = time.time()
                     await self.tts_manager.speak(decision.spoken_message)
+                    logger.info(f">>> TTS synthesis+playback took {time.time() - tts_start:.2f}s")
                 self.recent_notifications.append({
                     "urgency": decision.urgency.value,
                     "message": decision.spoken_message,

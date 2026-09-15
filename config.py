@@ -17,7 +17,7 @@ class ConfigAssistant:
     max_tokens: int = 1024
     context_window_size: int = 4096
 
-    data_websocket_url: str = "ws://localhost:4545/socket"
+    data_websocket_url: str = "ws://localhost:4545/stream"
     data_replay_folder: str = ""
 
     # MQTT broker configuration
@@ -46,10 +46,14 @@ class ConfigAssistant:
     stt_device: str = "cuda"
 
     # Continuous conversation mode (turn-taking via semantic VAD, barge-in)
-    conversation_vad_head_index: int = 2  # pause-duration head: 0=0.5s, 1=1.0s, 2=2.0s, 3=3.0s
+    conversation_vad_head_index: int = (
+        2  # pause-duration head: 0=0.5s, 1=1.0s, 2=2.0s, 3=3.0s
+    )
     conversation_vad_threshold: float = 0.5
     conversation_session_silence_timeout: float = 10.0
-    conversation_pause_seconds: float = 1.0  # fallback turn-taking when checkpoint has no VAD heads
+    conversation_pause_seconds: float = (
+        1.0  # fallback turn-taking when checkpoint has no VAD heads
+    )
     # Without acoustic echo cancellation, the mic can pick up the assistant's own
     # speaker output and re-transcribe it as a new user request, causing a runaway
     # feedback loop. Muting transcription while TTS is speaking prevents that;
@@ -66,7 +70,7 @@ class ConfigAssistant:
     # (ignored) rather than a genuine user interruption.
     conversation_echo_correlation_threshold: float = 0.6
 
-    #influxDB
+    # influxDB
     influxdb_url: str = "http://localhost:8086"
     influxdb_token: str = "my-super-secret-token"
     influxdb_org: str = "stellantis"

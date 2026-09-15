@@ -1,16 +1,22 @@
-from influxdb_client import InfluxDBClient, Point
-from influxdb_client.client.write_api import SYNCHRONOUS
+import asyncio
+import json
+from dataclasses import asdict, fields, is_dataclass
+from typing import Any
+
 import structlog
 from config import ConfigAssistant
-import asyncio
-from dataclasses import asdict, fields, is_dataclass
-import json
-from typing import Any
 from data.assistant_dataclasses import *
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import WriteOptions
+
 
 class DatabaseManager:
-    def __init__(self, data_event_queue: asyncio.Queue | None, opt: ConfigAssistant,
-                 measurement_event_queue: asyncio.Queue | None = None):
+    def __init__(
+        self,
+        data_event_queue: asyncio.Queue | None,
+        opt: ConfigAssistant,
+        measurement_event_queue: asyncio.Queue | None = None,
+    ):
         self.app_start_timestamp = "1970-01-01T00:00:00Z"
         self.logger = structlog.get_logger()
         self.opt = opt
@@ -20,9 +26,15 @@ class DatabaseManager:
             self.client = InfluxDBClient(
                 url=self.opt.influxdb_url,
                 token=self.opt.influxdb_token,
-                org=self.opt.influxdb_org
+                org=self.opt.influxdb_org,
             )
-            self.write_api = self.client.write_api(write_options=SYNCHRONOUS)
+            self.write_api = self.client.write_api(
+                write_options=WriteOptions(
+                    batch_size=500,
+                    flush_interval=1_000,
+                    max_retries=3,
+                )
+            )
             self.logger.info("Connected to InfluxDB")
         except Exception as e:
             self.logger.error("Failed to connect to InfluxDB", error=str(e))
@@ -31,6 +43,7 @@ class DatabaseManager:
         self.current_state: dict[str, Any] = {}
 
     def close(self):
+        self.write_api.close()
         self.client.close()
 
     async def run(self) -> None:
@@ -63,7 +76,9 @@ class DatabaseManager:
             if getattr(data, field.name) is not None
         }
         if not values:
-            self.logger.warning("Ignoring data event without values", data_type=type(data).__name__)
+            self.logger.warning(
+                "Ignoring data event without values", data_type=type(data).__name__
+            )
             return
 
         name = type(data).__name__
@@ -75,11 +90,13 @@ class DatabaseManager:
         self.current_state[name] = data
 
         if self.measurement_event_queue is not None:
-            self.measurement_event_queue.put_nowait({
-                "type": "measurements_updated",
-                "name": name,
-                "values": values,
-            })
+            self.measurement_event_queue.put_nowait(
+                {
+                    "type": "measurements_updated",
+                    "name": name,
+                    "values": values,
+                }
+            )
 
     def write_measure(self, name: str, measure: str, value: Any):
         if name not in self.current_state:
@@ -98,11 +115,13 @@ class DatabaseManager:
 
         # Keep compatibility with callers that write one measurement at a time.
         if self.measurement_event_queue is not None:
-            self.measurement_event_queue.put_nowait({
-                "type": "measurements_updated",
-                "name": name,
-                "values": {measure: value},
-            })
+            self.measurement_event_queue.put_nowait(
+                {
+                    "type": "measurements_updated",
+                    "name": name,
+                    "values": {measure: value},
+                }
+            )
 
     def write_point(self, point: Point):
         self.write_api.write(
@@ -182,7 +201,9 @@ class DatabaseManager:
         return out
 
     # mean of the trend
-    def mean_derivative(self, name: str, measure: str, range: str = "-30s") -> float | None:
+    def mean_derivative(
+        self, name: str, measure: str, range: str = "-30s"
+    ) -> float | None:
         query = f"""
         from(bucket:"{self.opt.influxdb_bucket}") 
         |> range(start: {range}) 
@@ -192,7 +213,9 @@ class DatabaseManager:
         return out
 
     # standard deviation of the trend
-    def stddev_derivative(self, name: str, measure: str, range: str = "-30s") -> float | None:
+    def stddev_derivative(
+        self, name: str, measure: str, range: str = "-30s"
+    ) -> float | None:
         query = f"""
         from(bucket:"{self.opt.influxdb_bucket}") 
         |> range(start: {range}) 
@@ -208,7 +231,9 @@ class DatabaseManager:
         escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped_value}"'
 
-    def first_value(self, name: str, measure: str, range: str = "-30s") -> str | bool | None:
+    def first_value(
+        self, name: str, measure: str, range: str = "-30s"
+    ) -> str | bool | None:
         query = f"""
         from(bucket:"{self.opt.influxdb_bucket}")
         |> range(start: {range})
@@ -217,7 +242,9 @@ class DatabaseManager:
         """
         return self.run_query(query)
 
-    def last_value(self, name: str, measure: str, range: str = "-30s") -> str | bool | None:
+    def last_value(
+        self, name: str, measure: str, range: str = "-30s"
+    ) -> str | bool | None:
         query = f"""
         from(bucket:"{self.opt.influxdb_bucket}")
         |> range(start: {range})
@@ -226,7 +253,9 @@ class DatabaseManager:
         """
         return self.run_query(query)
 
-    def value_counts(self, name: str, measure: str, range: str = "-30s") -> dict[str | bool, int]:
+    def value_counts(
+        self, name: str, measure: str, range: str = "-30s"
+    ) -> dict[str | bool, int]:
         query = f"""
         from(bucket:"{self.opt.influxdb_bucket}")
         |> range(start: {range})
@@ -241,7 +270,9 @@ class DatabaseManager:
             if record.get("state") is not None and record.get("_value") is not None
         }
 
-    def value_transitions(self, name: str, measure: str, range: str = "-30s") -> int | None:
+    def value_transitions(
+        self, name: str, measure: str, range: str = "-30s"
+    ) -> int | None:
         query = f"""
         from(bucket:"{self.opt.influxdb_bucket}")
         |> range(start: {range})
@@ -253,7 +284,9 @@ class DatabaseManager:
             return None
         return sum(previous != current for previous, current in zip(values, values[1:]))
 
-    def current_value_duration(self, name: str, measure: str, value: str | bool, range: str = "-30s") -> int | None:
+    def current_value_duration(
+        self, name: str, measure: str, value: str | bool, range: str = "-30s"
+    ) -> int | None:
         value_literal = self._flux_literal(value)
         query = f"""
         from(bucket:"{self.opt.influxdb_bucket}")
@@ -266,6 +299,3 @@ class DatabaseManager:
         |> last()
         """
         return self.run_query(query)
-
-
-

@@ -9,10 +9,6 @@ import structlog
 import websockets
 
 try:
-    import aiomqtt
-except ImportError:
-    aiomqtt = None  # type: ignore[assignment]
-try:
     from amqtt.broker import Broker
 except ImportError:
     Broker = None  # type: ignore[assignment]
@@ -33,6 +29,7 @@ from data.assistant_dataclasses import (
     VehicleState,
     VisionObject,
 )
+from data.mqtt_thread import MqttThreadClient
 
 
 class SourceManager:
@@ -424,50 +421,40 @@ class SourceManager:
             await broker.shutdown()
 
     async def run_mqtt(self) -> None:
-        if aiomqtt is None:
-            self.logger.error("aiomqtt is not installed, cannot start MQTT client")
-            return
-
         if self.opt.mqtt_embedded_broker:
-            # Short grace period to ensure the embedded broker listener is bound
             await asyncio.sleep(0.5)
 
-        while True:
+        loop = asyncio.get_running_loop()
+
+        def on_message(_topic: str, payload: bytes) -> None:
             try:
-                self.logger.info(
-                    "Connecting to MQTT broker",
-                    host=self.opt.mqtt_host,
-                    port=self.opt.mqtt_port,
-                    topic=self.opt.mqtt_topic,
+                future = asyncio.run_coroutine_threadsafe(
+                    self.process_message(payload), loop
                 )
-                async with aiomqtt.Client(
-                    hostname=self.opt.mqtt_host,
-                    port=self.opt.mqtt_port,
-                    username=self.opt.mqtt_username,
-                    password=self.opt.mqtt_password,
-                ) as client:
-                    await client.subscribe(self.opt.mqtt_topic)
-                    self.logger.info(
-                        "Connected to MQTT broker and subscribed",
-                        topic=self.opt.mqtt_topic,
-                    )
-                    async for message in client.messages:
-                        payload = message.payload
-                        msg_str: str | bytes
-                        if isinstance(payload, bytes):
-                            msg_str = payload.decode("utf-8")
-                        elif isinstance(payload, str):
-                            msg_str = payload
-                        else:
-                            msg_str = str(payload)
-                        await self.process_message(msg_str)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                self.logger.warning(
-                    "MQTT broker disconnected or error occurred", error=str(error)
-                )
-                await asyncio.sleep(5)
+                future.add_done_callback(self._log_mqtt_callback_error)
+            except RuntimeError:
+                # The Qt/asyncio loop is already shutting down.
+                pass
+
+        client = MqttThreadClient(
+            host=self.opt.mqtt_host,
+            port=self.opt.mqtt_port,
+            username=self.opt.mqtt_username,
+            password=self.opt.mqtt_password,
+            on_message=on_message,
+            client_id="ppai-assistant-source",
+        )
+        client.start(self.opt.mqtt_topic)
+        try:
+            await asyncio.Future()
+        finally:
+            await asyncio.to_thread(client.stop)
+
+    def _log_mqtt_callback_error(self, future: asyncio.Future) -> None:
+        if not future.cancelled() and future.exception() is not None:
+            self.logger.warning(
+                "Failed to process MQTT message", error=str(future.exception())
+            )
 
     async def run_socket(self) -> None:
         if self.opt.data_replay_folder:

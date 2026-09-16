@@ -186,6 +186,9 @@ class TTSManager:
             skip_frames = self._prefix.shape[-1] if self._prefix is not None else 0
 
             pcms: queue.Queue = queue.Queue()
+            playback_buffer = np.zeros(0, dtype=np.float32)
+            generation_done = threading.Event()
+            playback_done = threading.Event()
             frame_count = 0
 
             def _on_frame(frame):
@@ -199,13 +202,38 @@ class TTSManager:
                     pcm = self._model.mimi.decode(frame[:, 1:, :]).cpu().numpy()
                     pcm = np.clip(pcm[0, 0], -1, 1)
                     pcms.put_nowait(pcm)
-                    self._push_playback_reference(pcm)
 
             def _audio_callback(outdata, _frames, _time_info, _status):
-                try:
-                    outdata[:, 0] = pcms.get(block=False)
-                except queue.Empty:
-                    outdata[:] = 0
+                nonlocal playback_buffer
+
+                # A Mimi frame isn't guaranteed to have the same length as
+                # sounddevice's requested block. Keep surplus samples and
+                # combine short frames instead of producing gaps or shape
+                # errors in the PortAudio callback.
+                while playback_buffer.shape[0] < len(outdata):
+                    try:
+                        pcm = pcms.get(block=False)
+                    except queue.Empty:
+                        break
+                    if pcm.size:
+                        if playback_buffer.size:
+                            playback_buffer = np.concatenate((playback_buffer, pcm))
+                        else:
+                            playback_buffer = pcm
+
+                outdata.fill(0)
+                count = min(len(outdata), playback_buffer.shape[0])
+                if count:
+                    outdata[:count, 0] = playback_buffer[:count]
+                    playback_buffer = playback_buffer[count:]
+                    self._push_playback_reference(outdata[:count, 0])
+
+                if (
+                    generation_done.is_set()
+                    and pcms.empty()
+                    and playback_buffer.size == 0
+                ):
+                    playback_done.set()
 
             with sd.OutputStream(
                 samplerate=self._model.mimi.sample_rate,
@@ -218,7 +246,8 @@ class TTSManager:
                     self._model.generate(
                         [entries], attributes, prefixes=prefixes, on_frame=_on_frame
                     )
-                while pcms.qsize() > 0 and not self._stop_flag.is_set():
+                generation_done.set()
+                while not playback_done.is_set() and not self._stop_flag.is_set():
                     time.sleep(0.1)
         except Exception as e:
             logger.warning("TTS playback failed", error=str(e))

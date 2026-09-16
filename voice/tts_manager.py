@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 import structlog
-
+from voice import moshi_compat  # noqa: F401  # must run before importing Moshi
 from voice.gpu_lock import GPU_LOCK
 
 try:
@@ -63,12 +63,18 @@ class TTSManager:
             return
 
         if device == "cuda" and not torch.cuda.is_available():
-            logger.warning("CUDA not available, falling back to CPU for TTS (will be slow)")
+            logger.warning(
+                "CUDA not available, falling back to CPU for TTS (will be slow)"
+            )
             device = "cpu"
 
         try:
-            logger.info("Loading Kyutai TTS model", hf_repo=hf_repo or DEFAULT_DSM_TTS_REPO)
-            checkpoint_info = CheckpointInfo.from_hf_repo(hf_repo or DEFAULT_DSM_TTS_REPO)
+            logger.info(
+                "Loading Kyutai TTS model", hf_repo=hf_repo or DEFAULT_DSM_TTS_REPO
+            )
+            checkpoint_info = CheckpointInfo.from_hf_repo(
+                hf_repo or DEFAULT_DSM_TTS_REPO
+            )
             self._model = TTSModel.from_checkpoint_info(
                 checkpoint_info, n_q=n_q, temp=0.6, device=device
             )
@@ -93,13 +99,17 @@ class TTSManager:
                 # Single-speaker model: clone the voice via an audio prefix instead
                 self._prefix = self._model.get_prefix(voice_path)
                 self._condition_attributes = (
-                    self._model.make_condition_attributes([], cfg_coef=effective_cfg_coef)
+                    self._model.make_condition_attributes(
+                        [], cfg_coef=effective_cfg_coef
+                    )
                     if supports_cfg
                     else None
                 )
             logger.info("Kyutai TTS model loaded successfully")
         except Exception as e:
-            logger.warning("Failed to load Kyutai TTS model, TTS disabled", error=str(e))
+            logger.warning(
+                "Failed to load Kyutai TTS model, TTS disabled", error=str(e)
+            )
             self.enabled = False
             return
 
@@ -112,10 +122,19 @@ class TTSManager:
         try:
             t0 = time.time()
             entries = self._model.prepare_script(["Hello."], padding_between=1)
-            attributes = [self._condition_attributes] if self._condition_attributes is not None else []
+            attributes = (
+                [self._condition_attributes]
+                if self._condition_attributes is not None
+                else []
+            )
             prefixes = [self._prefix] if self._prefix is not None else None
             with GPU_LOCK, self._model.mimi.streaming(1):
-                self._model.generate([entries], attributes, prefixes=prefixes, on_frame=lambda frame: None)
+                self._model.generate(
+                    [entries],
+                    attributes,
+                    prefixes=prefixes,
+                    on_frame=lambda frame: None,
+                )
             logger.info(f"TTS warmup done in {time.time() - t0:.2f}s")
         except Exception as e:
             logger.warning("TTS warmup failed", error=str(e))
@@ -156,7 +175,11 @@ class TTSManager:
         self.is_speaking = True
         try:
             entries = self._model.prepare_script([text], padding_between=1)
-            attributes = [self._condition_attributes] if self._condition_attributes is not None else []
+            attributes = (
+                [self._condition_attributes]
+                if self._condition_attributes is not None
+                else []
+            )
             prefixes = [self._prefix] if self._prefix is not None else None
             # Frames corresponding to the voice-cloning prefix must be skipped, they
             # reproduce the reference audio, not the requested text.
@@ -192,7 +215,9 @@ class TTSManager:
             ) as stream:
                 self._playback_stream = stream
                 with GPU_LOCK, self._model.mimi.streaming(1):
-                    self._model.generate([entries], attributes, prefixes=prefixes, on_frame=_on_frame)
+                    self._model.generate(
+                        [entries], attributes, prefixes=prefixes, on_frame=_on_frame
+                    )
                 while pcms.qsize() > 0 and not self._stop_flag.is_set():
                     time.sleep(0.1)
         except Exception as e:

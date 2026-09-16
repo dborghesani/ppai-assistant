@@ -7,12 +7,12 @@ from typing import Callable
 
 import numpy as np
 import structlog
-
+from voice import moshi_compat  # noqa: F401  # must run before importing Moshi
 from voice.gpu_lock import GPU_LOCK
 
 try:
-    import torch
     import moshi.models
+    import torch
 except ImportError:
     torch = None  # type: ignore[assignment]
     moshi = None  # type: ignore[assignment]
@@ -39,7 +39,7 @@ def _max_normalized_correlation(mic: np.ndarray, reference: np.ndarray) -> float
         return 0.0
     mic = mic.astype(np.float64) - mic.mean()
     reference = reference.astype(np.float64) - reference.mean()
-    mic_norm = np.sqrt(np.sum(mic ** 2))
+    mic_norm = np.sqrt(np.sum(mic**2))
     if mic_norm < 1e-6:
         return 0.0
 
@@ -48,7 +48,7 @@ def _max_normalized_correlation(mic: np.ndarray, reference: np.ndarray) -> float
         return 0.0
 
     window = mic.size
-    cumsum = np.cumsum(np.insert(reference ** 2, 0, 0.0))
+    cumsum = np.cumsum(np.insert(reference**2, 0, 0.0))
     local_energy = cumsum[window:] - cumsum[:-window]
     local_norm = np.sqrt(np.clip(local_energy, 0.0, None)) + 1e-8
 
@@ -85,7 +85,9 @@ class STTManager:
             return
 
         if device == "cuda" and not torch.cuda.is_available():
-            logger.warning("CUDA not available, falling back to CPU for STT (will be slow)")
+            logger.warning(
+                "CUDA not available, falling back to CPU for STT (will be slow)"
+            )
             device = "cpu"
             self._device = device
 
@@ -96,7 +98,9 @@ class STTManager:
             self._tokenizer = self._info.get_text_tokenizer()
             self._lm = self._info.get_moshi(device=device, dtype=torch.bfloat16)
         except Exception as e:
-            logger.warning("Failed to load Kyutai STT model, STT disabled", error=str(e))
+            logger.warning(
+                "Failed to load Kyutai STT model, STT disabled", error=str(e)
+            )
             self.enabled = False
             return
 
@@ -227,8 +231,13 @@ class STTManager:
         if not self.enabled:
             logger.warning("start_conversation called but STTManager is disabled")
             return
-        if self._conversation_thread is not None and self._conversation_thread.is_alive():
-            logger.warning("start_conversation called while a session is already running")
+        if (
+            self._conversation_thread is not None
+            and self._conversation_thread.is_alive()
+        ):
+            logger.warning(
+                "start_conversation called while a session is already running"
+            )
             return
 
         self._conversation_stop.clear()
@@ -249,7 +258,9 @@ class STTManager:
             )
             self._conversation_stream.start()
         except Exception as e:
-            logger.warning("Failed to open microphone for conversation mode", error=str(e))
+            logger.warning(
+                "Failed to open microphone for conversation mode", error=str(e)
+            )
             self._conversation_stream = None
             return
 
@@ -350,24 +361,41 @@ class STTManager:
                     # Without echo cancellation, the mic can pick up the assistant's
                     # own speaker output while it talks. Discard audio in that window
                     # instead of feeding it to the model, to avoid a self-feedback loop.
-                    if mute_mic_during_tts and is_tts_speaking is not None and is_tts_speaking():
+                    if (
+                        mute_mic_during_tts
+                        and is_tts_speaking is not None
+                        and is_tts_speaking()
+                    ):
                         mic_echo_window = np.concatenate(
                             [mic_echo_window, chunk[:, 0]]
                         )[-mic_echo_window_max:]
-                        if not barge_in_triggered and mic_echo_window.shape[0] >= mic_echo_window_max:
-                            rms = float(np.sqrt(np.mean(np.square(mic_echo_window, dtype=np.float64))))
+                        if (
+                            not barge_in_triggered
+                            and mic_echo_window.shape[0] >= mic_echo_window_max
+                        ):
+                            rms = float(
+                                np.sqrt(
+                                    np.mean(
+                                        np.square(mic_echo_window, dtype=np.float64)
+                                    )
+                                )
+                            )
                             if rms > barge_in_energy_threshold:
                                 is_echo = False
                                 correlation = None
                                 if get_tts_reference is not None:
                                     reference = get_tts_reference(echo_reference_len)
-                                    correlation = _max_normalized_correlation(mic_echo_window, reference)
+                                    correlation = _max_normalized_correlation(
+                                        mic_echo_window, reference
+                                    )
                                     is_echo = correlation > echo_correlation_threshold
                                 if is_echo:
                                     logger.debug(
                                         "Barge-in candidate suppressed as TTS echo",
                                         rms=round(rms, 4),
-                                        correlation=round(correlation, 3) if correlation is not None else None,
+                                        correlation=round(correlation, 3)
+                                        if correlation is not None
+                                        else None,
                                     )
                                     barge_in_energy_frames = 0
                                 else:
@@ -424,7 +452,9 @@ class STTManager:
 
                         end_of_turn = False
                         if vad_heads:
-                            pause_probability = vad_heads[vad_head_index][0, 0, 0].cpu().item()
+                            pause_probability = (
+                                vad_heads[vad_head_index][0, 0, 0].cpu().item()
+                            )
                             end_of_turn = pause_probability > vad_threshold
                         elif speaking and idle_frames >= idle_frame_threshold:
                             end_of_turn = True
@@ -432,7 +462,9 @@ class STTManager:
                         if end_of_turn and pieces:
                             tail_latency = time.time() - last_activity
                             speech_duration = (
-                                last_activity - utterance_start_time if utterance_start_time else 0.0
+                                last_activity - utterance_start_time
+                                if utterance_start_time
+                                else 0.0
                             )
                             utterance = "".join(pieces).strip()
                             pieces = []

@@ -110,7 +110,7 @@ class VehicleBridge(QObject):
 
         # Route DriverDrivingStyle and DriverEmotionState through MQTT broker when enabled
         if dataclass_class_name in ("DriverDrivingStyle", "DriverEmotionState"):
-            if self.opt.mqtt_enabled and aiomqtt is not None:
+            if self.opt.mqtt_enabled:
                 self._publish_mqtt(dataclass_class_name, dataclass_member, value)
                 return
 

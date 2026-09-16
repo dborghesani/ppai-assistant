@@ -204,6 +204,11 @@ async def main(opt: ConfigAssistant):
     try:
         await asyncio.gather(*tasks)
     finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        bridge.close()
         await asyncio.to_thread(database_manager.close)
 
 

@@ -360,7 +360,7 @@ class AutomotiveAgent:
                     split = re.search(r"[.!?](?:\s|$)", sentence_buffer)
         finally:
             if stream is not None:
-                stream.close()
+                await stream.close()
 
         if sentence_buffer.strip() and self.tts_manager is not None:
             await self.tts_manager.speak(sentence_buffer.strip())

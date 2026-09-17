@@ -33,7 +33,7 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
 - **OmegaConf**: Configuration management.
 - **structlog**: Structured logging.
 - **InfluxDB 2**: Time-series storage for vehicle/driver state history.
-- **MQTT (aiomqtt & amqtt)**: Real-time telemetry broker and messaging support (with embedded broker option).
+- **MQTT (Paho MQTT & amqtt)**: Real-time telemetry broker and messaging support (with embedded broker option).
 - **WebSockets**: Ingress and replay streaming for sensor telemetry.
 
 ## 📂 Project Structure
@@ -230,6 +230,7 @@ python main.py \
    first real interaction isn't slowed down by CUDA kernel compilation.
 2. **Ingress & Source Management**:
    - Telemetry from WebSockets or MQTT is received, deserialized into strongly-typed dataclasses, and routed into `data_event_queue`.
+   - MQTT uses a dedicated Paho worker thread so socket polling remains compatible with both Windows and Linux qasync event loops.
    - UI adjustments (e.g. `DriverEmotionState`, `DriverDrivingStyle`) are routed via MQTT or direct database writes.
 3. **Storage & Knowledge Extraction**:
    - `DatabaseManager` writes telemetry time-series into InfluxDB and notifies `KnowledgeManager`.

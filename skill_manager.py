@@ -6,9 +6,9 @@ import enum
 class SkillType(Enum):
     CONVERSATION = "conversation"
     DRIVER_HEALTH = "driver_health"
-    NAVIGATION = "navigation"
+    NAVIGATION_AND_COACHING = "navigation_and_coaching"
     PROACTIVE_SUGGESTIONS = "proactive_suggestions"
-    VEHICLE = "vehicle"
+    VEHICLE_STATUS = "vehicle_status"
 
 class SkillManager:
 

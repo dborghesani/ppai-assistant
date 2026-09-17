@@ -9,10 +9,6 @@ import structlog
 import websockets
 
 try:
-    import aiomqtt
-except ImportError:
-    aiomqtt = None  # type: ignore[assignment]
-try:
     from amqtt.broker import Broker
 except ImportError:
     Broker = None  # type: ignore[assignment]
@@ -23,6 +19,7 @@ from data.assistant_dataclasses import (
     DetectedObjects,
     DriverDrivingStyle,
     DriverEmotionState,
+    EnvironmentState,
     GPSData,
     GPSIMUData,
     GPSIMUState,
@@ -33,6 +30,7 @@ from data.assistant_dataclasses import (
     VehicleState,
     VisionObject,
 )
+from data.mqtt_thread import MqttThreadClient
 
 
 class SourceManager:
@@ -177,6 +175,24 @@ class SourceManager:
 
         return VehicleState(**normalized)
 
+    @staticmethod
+    def deserialize_lane_tracing(values: Any) -> LaneTracing | None:
+        if not isinstance(values, dict):
+            return None
+
+        valid_fields = {field.name for field in fields(LaneTracing)}
+        normalized = {
+            key: value for key, value in values.items() if key in valid_fields
+        }
+        for field_name in ("lane_crossing_left", "lane_crossing_right"):
+            value = normalized.get(field_name)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int) and value in (0, 1):
+                normalized[field_name] = bool(value)
+
+        return LaneTracing(**normalized)
+
     async def process_message(self, message: str | bytes) -> None:
         try:
             payload = json.loads(message)
@@ -231,6 +247,9 @@ class SourceManager:
         ):
             radar_objects: list[RadarObject] = []
             vision_objects: list[VisionObject] = []
+            vehicles_around = 0
+            people_around = 0
+            dangerous_objects_around = 0
             if "radar_objects" in payload:
                 for sensor_objects in payload["radar_objects"].values():
                     if not isinstance(sensor_objects, list):
@@ -242,9 +261,6 @@ class SourceManager:
                 for obj_value in payload["objects"]:
                     if isinstance(obj_value, dict):
                         vision_objects.append(VisionObject(**obj_value))
-                # add car_around, people_around, dangerous_objects_around
-                vehicles_around = 0
-                people_around = 0
                 dangerous_objects_around = 0
                 for vision_object in vision_objects:
                     if (
@@ -259,11 +275,9 @@ class SourceManager:
             detected_objects = DetectedObjects(
                 radar_objects=radar_objects,
                 vision_objects=vision_objects,
-                vehicles_around=vehicles_around if "objects" in payload else None,
-                people_around=people_around if "objects" in payload else None,
-                dangerous_objects_around=dangerous_objects_around
-                if "objects" in payload
-                else None,
+                vehicles_around=vehicles_around,
+                people_around=people_around,
+                dangerous_objects_around=dangerous_objects_around,
             )
             if "traffic_signs" in payload:
                 traffic_signs = TrafficSigns(**payload["traffic_signs"])  # type: ignore[name-defined]
@@ -273,11 +287,11 @@ class SourceManager:
                 {"type": "data_received", "data": detected_objects}
             )
         if "lane_tracing" in payload:
-            lane_tracing = LaneTracing(**payload["lane_tracing"])  # type: ignore[name-defined]
-            # TODO: verify if nesting works
-            await self.data_event_queue.put(
-                {"type": "data_received", "data": lane_tracing}
-            )
+            lane_tracing = self.deserialize_lane_tracing(payload["lane_tracing"])
+            if lane_tracing is not None:
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": lane_tracing}
+                )
         if "vehicle_state" in payload:
             vehicle_state = self.deserialize_vehicle_state(payload["vehicle_state"])
             if vehicle_state is not None:
@@ -424,50 +438,40 @@ class SourceManager:
             await broker.shutdown()
 
     async def run_mqtt(self) -> None:
-        if aiomqtt is None:
-            self.logger.error("aiomqtt is not installed, cannot start MQTT client")
-            return
-
         if self.opt.mqtt_embedded_broker:
-            # Short grace period to ensure the embedded broker listener is bound
             await asyncio.sleep(0.5)
 
-        while True:
+        loop = asyncio.get_running_loop()
+
+        def on_message(_topic: str, payload: bytes) -> None:
             try:
-                self.logger.info(
-                    "Connecting to MQTT broker",
-                    host=self.opt.mqtt_host,
-                    port=self.opt.mqtt_port,
-                    topic=self.opt.mqtt_topic,
+                future = asyncio.run_coroutine_threadsafe(
+                    self.process_message(payload), loop
                 )
-                async with aiomqtt.Client(
-                    hostname=self.opt.mqtt_host,
-                    port=self.opt.mqtt_port,
-                    username=self.opt.mqtt_username,
-                    password=self.opt.mqtt_password,
-                ) as client:
-                    await client.subscribe(self.opt.mqtt_topic)
-                    self.logger.info(
-                        "Connected to MQTT broker and subscribed",
-                        topic=self.opt.mqtt_topic,
-                    )
-                    async for message in client.messages:
-                        payload = message.payload
-                        msg_str: str | bytes
-                        if isinstance(payload, bytes):
-                            msg_str = payload.decode("utf-8")
-                        elif isinstance(payload, str):
-                            msg_str = payload
-                        else:
-                            msg_str = str(payload)
-                        await self.process_message(msg_str)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                self.logger.warning(
-                    "MQTT broker disconnected or error occurred", error=str(error)
-                )
-                await asyncio.sleep(5)
+                future.add_done_callback(self._log_mqtt_callback_error)
+            except RuntimeError:
+                # The Qt/asyncio loop is already shutting down.
+                pass
+
+        client = MqttThreadClient(
+            host=self.opt.mqtt_host,
+            port=self.opt.mqtt_port,
+            username=self.opt.mqtt_username,
+            password=self.opt.mqtt_password,
+            on_message=on_message,
+            client_id="ppai-assistant-source",
+        )
+        client.start(self.opt.mqtt_topic)
+        try:
+            await asyncio.Future()
+        finally:
+            await asyncio.to_thread(client.stop)
+
+    def _log_mqtt_callback_error(self, future: asyncio.Future) -> None:
+        if not future.cancelled() and future.exception() is not None:
+            self.logger.warning(
+                "Failed to process MQTT message", error=str(future.exception())
+            )
 
     async def run_socket(self) -> None:
         if self.opt.data_replay_folder:

@@ -3,22 +3,18 @@ import json
 import time
 from typing import Any, Dict, List, Tuple
 
-from PySide6.QtCore import QObject, Slot, Signal, Property
-from PySide6.QtGui import QGuiApplication, Qt
-
-try:
-    import aiomqtt
-except ImportError:
-    aiomqtt = None  # type: ignore[assignment]
-
+import structlog
+from automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
 from data.database_manager import DatabaseManager
+from data.mqtt_thread import MqttThreadClient
 from events import CarEvent
 from knowledge_manager import KnowledgeManager
+from PySide6.QtCore import Property, QObject, Signal, Slot
+from PySide6.QtGui import QGuiApplication, Qt
 from skill_manager import SkillType
-from automotive_agent import AutomotiveAgent
 from voice.stt_manager import STTManager
-import structlog
+
 
 class VehicleBridge(QObject):
     responseReceived = Signal(str)
@@ -46,9 +42,16 @@ class VehicleBridge(QObject):
         self.agent.on_response = self.responseReceived.emit
         self._check_dark_mode()
 
-        self._mqtt_queue: asyncio.Queue[tuple[str, str, str, Any]] = asyncio.Queue()
-        if self.opt.mqtt_enabled and aiomqtt is not None:
-            self.loop.create_task(self._mqtt_publisher_loop())
+        self._mqtt_client: MqttThreadClient | None = None
+        if self.opt.mqtt_enabled:
+            self._mqtt_client = MqttThreadClient(
+                host=self.opt.mqtt_host,
+                port=self.opt.mqtt_port,
+                username=self.opt.mqtt_username,
+                password=self.opt.mqtt_password,
+                client_id="ppai-assistant-ui",
+            )
+            self._mqtt_client.start()
 
         style_hints = QGuiApplication.styleHints()
         if style_hints is not None:
@@ -72,7 +75,9 @@ class VehicleBridge(QObject):
     def isDarkMode(self) -> bool:
         return self._is_dark_mode
 
-    def get_dataclass_from_ui_event_type(self, ui_event_type: str) -> Tuple[str, str] | None:
+    def get_dataclass_from_ui_event_type(
+        self, ui_event_type: str
+    ) -> Tuple[str, str] | None:
         # assume that the event_type corresponds to classname.classmember
         parts = ui_event_type.split(".")
         if len(parts) != 2:
@@ -80,39 +85,19 @@ class VehicleBridge(QObject):
         (class_name, member_name) = parts
         return (class_name, member_name)
 
-    async def _mqtt_publisher_loop(self):
-        """Persistent connection for publishing UI telemetry events to the MQTT broker."""
-        await asyncio.sleep(1.0)  # wait for broker startup
-        while True:
-            try:
-                async with aiomqtt.Client(
-                    hostname=self.opt.mqtt_host,
-                    port=self.opt.mqtt_port,
-                    username=self.opt.mqtt_username,
-                    password=self.opt.mqtt_password,
-                ) as client:
-                    while True:
-                        topic, payload, class_name, value = await self._mqtt_queue.get()
-                        try:
-                            await client.publish(topic, payload)
-                            self.logger.debug("Published to MQTT broker", topic=topic, class_name=class_name)
-                        except Exception as pub_err:
-                            self.logger.warning("Failed to publish over MQTT, writing locally", error=str(pub_err))
-                            self.database_manager.write_measure(class_name, json.loads(payload)["data"].keys(), value)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                self.logger.debug("MQTT publisher reconnecting...", error=str(e))
-                await asyncio.sleep(2.0)
-
     def _publish_mqtt(self, class_name: str, member_name: str, value: Any):
         topic = f"telemetry/{class_name}"
-        payload = json.dumps({
-            "name": class_name,
-            "data": {member_name: value}
-        })
-        self._mqtt_queue.put_nowait((topic, payload, class_name, value))
-        
+        payload = json.dumps({"name": class_name, "data": {member_name: value}})
+        if self._mqtt_client is None or not self._mqtt_client.publish(topic, payload):
+            self.logger.warning("MQTT unavailable, writing UI event locally")
+            self.database_manager.write_measure(class_name, member_name, value)
+
+    def close(self) -> None:
+        """Stop the thread-backed MQTT publisher before the event loop closes."""
+        if self._mqtt_client is not None:
+            self._mqtt_client.stop()
+            self._mqtt_client = None
+
     def send_event(self, ui_event_type: str, value: Any):
         if not self.agent.is_listening:
             return
@@ -125,11 +110,13 @@ class VehicleBridge(QObject):
 
         # Route DriverDrivingStyle and DriverEmotionState through MQTT broker when enabled
         if dataclass_class_name in ("DriverDrivingStyle", "DriverEmotionState"):
-            if self.opt.mqtt_enabled and aiomqtt is not None:
+            if self.opt.mqtt_enabled:
                 self._publish_mqtt(dataclass_class_name, dataclass_member, value)
                 return
 
-        self.database_manager.write_measure(dataclass_class_name, dataclass_member, value)
+        self.database_manager.write_measure(
+            dataclass_class_name, dataclass_member, value
+        )
 
     @Slot(str)
     def userInput(self, text: str):
@@ -140,7 +127,7 @@ class VehicleBridge(QObject):
             skill=SkillType.CONVERSATION.value,
             event_name="user_input",
             event_value=text,
-            context=self.knowledge_manager.context,
+            context=list(self.knowledge_manager.context.values()),
             user_input=text,
         )
         self.agent.event_queue.put_nowait(event)
@@ -164,7 +151,9 @@ class VehicleBridge(QObject):
     async def _transcribe_and_send(self):
         stt_start = time.time()
         text = await asyncio.to_thread(self.stt_manager.stop_and_transcribe)
-        self.logger.info(f">>> STT transcription took {time.time() - stt_start:.2f}s", text=text)
+        self.logger.info(
+            f">>> STT transcription took {time.time() - stt_start:.2f}s", text=text
+        )
         if text:
             self.userInput(text)
 
@@ -200,7 +189,8 @@ class VehicleBridge(QObject):
                 session_silence_timeout=self.opt.conversation_session_silence_timeout,
                 pause_seconds=self.opt.conversation_pause_seconds,
                 is_tts_speaking=lambda: bool(
-                    self.agent.tts_manager is not None and self.agent.tts_manager.is_speaking
+                    self.agent.tts_manager is not None
+                    and self.agent.tts_manager.is_speaking
                 ),
                 mute_mic_during_tts=self.opt.conversation_mute_mic_during_tts,
                 barge_in_energy_threshold=self.opt.conversation_barge_in_energy_threshold,
@@ -213,16 +203,12 @@ class VehicleBridge(QObject):
                 echo_correlation_threshold=self.opt.conversation_echo_correlation_threshold,
             )
         except Exception as e:
-<<<<<<< HEAD
-            self.logger.error("Failed to start conversation mode", error=str(e), exc_info=True)
-=======
             self.logger.error(
                 "Failed to start conversation mode", error=str(e), exc_info=True
             )
             started = False
         # Keep the UI toggle in sync with whether the mic actually started.
         self.conversationModeChanged.emit(started)
->>>>>>> 5426c77 (fix on microphone input)
 
     @Slot()
     def stopConversation(self):
@@ -236,6 +222,7 @@ class VehicleBridge(QObject):
 
     def _on_conversation_speech_start(self):
         # Called from the STT background thread: barge-in, stop any TTS playback now.
+        self.loop.call_soon_threadsafe(self.agent.cancel_voice_response)
         if self.agent.tts_manager is not None and self.agent.tts_manager.is_speaking:
             self.agent.tts_manager.stop()
 

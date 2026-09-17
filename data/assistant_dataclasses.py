@@ -8,6 +8,7 @@ def knowledge_field(
     change_threshold: float | None = None,
     change_ratio: float | None = None,
     notify_on_trend_change: bool = True,
+    notify_on_change: bool = True,
     value_kind: str | None = None,
     skills: tuple[str, ...] = (),
 ) -> Any:
@@ -16,6 +17,7 @@ def knowledge_field(
         "change_threshold": change_threshold,
         "change_ratio": change_ratio,
         "notify_on_trend_change": notify_on_trend_change,
+        "notify_on_change": notify_on_change,
         "value_kind": value_kind,
         "skills": skills,
     })
@@ -62,7 +64,7 @@ class GPSIMUState:
 class VehicleMotion:
     speed: float | None = knowledge_field(
         change_threshold=10.0,
-        skills=("navigation_and_coaching",),
+        notify_on_change=False
     )  # km/h, aggregated
     wheel_speed_front_left: float | None = None  # km/h
     wheel_speed_front_right: float | None = None  # km/h
@@ -132,7 +134,10 @@ class LaneTracing:
 
     # Derived lane counters (computed using lane detection and lane types):
     total_lane: int | None = None
-    driving_lane: int | None = knowledge_field(skills=("navigation_and_coaching",))  # start at 1
+    driving_lane: int | None = knowledge_field(
+        notify_on_change=False,
+        skills=("navigation_and_coaching",),
+    )  # start at 1
 
 @dataclass
 class VisionObject:
@@ -197,7 +202,6 @@ class TrafficSigns:
     speed_limit: float | None = knowledge_field(
         change_threshold=5.0,
         value_kind="speed",
-        skills=("navigation_and_coaching",),
     )  # km/h
     sign_1: TrafficSign | None = field(default_factory=TrafficSign)
     sign_2: TrafficSign | None = field(default_factory=TrafficSign)
@@ -211,17 +215,17 @@ class DetectedObjects:
     traffic_signs: TrafficSigns | None = field(default_factory=TrafficSigns)
     people_around: int | None = knowledge_field(
         change_threshold=1.0,
-        value_kind="count",
+        value_kind="density",
         skills=("driver_health",),
     )
     vehicles_around: int | None = knowledge_field(
         change_threshold=1.0,
-        value_kind="count",
+        value_kind="density",
         skills=("driver_health",),
     )
     dangerous_objects_around: int | None = knowledge_field(
         change_threshold=1.0,
-        value_kind="count",
+        value_kind="density",
         skills=("driver_health",),
     )
 

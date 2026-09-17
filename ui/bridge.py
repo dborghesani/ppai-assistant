@@ -127,7 +127,7 @@ class VehicleBridge(QObject):
             skill=SkillType.CONVERSATION.value,
             event_name="user_input",
             event_value=text,
-            context=self.knowledge_manager.context,
+            context=list(self.knowledge_manager.context.values()),
             user_input=text,
         )
         self.agent.event_queue.put_nowait(event)
@@ -216,6 +216,7 @@ class VehicleBridge(QObject):
 
     def _on_conversation_speech_start(self):
         # Called from the STT background thread: barge-in, stop any TTS playback now.
+        self.loop.call_soon_threadsafe(self.agent.cancel_voice_response)
         if self.agent.tts_manager is not None and self.agent.tts_manager.is_speaking:
             self.agent.tts_manager.stop()
 

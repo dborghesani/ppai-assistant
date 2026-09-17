@@ -17,6 +17,9 @@ class KnowledgeState:
 
 
 class KnowledgeManager:
+    _SPEED_KEY = "VehicleMotion.speed"
+    _SPEED_LIMIT_KEY = "DetectedObjects.traffic_signs.speed_limit"
+    _SPEED_STATUS_KEY = "VehicleMotion.speed_status"
     event_skill_map: dict[str, List[SkillType]] = {}
     _BOOLEAN_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[bool], str]] = {
         ("LaneTracing", "lane_crossing_left"): lambda value: (
@@ -58,19 +61,19 @@ class KnowledgeManager:
             "No people are currently detected around the vehicle."
             if value == 0
             else f"People density around the vehicle is "
-            f"{KnowledgeManager._density_level(value)} ({value} detected)."
+            f"{KnowledgeManager._density_level(value)}."
         ),
         ("DetectedObjects", "vehicles_around"): lambda value: (
             "No vehicles are currently detected around the vehicle."
             if value == 0
             else f"Vehicle density around the vehicle is "
-            f"{KnowledgeManager._density_level(value)} ({value} detected)."
+            f"{KnowledgeManager._density_level(value)}."
         ),
         ("DetectedObjects", "dangerous_objects_around"): lambda value: (
             "No dangerous objects are currently detected around the vehicle."
             if value == 0
-            else f"{value} dangerous {'object is' if value == 1 else 'objects are'} "
-            "currently detected around the vehicle."
+            else f"Dangerous object density around the vehicle is "
+            f"{KnowledgeManager._density_level(value)}."
         ),
     }
 
@@ -88,6 +91,8 @@ class KnowledgeManager:
         self.opt = opt
         self.context: dict[str, str] = {}
         self._last_evaluated: dict[str, KnowledgeState] = {}
+        self._raw_values: dict[str, Any] = {}
+        self._last_speed_status: str | None = None
 
     @staticmethod
     def _format_value(value: float | int) -> str:
@@ -102,19 +107,8 @@ class KnowledgeManager:
         return "low"
 
     @staticmethod
-    def _window_label(window: str) -> str:
-        return window.lstrip("-")
-
-    @staticmethod
     def _display_measure(measure: str) -> str:
         return measure.replace("_", " ").replace(".", " ")
-
-    @staticmethod
-    def _duration_sentence(duration: int | None) -> str:
-        if duration is None:
-            return ""
-        unit = "second" if int(duration) == 1 else "seconds"
-        return f" The current state has lasted {int(duration)} {unit}."
 
     @staticmethod
     def _boolean_state(measure: str, value: bool) -> str:
@@ -301,30 +295,92 @@ class KnowledgeManager:
 
         return value != previous.value
 
-    async def _notify_agent(self, name: str, changes: dict[str, Any]) -> None:
+    async def _notify_agent(self, changes: dict[str, Any]) -> None:
         changes_by_skill: dict[str, dict[str, Any]] = {}
-        for measure, value in changes.items():
-            for skill in self._field_skills(name, measure):
+        for key, value in changes.items():
+            name, separator, measure = key.partition(".")
+            if not separator:
+                continue
+            # management of specific derived knowledge
+            if key == self._SPEED_STATUS_KEY:
+                skills = (SkillType.NAVIGATION_AND_COACHING.value,)
+            else:
+                skills = self._field_skills(name, measure)
+            for skill in skills:
                 changes_by_skill.setdefault(skill, {})[measure] = value
 
         for skill, skill_changes in changes_by_skill.items():
-            skill_context = {}
-            for context_key, context_value in self.context.items():
-                context_name, separator, context_measure = context_key.partition(".")
-                if separator and skill in self._field_skills(
-                    context_name, context_measure
-                ):
-                    skill_context[context_key] = context_value
+            if self._SPEED_STATUS_KEY in changes:
+                skill_context = dict(self.context)
+            else:
+                skill_context = {}
+                for context_key, context_value in self.context.items():
+                    context_name, separator, context_measure = context_key.partition(".")
+                    if separator and skill in self._field_skills(
+                        context_name, context_measure
+                    ):
+                        skill_context[context_key] = context_value
 
             skill_context_all_values_as_list = list(skill_context.values())
             await self.knowledge_event_queue.put(
                 CarEvent(
                     skill=skill,
                     event_name="knowledge_updated",
-                    event_value=sorted(skill_changes),
+                    event_value=dict(skill_changes),
                     context=skill_context_all_values_as_list,
                 )
             )
+
+    def _update_speed_status(self) -> tuple[str, str] | None:
+        speed = self._raw_values.get(self._SPEED_KEY)
+        speed_limit = self._raw_values.get(self._SPEED_LIMIT_KEY)
+        if not isinstance(speed, (int, float)) or isinstance(speed, bool):
+            speed = None
+        if not isinstance(speed_limit, (int, float)) or isinstance(speed_limit, bool):
+            speed_limit = None
+
+        speed_metadata = self._knowledge_metadata("VehicleMotion", "speed") or {}
+        near_margin = speed_metadata.get("change_threshold")
+        if not isinstance(near_margin, (int, float)):
+            near_margin = 0.0
+
+        if speed is None or speed_limit is None:
+            status = "limit_unknown"
+            status_text = (
+                "Speed status is limit_unknown because no verified speed limit "
+                "is available."
+            )
+        elif speed > speed_limit:
+            status = "above_limit"
+            status_text = (
+                f"Speed status is above_limit. Current speed is "
+                f"{self._format_value(speed)} km/h and the verified speed limit is "
+                f"{self._format_value(speed_limit)} km/h."
+            )
+        elif speed >= speed_limit - near_margin:
+            status = "near_limit"
+            status_text = (
+                f"Speed status is near_limit. Current speed is "
+                f"{self._format_value(speed)} km/h and the verified speed limit is "
+                f"{self._format_value(speed_limit)} km/h."
+            )
+        else:
+            status = "below_limit"
+            status_text = (
+                f"Speed status is below_limit. Current speed is "
+                f"{self._format_value(speed)} km/h and the verified speed limit is "
+                f"{self._format_value(speed_limit)} km/h."
+            )
+
+        self.context[self._SPEED_STATUS_KEY] = status_text
+
+        entered_above_limit = (
+            status == "above_limit" and self._last_speed_status != "above_limit"
+        )
+        self._last_speed_status = status
+        if not entered_above_limit:
+            return None
+        return self._SPEED_STATUS_KEY, status
 
     @staticmethod
     def _generates_knowledge(name: str, measure: str) -> bool:
@@ -378,9 +434,12 @@ class KnowledgeManager:
             key = f"{name}.{measure}"
             trend: str | None = None
             metadata = self._knowledge_metadata(name, measure) or {}
-            if isinstance(value, int) and not isinstance(value, bool) and metadata.get(
-                "value_kind"
-            ) == "count":
+            self._raw_values[key] = value
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and metadata.get("value_kind") in {"count", "density"}
+            ):
                 knowledge = await asyncio.to_thread(
                     self._count_knowledge, name, measure, value
                 )
@@ -407,20 +466,34 @@ class KnowledgeManager:
                 continue
 
             self.context[key] = knowledge
+            change_value: Any = value
+            if metadata.get("value_kind") == "density":
+                change_value = self._density_level(value)
             if (
-                self._is_significant_change(name, measure, key, value, trend)
+                self._is_significant_change(name, measure, key, change_value, trend)
             ):
-                self.logger.info(
-                    "significant change detected",
-                    name=name,
-                    measure=measure,
-                    value=value,
-                    trend=trend,
-                )
-                significant_changes.setdefault(name, {})[measure] = value
+                if metadata.get("notify_on_change", True):
+                    self.logger.info(
+                        "significant change detected",
+                        name=name,
+                        measure=measure,
+                        value=change_value,
+                        trend=trend,
+                    )
+                    significant_changes[key] = change_value
 
-        for name, changes in significant_changes.items():
-            await self._notify_agent(name, changes)
+        derived_change = None
+        if any(
+            key in self._raw_values
+            for key in (self._SPEED_KEY, self._SPEED_LIMIT_KEY)
+        ):
+            derived_change = self._update_speed_status()
+        if derived_change is not None:
+            key, value = derived_change
+            significant_changes[key] = value
+
+        if significant_changes:
+            await self._notify_agent(significant_changes)
 
     def dump_knowledge(self) -> str:
         output_knowledge = ""

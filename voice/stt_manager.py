@@ -126,7 +126,6 @@ class STTManager:
             dtype="float32",
             callback=self._on_audio,
         )
-        self._stream.start()
 
     def _on_audio(self, indata, frames, time_info, status):
         if status:

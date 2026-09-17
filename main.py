@@ -145,7 +145,13 @@ async def main(opt: ConfigAssistant):
         tts_manager = None
 
     # initialize Agent (model loading is blocking, run off the event loop)
-    agent = AutomotiveAgent(llm=llm, tts_manager=tts_manager)
+    agent = AutomotiveAgent(
+        llm=llm,
+        tts_manager=tts_manager,
+        ollama_host=opt.ollama_host,
+        ollama_port=opt.ollama_port,
+        ollama_model=actual_model.removeprefix("ollama/"),
+    )
 
     # initialize knowledge manager to extract knowledge from data
     knowledge_manager = KnowledgeManager(

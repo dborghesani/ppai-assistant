@@ -42,6 +42,7 @@ class TTSManager:
         n_q: int = 16,
         cfg_coef: float = 3.0,
     ):
+        self.hf_repo = hf_repo
         self.enabled = enabled and sd is not None and TTSModel is not None
         self._model = None
         self._prefix = None
@@ -70,10 +71,10 @@ class TTSManager:
 
         try:
             logger.info(
-                "Loading Kyutai TTS model", hf_repo=hf_repo or DEFAULT_DSM_TTS_REPO
+                "Loading Kyutai TTS model", hf_repo=hf_repo
             )
             checkpoint_info = CheckpointInfo.from_hf_repo(
-                hf_repo or DEFAULT_DSM_TTS_REPO
+                hf_repo
             )
             self._model = TTSModel.from_checkpoint_info(
                 checkpoint_info, n_q=n_q, temp=0.6, device=device

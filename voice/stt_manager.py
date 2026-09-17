@@ -65,6 +65,7 @@ class STTManager:
         hf_repo: str = DEFAULT_STT_REPO,
         device: str = "cuda",
     ):
+        self.hf_repo = hf_repo
         self.enabled = enabled and sd is not None and moshi is not None
         self._stream = None
         self._frames: list[np.ndarray] = []
@@ -92,6 +93,7 @@ class STTManager:
             self._device = device
 
         try:
+            logger.info(f"Loading Kyutai STT model", hf_repo=hf_repo)
             self._info = moshi.models.loaders.CheckpointInfo.from_hf_repo(hf_repo)
             self._mimi = self._info.get_mimi(device=device)
             self._sample_rate = self._mimi.sample_rate
@@ -103,6 +105,8 @@ class STTManager:
             )
             self.enabled = False
             return
+
+        logger.info("Kyutai STT model loaded successfully")
 
         self._warmup()
 
@@ -208,8 +212,12 @@ class STTManager:
         barge_in_min_frames: int = 4,
         get_tts_reference: Callable[[int], "np.ndarray"] | None = None,
         echo_correlation_threshold: float = 0.6,
-    ) -> None:
+    ) -> bool:
         """Start a continuous, always-listening session with turn-taking.
+
+        Returns True if the microphone stream and session thread were started
+        successfully, False otherwise (callers should not assume success just
+        because no exception was raised).
 
         Uses the model's semantic-VAD extra heads when the checkpoint provides them;
         otherwise falls back to counting consecutive silence tokens emitted by the
@@ -230,7 +238,7 @@ class STTManager:
         """
         if not self.enabled:
             logger.warning("start_conversation called but STTManager is disabled")
-            return
+            return False
         if (
             self._conversation_thread is not None
             and self._conversation_thread.is_alive()
@@ -238,7 +246,7 @@ class STTManager:
             logger.warning(
                 "start_conversation called while a session is already running"
             )
-            return
+            return False
 
         self._conversation_stop.clear()
         audio_queue: queue.Queue = queue.Queue()
@@ -262,7 +270,7 @@ class STTManager:
                 "Failed to open microphone for conversation mode", error=str(e)
             )
             self._conversation_stream = None
-            return
+            return False
 
         logger.info("Conversation mode: microphone stream started")
         self._conversation_thread = threading.Thread(
@@ -286,6 +294,7 @@ class STTManager:
             daemon=True,
         )
         self._conversation_thread.start()
+        return True
 
     def stop_conversation(self) -> None:
         self._conversation_stop.set()
@@ -341,7 +350,7 @@ class STTManager:
             lm_gen = moshi.models.LMGen(self._lm, temp=0, temp_text=0.0)
             has_vad_heads = len(self._lm.extra_heads) > 0
             if not has_vad_heads:
-                logger.info(
+                logger.warning(
                     "Checkpoint has no semantic-VAD heads, using silence-token fallback",
                     pause_seconds=pause_seconds,
                 )

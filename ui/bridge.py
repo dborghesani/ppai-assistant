@@ -173,16 +173,25 @@ class VehicleBridge(QObject):
         self.logger.info("Starting conversation mode")
         """Enter always-listening mode: turn-taking, auto-timeout and barge-in."""
         if not self.agent.is_listening:
-            self.logger.warning("Cannot start conversation: event processing is disabled")
+            self.logger.warning(
+                "Cannot start conversation: event processing is disabled"
+            )
+            self.conversationModeChanged.emit(False)
             return
         if self.stt_manager is None:
-            self.logger.warning("Cannot start conversation: STT manager is not configured")
+            self.logger.warning(
+                "Cannot start conversation: STT manager is not configured"
+            )
+            self.conversationModeChanged.emit(False)
             return
         if not self.stt_manager.enabled:
-            self.logger.warning("Cannot start conversation: STT manager failed to load/is disabled")
+            self.logger.warning(
+                "Cannot start conversation: STT manager failed to load/is disabled"
+            )
+            self.conversationModeChanged.emit(False)
             return
         try:
-            self.stt_manager.start_conversation(
+            started = self.stt_manager.start_conversation(
                 on_utterance=self._on_conversation_utterance,
                 on_speech_start=self._on_conversation_speech_start,
                 on_session_timeout=self._on_conversation_timeout,
@@ -204,7 +213,16 @@ class VehicleBridge(QObject):
                 echo_correlation_threshold=self.opt.conversation_echo_correlation_threshold,
             )
         except Exception as e:
+<<<<<<< HEAD
             self.logger.error("Failed to start conversation mode", error=str(e), exc_info=True)
+=======
+            self.logger.error(
+                "Failed to start conversation mode", error=str(e), exc_info=True
+            )
+            started = False
+        # Keep the UI toggle in sync with whether the mic actually started.
+        self.conversationModeChanged.emit(started)
+>>>>>>> 5426c77 (fix on microphone input)
 
     @Slot()
     def stopConversation(self):

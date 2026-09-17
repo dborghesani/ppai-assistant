@@ -16,12 +16,12 @@
             "args": [
                 //"ollama_llm=ollama/qwen3.5:4b",
                 //"ollama_llm=ollama/qwen2.5:7b-instruct",
-                //"data_replay_folder=${workspaceFolder}/../Dataset/assistant/json_output_20260310_113315",
+                "data_replay_folder=${workspaceFolder}/../Dataset/assistant/json_output_20260310_113315",
                 "mqtt_enabled=True",
                 "mqtt_embedded_broker=True",
                 "tts_enabled=True",
                 "stt_enabled=True",
-                "is_socket_enabled=False"
+                "is_socket_enabled=True"
             ],
         },
         {

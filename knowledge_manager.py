@@ -76,6 +76,13 @@ class KnowledgeManager:
             f"{KnowledgeManager._density_level(value)}."
         ),
     }
+    _CATEGORY_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[str], str]] = {
+        ("LaneTracing", "highway_exit"): lambda value: {
+            "No exit": "The vehicle is not approaching a highway exit.",
+            "Right": "The vehicle is approaching a highway exit on the right.",
+            "Left": "The vehicle is approaching a highway exit on the left.",
+        }.get(value, f"The highway exit status is {value}."),
+    }
 
     def __init__(
         self,
@@ -183,17 +190,13 @@ class KnowledgeManager:
     def _categorical_knowledge(
         self, name: str, measure: str, value: str, window: str
     ) -> str:
+        formatter = self._CATEGORY_KNOWLEDGE_FORMATTERS.get((name, measure))
+        if formatter is not None:
+            return formatter(value)
+
         display_measure = self._display_measure(measure)
-        first_value = self.database_manager.first_value(name, measure, window)
         current_value = self.database_manager.last_value(name, measure, window) or value
-        value_counts = self.database_manager.value_counts(name, measure, window)
-
-        if not value_counts:
-            return f"The {display_measure} is {current_value}."
-
-        extracted_knowledge = f"The {display_measure} is {current_value}. "
-        if first_value is not None and first_value != current_value:
-            extracted_knowledge += f"It changed from {first_value}."
+        extracted_knowledge = f"The {display_measure} is {current_value}."
 
         self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
@@ -350,6 +353,13 @@ class KnowledgeManager:
                 "Speed status is limit_unknown because no verified speed limit "
                 "is available."
             )
+        elif speed > speed_limit and speed <= speed_limit + near_margin:
+            status = "slightly_above_limit"
+            status_text = (
+                f"Speed status is slightly_above_limit. Current speed is "
+                f"{self._format_value(speed)} km/h and the verified speed limit is "
+                f"{self._format_value(speed_limit)} km/h."
+            )
         elif speed > speed_limit:
             status = "above_limit"
             status_text = (
@@ -357,17 +367,17 @@ class KnowledgeManager:
                 f"{self._format_value(speed)} km/h and the verified speed limit is "
                 f"{self._format_value(speed_limit)} km/h."
             )
-        elif speed >= speed_limit - near_margin:
-            status = "near_limit"
-            status_text = (
-                f"Speed status is near_limit. Current speed is "
-                f"{self._format_value(speed)} km/h and the verified speed limit is "
-                f"{self._format_value(speed_limit)} km/h."
-            )
-        else:
+        elif speed < speed_limit - near_margin:
             status = "below_limit"
             status_text = (
                 f"Speed status is below_limit. Current speed is "
+                f"{self._format_value(speed)} km/h and the verified speed limit is "
+                f"{self._format_value(speed_limit)} km/h."
+            )
+        elif speed > speed_limit - near_margin and speed <= speed_limit:
+            status = "slightly_below_limit"
+            status_text = (
+                f"Speed status is slightly_below_limit. Current speed is "
                 f"{self._format_value(speed)} km/h and the verified speed limit is "
                 f"{self._format_value(speed_limit)} km/h."
             )

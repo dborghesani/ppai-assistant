@@ -19,6 +19,7 @@ from data.assistant_dataclasses import (
     DetectedObjects,
     DriverDrivingStyle,
     DriverEmotionState,
+    EnvironmentState,
     GPSData,
     GPSIMUData,
     GPSIMUState,
@@ -174,6 +175,24 @@ class SourceManager:
 
         return VehicleState(**normalized)
 
+    @staticmethod
+    def deserialize_lane_tracing(values: Any) -> LaneTracing | None:
+        if not isinstance(values, dict):
+            return None
+
+        valid_fields = {field.name for field in fields(LaneTracing)}
+        normalized = {
+            key: value for key, value in values.items() if key in valid_fields
+        }
+        for field_name in ("lane_crossing_left", "lane_crossing_right"):
+            value = normalized.get(field_name)
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int) and value in (0, 1):
+                normalized[field_name] = bool(value)
+
+        return LaneTracing(**normalized)
+
     async def process_message(self, message: str | bytes) -> None:
         try:
             payload = json.loads(message)
@@ -228,6 +247,9 @@ class SourceManager:
         ):
             radar_objects: list[RadarObject] = []
             vision_objects: list[VisionObject] = []
+            vehicles_around = 0
+            people_around = 0
+            dangerous_objects_around = 0
             if "radar_objects" in payload:
                 for sensor_objects in payload["radar_objects"].values():
                     if not isinstance(sensor_objects, list):
@@ -239,9 +261,6 @@ class SourceManager:
                 for obj_value in payload["objects"]:
                     if isinstance(obj_value, dict):
                         vision_objects.append(VisionObject(**obj_value))
-                # add car_around, people_around, dangerous_objects_around
-                vehicles_around = 0
-                people_around = 0
                 dangerous_objects_around = 0
                 for vision_object in vision_objects:
                     if (
@@ -256,11 +275,9 @@ class SourceManager:
             detected_objects = DetectedObjects(
                 radar_objects=radar_objects,
                 vision_objects=vision_objects,
-                vehicles_around=vehicles_around if "objects" in payload else None,
-                people_around=people_around if "objects" in payload else None,
-                dangerous_objects_around=dangerous_objects_around
-                if "objects" in payload
-                else None,
+                vehicles_around=vehicles_around,
+                people_around=people_around,
+                dangerous_objects_around=dangerous_objects_around,
             )
             if "traffic_signs" in payload:
                 traffic_signs = TrafficSigns(**payload["traffic_signs"])  # type: ignore[name-defined]
@@ -270,11 +287,11 @@ class SourceManager:
                 {"type": "data_received", "data": detected_objects}
             )
         if "lane_tracing" in payload:
-            lane_tracing = LaneTracing(**payload["lane_tracing"])  # type: ignore[name-defined]
-            # TODO: verify if nesting works
-            await self.data_event_queue.put(
-                {"type": "data_received", "data": lane_tracing}
-            )
+            lane_tracing = self.deserialize_lane_tracing(payload["lane_tracing"])
+            if lane_tracing is not None:
+                await self.data_event_queue.put(
+                    {"type": "data_received", "data": lane_tracing}
+                )
         if "vehicle_state" in payload:
             vehicle_state = self.deserialize_vehicle_state(payload["vehicle_state"])
             if vehicle_state is not None:

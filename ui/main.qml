@@ -958,7 +958,7 @@ ApplicationWindow {
                                 id: peopleSlider
                                 width: parent.width*0.5
                                 from: 0
-                                to: 10
+                                to: 20
                                 value: 0
                                 stepSize: 1
                                 snapMode: Slider.SnapAlways
@@ -988,7 +988,7 @@ ApplicationWindow {
                                 id: vehicleSlider
                                 width: parent.width*0.5
                                 from: 0
-                                to: 10
+                                to: 20
                                 value: 0
                                 stepSize: 1
                                 snapMode: Slider.SnapAlways

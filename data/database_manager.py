@@ -65,6 +65,20 @@ class DatabaseManager:
             separators=(",", ":"),
         )
 
+    @staticmethod
+    def _nested_knowledge_values(data: Any, prefix: str = "") -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        for data_field in fields(data):
+            value = getattr(data, data_field.name)
+            if value is None:
+                continue
+            path = f"{prefix}.{data_field.name}" if prefix else data_field.name
+            if data_field.metadata.get("knowledge", False):
+                values[path] = value
+            elif is_dataclass(value):
+                values.update(DatabaseManager._nested_knowledge_values(value, path))
+        return values
+
     def write_dataclass(self, data: Any) -> None:
         if not is_dataclass(data):
             self.logger.warning("Ignoring non-dataclass data event", data=data)
@@ -75,6 +89,7 @@ class DatabaseManager:
             for field in fields(data)
             if getattr(data, field.name) is not None
         }
+        knowledge_values = self._nested_knowledge_values(data)
         if not values:
             self.logger.warning(
                 "Ignoring data event without values", data_type=type(data).__name__
@@ -85,6 +100,9 @@ class DatabaseManager:
         point = Point(name)
         for field_name, field_value in values.items():
             point.field(field_name, self._influx_field_value(field_value))
+        for field_name, field_value in knowledge_values.items():
+            if field_name not in values:
+                point.field(field_name, self._influx_field_value(field_value))
         self.logger.debug("Writing telemetry point", data_type=name)
         self.write_point(point)
         self.current_state[name] = data
@@ -94,7 +112,7 @@ class DatabaseManager:
                 {
                     "type": "measurements_updated",
                     "name": name,
-                    "values": values,
+                    "values": {**values, **knowledge_values},
                 }
             )
 
@@ -223,6 +241,27 @@ class DatabaseManager:
         """
         out = self.run_query(query)
         return out
+
+    def derivative_quantile(
+            self,
+            name: str,
+            measure: str,
+            quantile: float = 0.95,
+            range: str = "-10m",
+    ) -> float | None:
+            query = f'''
+            import "math"
+
+            from(bucket:"{self.opt.influxdb_bucket}")
+                |> range(start: {range})
+                |> filter(fn: (r) =>
+                    r._measurement == "{name}" and r._field == "{measure}"
+                )
+                |> derivative(unit: 1s)
+                |> map(fn: (r) => ({{ r with _value: math.abs(x: r._value) }}))
+                |> quantile(q: {quantile}, method: "estimate_tdigest")
+            '''
+            return self.run_query(query)
 
     @staticmethod
     def _flux_literal(value: str | bool) -> str:

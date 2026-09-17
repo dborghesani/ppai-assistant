@@ -1,14 +1,12 @@
 import asyncio
 from dataclasses import dataclass, fields, is_dataclass
-from typing import Any, List, Mapping
+from typing import Any, Callable, List, Mapping, get_args, get_type_hints
 
 import structlog
 from config import ConfigAssistant
 from data import assistant_dataclasses
 from data.database_manager import DatabaseManager
-from data.skill_map import SkillMap
 from events import CarEvent
-from omegaconf import OmegaConf
 from skill_manager import SkillType
 
 
@@ -20,6 +18,61 @@ class KnowledgeState:
 
 class KnowledgeManager:
     event_skill_map: dict[str, List[SkillType]] = {}
+    _BOOLEAN_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[bool], str]] = {
+        ("LaneTracing", "lane_crossing_left"): lambda value: (
+            "The driver is crossing the lane to the left."
+            if value
+            else "No lane crossing to the left is currently detected."
+        ),
+        ("LaneTracing", "lane_crossing_right"): lambda value: (
+            "The driver is crossing the lane to the right."
+            if value
+            else "No lane crossing to the right is currently detected."
+        ),
+        ("VehicleState", "doors_unlocked"): lambda value: (
+            "The vehicle doors are unlocked."
+            if value
+            else "The vehicle doors are locked."
+        ),
+        ("VehicleState", "trunk_open"): lambda value: (
+            "The trunk is open." if value else "The trunk is closed."
+        ),
+        ("VehicleState", "door_open_front_left"): lambda value: (
+            "The front left door is open." if value else "The front left door is closed."
+        ),
+        ("VehicleState", "door_open_front_right"): lambda value: (
+            "The front right door is open." if value else "The front right door is closed."
+        ),
+        ("VehicleState", "door_open_rear_left"): lambda value: (
+            "The rear left door is open." if value else "The rear left door is closed."
+        ),
+        ("VehicleState", "door_open_rear_right"): lambda value: (
+            "The rear right door is open." if value else "The rear right door is closed."
+        ),
+        ("VehicleState", "engine_on"): lambda value: (
+            "The engine is on." if value else "The engine is off."
+        ),
+    }
+    _COUNT_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[int], str]] = {
+        ("DetectedObjects", "people_around"): lambda value: (
+            "No people are currently detected around the vehicle."
+            if value == 0
+            else f"People density around the vehicle is "
+            f"{KnowledgeManager._density_level(value)} ({value} detected)."
+        ),
+        ("DetectedObjects", "vehicles_around"): lambda value: (
+            "No vehicles are currently detected around the vehicle."
+            if value == 0
+            else f"Vehicle density around the vehicle is "
+            f"{KnowledgeManager._density_level(value)} ({value} detected)."
+        ),
+        ("DetectedObjects", "dangerous_objects_around"): lambda value: (
+            "No dangerous objects are currently detected around the vehicle."
+            if value == 0
+            else f"{value} dangerous {'object is' if value == 1 else 'objects are'} "
+            "currently detected around the vehicle."
+        ),
+    }
 
     def __init__(
         self,
@@ -33,7 +86,6 @@ class KnowledgeManager:
         self.event_queue = data_event_queue
         self.knowledge_event_queue = knowledge_event_queue
         self.opt = opt
-        self.skill_map = SkillMap()
         self.context: dict[str, str] = {}
         self._last_evaluated: dict[str, KnowledgeState] = {}
 
@@ -42,31 +94,20 @@ class KnowledgeManager:
         return f"{value:.2f}".rstrip("0").rstrip(".")
 
     @staticmethod
-    def _display_measure(measure: str) -> str:
-        names = {
-            "speed": "vehicle speed",
-            "acceleration_longitudinal": "longitudinal acceleration",
-            "acceleration_lateral": "lateral acceleration",
-            "steering_angle": "steering angle",
-            "engine_rpm": "engine speed",
-            "people_around": "nearby people",
-            "vehicles_around": "nearby vehicles",
-            "dangerous_objects_around": "nearby hazardous objects",
-            "door_open_front_left": "front-left door",
-            "door_open_front_right": "front-right door",
-            "door_open_rear_left": "rear-left door",
-            "door_open_rear_right": "rear-right door",
-            "turn_signal": "turn signal",
-            "lane_keep_assist": "lane-keeping assist",
-            "blind_spot_monitor": "blind-spot monitor",
-            "engine_on": "engine",
-            "internal_temperature": "cabin temperature",
-        }
-        return names.get(measure, measure.replace("_", " "))
+    def _density_level(count: int) -> str:
+        if count > 10:
+            return "high"
+        if count > 5:
+            return "medium"
+        return "low"
 
     @staticmethod
     def _window_label(window: str) -> str:
         return window.lstrip("-")
+
+    @staticmethod
+    def _display_measure(measure: str) -> str:
+        return measure.replace("_", " ").replace(".", " ")
 
     @staticmethod
     def _duration_sentence(duration: int | None) -> str:
@@ -97,64 +138,53 @@ class KnowledgeManager:
         measure: str,
         value: float | int,
         window: str,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str | None, str | None]:
         sample_count = self.database_manager.count(name, measure, window)
+        # assuming that the variable names are semantically significant
         display_measure = self._display_measure(measure)
         if sample_count is None or sample_count < 3:
-            return (
-                f"Current {display_measure}: {self._format_value(value)}. "
-                "There are not enough recent samples to determine a trend.",
-                None,
-            )
+            return None, None
 
-        minimum = self.database_manager.min(name, measure, window)
-        maximum = self.database_manager.max(name, measure, window)
-        mean = self.database_manager.mean(name, measure, window)
-        stddev = self.database_manager.stddev(name, measure, window)
         mean_derivative = self.database_manager.mean_derivative(name, measure, window)
+        if mean_derivative is None:
+            return None, None
+
         stddev_derivative = self.database_manager.stddev_derivative(
             name, measure, window
         )
-
-        if (
-            minimum is None
-            or maximum is None
-            or mean is None
-            or stddev is None
-            or mean_derivative is None
-            or stddev_derivative is None
-        ):
-            knowledge = (
-                f"Current {display_measure}: {self._format_value(value)}. "
-                "Recent statistics are incomplete."
-            )
-            self.logger.debug("extracted knowledge", knowledge=knowledge)
-            return knowledge, None
-
         trend = self._trend_label(mean_derivative)
         if trend == "stable":
-            trend_sentence = (
-                f"It has remained stable over the last {self._window_label(window)}."
-            )
+            trend_description = "seems stable over time"
         else:
-            trend_description = (
-                "steadily"
-                if abs(stddev_derivative) <= abs(mean_derivative)
-                else "with fluctuations"
+            has_fluctuations = (
+                stddev_derivative is not None
+                and abs(stddev_derivative) > abs(mean_derivative)
             )
-            trend_sentence = (
-                f"It has been {trend} {trend_description} over the last "
-                f"{self._window_label(window)}, ranging from "
-                f"{self._format_value(minimum)} to {self._format_value(maximum)}."
+            qualifier = "with fluctuations" if has_fluctuations else "steadily"
+            historical_rate = self.database_manager.derivative_quantile(
+                name, measure
             )
-        variability = (
-            f" Variation was approximately {self._format_value(stddev)}."
-            if trend != "stable" and stddev > 0
-            else ""
+            unusually_fast = (
+                historical_rate is not None
+                and abs(mean_derivative) > historical_rate
+            )
+            speed_qualifier = " unusually fast" if unusually_fast else ""
+            trend_description = f"is {trend}{speed_qualifier} {qualifier}"
+
+        extracted_knowledge = (
+            f"{display_measure.capitalize()} is {self._format_value(value)} and "
+            f"{trend_description}."
         )
-        extracted_knowledge = f"Current {display_measure}: {self._format_value(value)}. {trend_sentence}{variability}"
         self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge, trend
+
+    def _count_knowledge(self, name: str, measure: str, value: int) -> str:
+        formatter = self._COUNT_KNOWLEDGE_FORMATTERS.get((name, measure))
+        if formatter is not None:
+            return formatter(value)
+
+        display_measure = self._display_measure(measure)
+        return f"The {display_measure} count is {value}."
 
     def _categorical_knowledge(
         self, name: str, measure: str, value: str, window: str
@@ -163,22 +193,13 @@ class KnowledgeManager:
         first_value = self.database_manager.first_value(name, measure, window)
         current_value = self.database_manager.last_value(name, measure, window) or value
         value_counts = self.database_manager.value_counts(name, measure, window)
-        current_duration = self.database_manager.current_value_duration(
-            name, measure, current_value, window
-        )
 
         if not value_counts:
-            return f"The current {display_measure} is {current_value}. There are not enough recent samples for a temporal summary."
+            return f"The {display_measure} is {current_value}."
 
-        sample_count = sum(value_counts.values())
-        extracted_knowledge = f"The current {display_measure} is {current_value}. "
+        extracted_knowledge = f"The {display_measure} is {current_value}. "
         if first_value is not None and first_value != current_value:
-            extracted_knowledge += f"It changed from {first_value} during the last {self._window_label(window)}. "
-        else:
-            extracted_knowledge += (
-                f"It remained unchanged during the last {self._window_label(window)}."
-            )
-        extracted_knowledge += self._duration_sentence(current_duration)
+            extracted_knowledge += f"It changed from {first_value}."
 
         self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
@@ -186,44 +207,26 @@ class KnowledgeManager:
     def _boolean_knowledge(
         self, name: str, measure: str, value: bool, window: str
     ) -> str:
+        formatter = self._BOOLEAN_KNOWLEDGE_FORMATTERS.get((name, measure))
+        if formatter is not None:
+            return formatter(value)
+
         display_measure = self._display_measure(measure)
         first_value = self.database_manager.first_value(name, measure, window)
         last_value = self.database_manager.last_value(name, measure, window)
         current_value = last_value if isinstance(last_value, bool) else value
         value_counts = self.database_manager.value_counts(name, measure, window)
         transitions = self.database_manager.value_transitions(name, measure, window)
-        current_duration = self.database_manager.current_value_duration(
-            name, measure, current_value, window
-        )
+        current_state = self._boolean_state(measure, current_value)
 
         sample_count = sum(value_counts.values())
         if sample_count == 0:
-            return (
-                f"The current {display_measure} state is {str(current_value).lower()}. "
-                "There are not enough recent samples for a temporal summary."
-            )
+            return f"The {display_measure} is {current_state}."
 
-        current_state = self._boolean_state(measure, current_value)
         extracted_knowledge = f"The {display_measure} is {current_state}."
         if isinstance(first_value, bool) and first_value != current_value:
             extracted_knowledge += (
-                f" It changed from {self._boolean_state(measure, first_value)} during the last "
-                f"{self._window_label(window)}."
-            )
-        elif transitions is not None:
-            if transitions == 0:
-                extracted_knowledge += f" It has remained {current_state} for the last {self._window_label(window)}."
-            else:
-                extracted_knowledge += (
-                    f" It changed state {transitions} times during the last "
-                    f"{self._window_label(window)}."
-                )
-        if transitions != 0:
-            extracted_knowledge += self._duration_sentence(current_duration)
-        elif current_duration is not None:
-            unit = "second" if int(current_duration) == 1 else "seconds"
-            extracted_knowledge += (
-                f" It has remained {current_state} for {int(current_duration)} {unit}."
+                f" It changed from {self._boolean_state(measure, first_value)}."
             )
 
         self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
@@ -235,10 +238,29 @@ class KnowledgeManager:
         if data_class is None or not is_dataclass(data_class):
             return None
 
-        for item in fields(data_class):
-            if item.name == measure and item.metadata.get("knowledge", False):
-                return item.metadata
+        path = measure.split(".")
+        for index, part in enumerate(path):
+            item = next((field for field in fields(data_class) if field.name == part), None)
+            if item is None:
+                return None
+            if index == len(path) - 1:
+                return item.metadata if item.metadata.get("knowledge", False) else None
+
+            type_hint = get_type_hints(data_class).get(part)
+            nested_types = get_args(type_hint)
+            data_class = next(
+                (nested_type for nested_type in nested_types if is_dataclass(nested_type)),
+                type_hint if is_dataclass(type_hint) else None,
+            )
+            if data_class is None:
+                return None
         return None
+
+    @classmethod
+    def _field_skills(cls, name: str, measure: str) -> tuple[str, ...]:
+        metadata = cls._knowledge_metadata(name, measure) or {}
+        skills = metadata.get("skills", ())
+        return tuple(skill.value if isinstance(skill, SkillType) else skill for skill in skills)
 
     def _is_significant_change(
         self,
@@ -280,18 +302,27 @@ class KnowledgeManager:
         return value != previous.value
 
     async def _notify_agent(self, name: str, changes: dict[str, Any]) -> None:
-        skill_context = {
-            context_key: context_value
-            for context_key, context_value in self.context.items()
-            if context_key.startswith(f"{name}.")
-        }
-        for skill in self.skill_map.get_skills_for_event(name):
+        changes_by_skill: dict[str, dict[str, Any]] = {}
+        for measure, value in changes.items():
+            for skill in self._field_skills(name, measure):
+                changes_by_skill.setdefault(skill, {})[measure] = value
+
+        for skill, skill_changes in changes_by_skill.items():
+            skill_context = {}
+            for context_key, context_value in self.context.items():
+                context_name, separator, context_measure = context_key.partition(".")
+                if separator and skill in self._field_skills(
+                    context_name, context_measure
+                ):
+                    skill_context[context_key] = context_value
+
+            skill_context_all_values_as_list = list(skill_context.values())
             await self.knowledge_event_queue.put(
                 CarEvent(
-                    skill=skill.value if isinstance(skill, SkillType) else skill,
+                    skill=skill,
                     event_name="knowledge_updated",
-                    event_value=changes,
-                    context=skill_context,
+                    event_value=sorted(skill_changes),
+                    context=skill_context_all_values_as_list,
                 )
             )
 
@@ -312,6 +343,7 @@ class KnowledgeManager:
                         measure, str
                     ) and KnowledgeManager._generates_knowledge(name, measure):
                         pending[(name, measure)] = value
+        """
         elif event.get("type") == "measure_updated":
             name = event.get("name")
             measure = event.get("measure")
@@ -321,6 +353,7 @@ class KnowledgeManager:
                 and KnowledgeManager._generates_knowledge(name, measure)
             ):
                 pending[(name, measure)] = event.get("value")
+        """
 
     async def run(self) -> None:
         while True:
@@ -344,7 +377,14 @@ class KnowledgeManager:
         for (name, measure), value in pending.items():
             key = f"{name}.{measure}"
             trend: str | None = None
-            if (
+            metadata = self._knowledge_metadata(name, measure) or {}
+            if isinstance(value, int) and not isinstance(value, bool) and metadata.get(
+                "value_kind"
+            ) == "count":
+                knowledge = await asyncio.to_thread(
+                    self._count_knowledge, name, measure, value
+                )
+            elif (
                 value is not None
                 and not isinstance(value, bool)
                 and isinstance(value, (int, float))
@@ -363,8 +403,13 @@ class KnowledgeManager:
             else:
                 continue
 
+            if knowledge is None:
+                continue
+
             self.context[key] = knowledge
-            if self._is_significant_change(name, measure, key, value, trend):
+            if (
+                self._is_significant_change(name, measure, key, value, trend)
+            ):
                 self.logger.info(
                     "significant change detected",
                     name=name,
@@ -380,5 +425,6 @@ class KnowledgeManager:
     def dump_knowledge(self) -> str:
         output_knowledge = ""
         for key, value in self.context.items():
-            output_knowledge += f"{key}: {value}\n\n"
+            #output_knowledge += f"{key}: {value}\n\n"
+            output_knowledge += f"{value}\n\n"
         return output_knowledge

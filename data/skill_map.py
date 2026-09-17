@@ -4,12 +4,21 @@ class SkillMap:
     
     def __init__(self):
         self.event_skill_map = {}
+
         self.event_skill_map["DriverEmotionState"] = [SkillType.DRIVER_HEALTH]
         self.event_skill_map["DriverPhysicalState"] = [SkillType.DRIVER_HEALTH]
         self.event_skill_map["DriverDrivingStyle"] = [SkillType.DRIVER_HEALTH]
-        self.event_skill_map["EnvironmentState"] = [SkillType.DRIVER_HEALTH] #[SkillType.PROACTIVE_SUGGESTIONS, SkillType.NAVIGATION, SkillType.DRIVER_HEALTH]
+        self.event_skill_map["EnvironmentState"] = [SkillType.DRIVER_HEALTH]
+        self.event_skill_map["DetectedObjects"] = [SkillType.DRIVER_HEALTH]
+        self.event_skill_map["EnvironmentState"] = [SkillType.DRIVER_HEALTH, 
+                                                    SkillType.NAVIGATION_AND_COACHING]
+
+        self.event_skill_map["DriverDrivingStyle"] = [SkillType.NAVIGATION_AND_COACHING]
+        self.event_skill_map["VehicleState"] = [SkillType.NAVIGATION_AND_COACHING]
+        self.event_skill_map["VehicleMotion"] = [SkillType.NAVIGATION_AND_COACHING]
+
         #self.event_skill_map["VehicleMotion"] = [SkillType.NAVIGATION]
-        self.event_skill_map["VehicleState"] = [SkillType.DRIVER_HEALTH] #[SkillType.VEHICLE]
+        #self.event_skill_map["VehicleState"] = [SkillType.DRIVER_HEALTH] #[SkillType.VEHICLE]
         """
         self.event_skill_map["DriverState.behavior"] = [SkillType.DRIVER_HEALTH]
         self.event_skill_map["DriverState.fatigue_level"] = [SkillType.DRIVER_HEALTH]

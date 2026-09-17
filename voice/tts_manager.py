@@ -50,6 +50,7 @@ class TTSManager:
         self._stop_flag = threading.Event()
         self._playback_stream = None
         self.is_speaking = False
+        self._speech_lock = asyncio.Lock()
         # Rolling buffer of recently-played audio, used by STTManager to tell
         # apart mic-captured TTS echo from a genuine user barge-in.
         self._playback_ring = np.zeros(0, dtype=np.float32)
@@ -142,7 +143,8 @@ class TTSManager:
     async def speak(self, text: str) -> None:
         if not self.enabled or not text:
             return
-        await asyncio.to_thread(self._speak_blocking, text)
+        async with self._speech_lock:
+            await asyncio.to_thread(self._speak_blocking, text)
 
     def stop(self) -> None:
         """Immediately halt any ongoing playback (barge-in on user speech)."""

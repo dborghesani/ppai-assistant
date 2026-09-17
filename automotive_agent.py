@@ -5,6 +5,7 @@ from typing import Any, Callable
 import structlog
 from skill_manager import SkillManager, SkillType
 from events import CarEvent
+from tools.speed_limit_tool import SpeedLimitTool
 from voice.tts_manager import TTSManager
 from crewai import Agent, Task, Crew
 from crewai.process import Process
@@ -24,19 +25,16 @@ class Urgency(str, Enum):
     CRITICAL = "critical"
 
 class ActionType(str, Enum):
-    NONE = "none"
-    SUGGEST = "suggest"
-
-    INCREASE_TEMPERATURE = "increase_temperature"
-    DECREASE_TEMPERATURE = "decrease_temperature"
-
-    LOCK_DOORS = "lock_doors"
-
-    START_NAVIGATION = "start_navigation"
-
-    FIND_REST_AREA = "find_rest_area"
-
-    ENABLE_RECIRCULATION = "enable_recirculation"
+    NONE = "no action required"
+    SUGGEST = "suggest the driver"
+    WARN = "warn the driver"
+    INCREASE_TEMPERATURE = "increase internal temperature"
+    DECREASE_TEMPERATURE = "decrease internal temperature"
+    LOCK_DOORS = "lock doors"
+    UNLOCK_DOORS = "unlock doors"
+    START_NAVIGATION = "start navigation"
+    FIND_REST_AREA = "find rest area"
+    ENABLE_RECIRCULATION = "enable air recirculation"
 
 class Action(BaseModel):
 
@@ -76,25 +74,33 @@ class AutomotiveAgent:
 
         self.recent_notifications: list[dict[str, Any]] = []
 
-        self.available_actions = """
-            NONE
-            - do nothing
-
-            INCREASE_TEMPERATURE
-            - increase cabin temperature
-
-            DECREASE_TEMPERATURE
-            - decrease cabin temperature
-
-            LOCK_DOORS
-            - lock vehicle doors
-
-            START_NAVIGATION
-            - start route guidance
-
-            FIND_REST_AREA
-            - search for a nearby rest area
-            """
+        self.actions_by_skill = {
+            SkillType.DRIVER_HEALTH: (
+                ActionType.NONE,
+                ActionType.SUGGEST,
+                ActionType.WARN,
+                ActionType.INCREASE_TEMPERATURE,
+                ActionType.DECREASE_TEMPERATURE,
+                ActionType.FIND_REST_AREA,
+                ActionType.ENABLE_RECIRCULATION,
+            ),
+            SkillType.NAVIGATION_AND_COACHING: (
+                ActionType.NONE,
+                ActionType.SUGGEST,
+                ActionType.WARN,
+                ActionType.LOCK_DOORS,
+                ActionType.UNLOCK_DOORS,
+                ActionType.START_NAVIGATION,
+                ActionType.FIND_REST_AREA,
+            ),
+            SkillType.PROACTIVE_SUGGESTIONS: (
+                ActionType.NONE,
+                ActionType.SUGGEST,
+                ActionType.WARN,
+                ActionType.START_NAVIGATION,
+                ActionType.FIND_REST_AREA,
+            ),
+        }
 
         agent = Agent(
             role="In-Vehicle Personal Assistant",
@@ -111,112 +117,46 @@ class AutomotiveAgent:
             ),
             verbose=False,
             llm=llm,
-            tools=[],
+            tools=[]#[SpeedLimitTool()],
         )
 
         task = Task(
             description="""
-                You are the notification gate of an in-vehicle assistant.
+                You are the notification gate for an in-vehicle assistant.
 
-                Active skill:
-                {skill}
+                Inputs:
+                skill_instructions={skill_instructions}
+                changed_knowledge={changed_knowledge}
+                context={context}
+                user_input={user_input}
+                available_actions={available_actions}
 
-                Skill instructions:
-                {skill_instructions}
+                Rules:
+                - If user_input is not empty, answer that request. Set notify=true.
+                - Otherwise, remain silent unless the data shows a concrete current
+                    safety risk, abnormal condition, or useful action needed now.
+                - Do not speak about normal, stable, low, unchanged, or merely changing
+                    values. Do not summarize telemetry or say that no action is needed.
+                - A trend, fluctuation, or sensor value is not a risk without an explicit
+                    threshold or safety consequence. Do not infer one.
+                - For proactive alerts, require all of the following: a concrete current
+                    hazard or action, direct evidence for it in changed_knowledge or
+                    context, and a timely benefit from interrupting the driver. Otherwise
+                    choose Silent.
+                - In particular, choose Silent for a speed increase or fluctuation without
+                    a known speed-limit exceedance or explicitly unsafe manoeuvre; an
+                    indicator being off without an explicitly reported turn or lane change;
+                    or a vague lane assessment not tied to a reported dangerous deviation
+                    or upcoming exit. Never turn missing information into a warning.
+                - You may use lookup_speed_limit only when explicit latitude and longitude
+                    are available in the supplied context or user request. Treat unavailable
+                    tool results as no speed-limit information; do not estimate a limit.
 
-                Triggering event:
-                {event}
-
-                Values that triggered this evaluation:
-                {value}
-
-                Current extracted knowledge:
-                {context}
-
-                Direct user request, if any:
-                {user_input}
-
-                Recent notifications:
-                {recent_notifications}
-
-                Available actions:
-                {available_actions}
-
-                ABSOLUTE RULE, no exceptions: if "Direct user request" above is not empty, the
-                user directly spoke or typed to you. You MUST set notify=true and produce a
-                spoken_message that responds to their request. This overrides "Default to
-                silence", the deduplication rules, and every other instruction below. Never
-                output notify=false when user_input is non-empty.
-
-                The rest of this section (default to silence, deduplication) applies only
-                when user_input is empty, i.e. this evaluation was triggered by a knowledge/
-                vehicle-event update and not by something the user said.
-
-                Default to silence. A knowledge update requests an evaluation, not a spoken
-                response. Normal, safe, stable, informational or non-actionable conditions
-                must produce notify=false.
-
-                Set notify=true when at least one condition applies:
-                - user_input is non-empty (always, per the absolute rule above);
-                - there is an immediate or developing safety risk;
-                - a vehicle condition requires timely attention;
-                - the occupant can take a useful, time-sensitive action now.
-
-                Do not notify merely because a value changed, to confirm normal operation,
-                to report that no problem was detected, or to say that no action is required.
-                Routine controls such as turn signals, lights and normal engine state should
-                remain silent unless their duration or surrounding context indicates a concrete
-                risk. Stable or optimal conditions should remain silent.
-
-                Deduplication & Repetition Rules (only when user_input is empty):
-                - ALWAYS examine "Recent notifications" FIRST before deciding to notify.
-                - If the condition, topic, or advice has already been communicated in "Recent notifications", you MUST set notify=false.
-                - Repeating warnings or advice creates dangerous driver distraction and alert fatigue.
-                - Minor value variations or ongoing persistent states of an already-notified condition MUST NOT trigger a new notification.
-                - These deduplication rules NEVER apply when user_input is non-empty: a direct
-                  user request always gets notify=true and a real answer, even if the topic or
-                  wording resembles a recent notification.
-                - In all other duplicate cases (user_input empty), output notify=false, urgency=none, spoken_message=null, reason="Condition already notified recently."
-
-                Before setting notify=true, identify the concrete risk, required attention or
-                useful immediate action that justifies interrupting the occupant. If none exists,
-                set notify=false.
-
-                When notifying, set notify to true, choose an urgency, give a brief internal
-                reason, and produce one concise spoken message. When not notifying, set notify
-                to false, urgency to none, and spoken_message to null.
-
-                Consistency requirements:
-                - notify=false requires urgency=none and spoken_message=null;
-                - notify=true requires urgency other than none and a concrete justification;
-                - action_type=none with notify=true is valid only for a warning that still
-                    requires the occupant's attention;
-                - never notify with a message meaning that everything is normal, no urgent
-                    condition exists, or no action is recommended.
-
-                Negative example 1 (Routine update): a turn signal active for ten seconds while all other
-                conditions are normal results in notify=false, urgency=none and no spoken
-                message.
-                Negative example 2 (Duplicate notification):
-                Recent notifications:
-                - [Urgency: LOW] Topic/Skill: vehicle (knowledge_updated) | Spoken: "The cabin temperature is twenty-two degrees Celsius."
-                Current context: internal_temperature is 22.3°C.
-                Output: notify=false, urgency=none, spoken_message=null, reason="Temperature condition was already communicated recently and has not escalated in urgency."
-                Positive example: a turn signal that remains active for several
-                minutes after a completed turn may justify a low-urgency reminder.
-                Positive example (user_input overrides everything): user_input is "What's the
-                cabin temperature?" and Recent notifications already contains an identical
-                temperature notification from moments ago. Output: notify=true, urgency=low,
-                spoken_message="It's twenty-two degrees Celsius in the cabin.", reason="Direct
-                user request, always answered regardless of recent notifications."
-
-                The spoken message is sent directly to text-to-speech. Address the occupant
-                naturally; do not include analysis, scores, variable names, or implementation
-                details.
-
-                Requests provided as user_input are high-priority and MUST always receive a
-                notify=true response with a real, on-topic spoken_message — never silence, and
-                never a generic acknowledgement that avoids answering the request.
+                Output:
+                - Silent: notify=false, urgency=none, spoken_message=null, action=null.
+                - Alert: notify=true, urgency is not none, reason names the concrete
+                    risk, and spoken_message is one short natural sentence.
+                - Never expose internal reasoning or implementation details.
                 """,
             expected_output=(
                 "A structured notification decision containing notify, urgency, "
@@ -254,24 +194,6 @@ class AutomotiveAgent:
                 await self._process_event(event)
             except Exception as e:
                 logger.error(f"Error in agent loop: {e}")
-
-    def _format_recent_notifications(self) -> str:
-        if not self.recent_notifications:
-            return "None (no recent notifications spoken yet)"
-        lines = []
-        now = time.time()
-        for n in self.recent_notifications:
-            urgency = n.get("urgency", "unknown").upper()
-            skill = n.get("skill", "general")
-            event = n.get("event", "update")
-            measures = n.get("measures") or []
-            measures_str = f", measure(s): {', '.join(measures)}" if measures else ""
-            msg = n.get("message", "")
-            elapsed = int(now - n.get("timestamp", now))
-            lines.append(
-                f"- [{elapsed}s ago | Urgency: {urgency}] Topic/Skill: {skill} ({event}{measures_str}) | Spoken: \"{msg}\""
-            )
-        return "\n".join(lines)
 
     def _is_duplicate_or_cooling_down(
         self,
@@ -320,26 +242,52 @@ class AutomotiveAgent:
 
         return False, ""
 
+    @staticmethod
+    def _is_non_actionable_decision(decision: NotificationDecision) -> bool:
+        """Reject model notifications that explicitly describe no actionable risk."""
+        if decision.urgency is Urgency.NONE:
+            return True
+        if decision.action is not None and decision.action.action_type is ActionType.NONE:
+            return True
+
+        text = " ".join(
+            part.strip().lower()
+            for part in (decision.reason, decision.spoken_message or "")
+            if part
+        )
+        non_actionable_markers = (
+            "no immediate safety concern",
+            "no immediate safety risk",
+            "no safety concern",
+            "no safety risk",
+            "no immediate action",
+            "no action is recommended",
+            "no action recommended",
+            "nothing to do",
+            "no action needed",
+            "context is stable",
+        )
+        return any(marker in text for marker in non_actionable_markers)
+
     async def _process_event(self, event: CarEvent):
         logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         logger.info(">>> generating...")
         llm_start = time.time()
-        measures: set[str] = (
-            set(event.event_value.keys()) if isinstance(event.event_value, dict) else set()
-        )
+        measures: set[str] = set(event.event_value or [])
         try:
-            skill_instructions = self.skill_manager.get_skill(SkillType(event.skill))
+            skill = SkillType(event.skill)
+            skill_instructions = self.skill_manager.get_skill(skill)
         except ValueError:
+            skill = None
             skill_instructions = "No additional skill-specific instructions."
 
+        available_actions = self._format_available_actions(skill)
+
         inputs = {
-            "skill": event.skill,
             "skill_instructions": skill_instructions,
-            "event": event.event_name,
+            "changed_knowledge": event.event_value,
             "context": event.context,
-            "value": event.event_value,
-            "recent_notifications": self._format_recent_notifications(),
-            "available_actions": self.available_actions,
+            "available_actions": available_actions,
             "user_input": event.user_input,
         }
         result = await self.crew.kickoff_async(
@@ -352,6 +300,10 @@ class AutomotiveAgent:
 
         decision: NotificationDecision = result.pydantic
         if decision.notify and decision.spoken_message:
+            if not event.user_input and self._is_non_actionable_decision(decision):
+                logger.info(">>> [suppressed non-actionable model decision]")
+                return
+
             # Check deterministic cooldown / deduplication unless user explicitly asked a question
             if not event.user_input:
                 suppressed, reason = self._is_duplicate_or_cooling_down(
@@ -390,3 +342,7 @@ class AutomotiveAgent:
                     response = decision.spoken_message + "\n"
                     response += f"Action: {decision.action.action_type}, Parameters: {decision.action.parameters}\n" if decision.action else "no action required\n"
                     self.on_response(response)
+
+    def _format_available_actions(self, skill: SkillType | None) -> str:
+        actions = self.actions_by_skill.get(skill, (ActionType.NONE,))
+        return "".join(f"{action.name}\n- {action.value}\n\n" for action in actions)

@@ -52,6 +52,18 @@ class KnowledgeManager:
         ("VehicleState", "door_open_rear_right"): lambda value: (
             "The rear right door is open." if value else "The rear right door is closed."
         ),
+        ("VehicleState", "lights_on_sidelights"): lambda value: (
+            "The sidelights are on." if value else "The sidelights are off."
+        ),
+        ("VehicleState", "lights_on_low_beams"): lambda value: (
+            "The low beam headlights are on." if value else "The low beam headlights are off."
+        ),
+        ("VehicleState", "lights_on_high_beams"): lambda value: (
+            "The high beam headlights are on." if value else "The high beam headlights are off."
+        ),
+        ("VehicleState", "lights_on_fog_lights"): lambda value: (
+            "The fog lights are on." if value else "The fog lights are off."
+        ),
         ("VehicleState", "engine_on"): lambda value: (
             "The engine is on." if value else "The engine is off."
         ),
@@ -82,6 +94,12 @@ class KnowledgeManager:
             "Right": "The vehicle is approaching a highway exit on the right.",
             "Left": "The vehicle is approaching a highway exit on the left.",
         }.get(value, f"The highway exit status is {value}."),
+        ("EnvironmentState", "traffic"): lambda value: {
+            "No traffic": "No traffic is currently detected around the vehicle.",
+            "Light": "Current traffic is light.",
+            "Medium": "Current traffic is medium.",
+            "Heavy": "Current traffic is heavy.",
+        }.get(value, f"Current traffic is {value}."),
     }
 
     def __init__(
@@ -100,6 +118,10 @@ class KnowledgeManager:
         self._last_evaluated: dict[str, KnowledgeState] = {}
         self._raw_values: dict[str, Any] = {}
         self._last_speed_status: str | None = None
+        self.on_context_updated: Callable[[], None] | None = None
+        # The very first batch establishes the startup baseline: it must not
+        # flood the model with every field's initial (mostly routine) value.
+        self._is_first_batch = True
 
     @staticmethod
     def _format_value(value: float | int) -> str:
@@ -188,43 +210,32 @@ class KnowledgeManager:
         return f"The {display_measure} count is {value}."
 
     def _categorical_knowledge(
-        self, name: str, measure: str, value: str, window: str
+        self, name: str, measure: str, value: str
     ) -> str:
         formatter = self._CATEGORY_KNOWLEDGE_FORMATTERS.get((name, measure))
         if formatter is not None:
             return formatter(value)
 
         display_measure = self._display_measure(measure)
-        current_value = self.database_manager.last_value(name, measure, window) or value
-        extracted_knowledge = f"The {display_measure} is {current_value}."
+        # No real trend tracking for categorical values (only updated on
+        # change): just report the current state.
+        extracted_knowledge = f"The {display_measure} is {value}."
 
         self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
 
     def _boolean_knowledge(
-        self, name: str, measure: str, value: bool, window: str
+        self, name: str, measure: str, value: bool
     ) -> str:
         formatter = self._BOOLEAN_KNOWLEDGE_FORMATTERS.get((name, measure))
         if formatter is not None:
             return formatter(value)
 
         display_measure = self._display_measure(measure)
-        first_value = self.database_manager.first_value(name, measure, window)
-        last_value = self.database_manager.last_value(name, measure, window)
-        current_value = last_value if isinstance(last_value, bool) else value
-        value_counts = self.database_manager.value_counts(name, measure, window)
-        transitions = self.database_manager.value_transitions(name, measure, window)
-        current_state = self._boolean_state(measure, current_value)
-
-        sample_count = sum(value_counts.values())
-        if sample_count == 0:
-            return f"The {display_measure} is {current_state}."
-
+        # No real trend tracking for boolean values (only updated on change):
+        # just report the current state.
+        current_state = self._boolean_state(measure, value)
         extracted_knowledge = f"The {display_measure} is {current_state}."
-        if isinstance(first_value, bool) and first_value != current_value:
-            extracted_knowledge += (
-                f" It changed from {self._boolean_state(measure, first_value)}."
-            )
 
         self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
@@ -270,11 +281,18 @@ class KnowledgeManager:
         previous = self._last_evaluated.get(key)
         current = KnowledgeState(value=value, trend=trend)
         self._last_evaluated[key] = current
+
+        # Booleans/categories are meaningful on their own: the first value
+        # observed for a field introduced after startup can already matter
+        # (e.g. weather set to "Foggy" from the UI), unlike the very first
+        # startup batch, which is just the baseline and must stay quiet.
+        if isinstance(value, bool) or isinstance(value, str):
+            if previous is None:
+                return not self._is_first_batch
+            return value != previous.value
+
         if previous is None:
             return False
-
-        if isinstance(value, bool) or isinstance(value, str):
-            return value != previous.value
 
         if isinstance(value, (int, float)) and isinstance(previous.value, (int, float)):
             metadata = self._knowledge_metadata(name, measure) or {}
@@ -292,9 +310,6 @@ class KnowledgeManager:
             if not isinstance(change_ratio, (int, float)):
                 change_ratio = self.opt.knowledge_numeric_change_ratio
             return trend_changed or relative_change >= change_ratio
-
-        if isinstance(value, str) and isinstance(previous.value, str):
-            return value != previous.value
 
         return value != previous.value
 
@@ -421,6 +436,26 @@ class KnowledgeManager:
                 pending[(name, measure)] = event.get("value")
         """
 
+    async def seed_default_knowledge(self) -> None:
+        """Publish known baseline values (e.g. doors closed, turn signal off)
+        before any telemetry arrives, so the knowledge base and UI aren't
+        empty and the first real reading is compared against a real baseline
+        instead of being silently treated as the startup batch."""
+        pending: dict[tuple[str, str], Any] = {}
+        for attr_name in dir(assistant_dataclasses):
+            data_class = getattr(assistant_dataclasses, attr_name)
+            if not is_dataclass(data_class):
+                continue
+            for data_field in fields(data_class):
+                if not data_field.metadata.get("knowledge", False):
+                    continue
+                if data_field.default is None:
+                    continue
+                pending[(attr_name, data_field.name)] = data_field.default
+
+        if pending:
+            await self.process_pending(pending)
+
     async def run(self) -> None:
         while True:
             event = await self.event_queue.get()
@@ -456,6 +491,16 @@ class KnowledgeManager:
             elif (
                 value is not None
                 and not isinstance(value, bool)
+                and isinstance(value, (int, float, str))
+                and metadata.get("value_kind") == "category"
+            ):
+                label = self._format_value(value) if isinstance(value, (int, float)) else value
+                knowledge = await asyncio.to_thread(
+                    self._categorical_knowledge, name, measure, label
+                )
+            elif (
+                value is not None
+                and not isinstance(value, bool)
                 and isinstance(value, (int, float))
             ):
                 knowledge, trend = await asyncio.to_thread(
@@ -463,11 +508,11 @@ class KnowledgeManager:
                 )
             elif isinstance(value, bool):
                 knowledge = await asyncio.to_thread(
-                    self._boolean_knowledge, name, measure, value, window
+                    self._boolean_knowledge, name, measure, value
                 )
             elif isinstance(value, str):
                 knowledge = await asyncio.to_thread(
-                    self._categorical_knowledge, name, measure, value, window
+                    self._categorical_knowledge, name, measure, value
                 )
             else:
                 continue
@@ -479,6 +524,9 @@ class KnowledgeManager:
             change_value: Any = value
             if metadata.get("value_kind") == "density":
                 change_value = self._density_level(value)
+            elif metadata.get("value_kind") == "category":
+                # Compare as a label, not a magnitude: any change is significant.
+                change_value = self._format_value(value) if isinstance(value, (int, float)) else str(value)
             if (
                 self._is_significant_change(name, measure, key, change_value, trend)
             ):
@@ -492,6 +540,8 @@ class KnowledgeManager:
                     )
                     significant_changes[key] = change_value
 
+        self._is_first_batch = False
+
         derived_change = None
         if any(
             key in self._raw_values
@@ -501,6 +551,11 @@ class KnowledgeManager:
         if derived_change is not None:
             key, value = derived_change
             significant_changes[key] = value
+
+        # Notify listeners (e.g. the UI) of the fresh knowledge base before the
+        # agent, and therefore any LLM call, is triggered below.
+        if pending and self.on_context_updated is not None:
+            self.on_context_updated()
 
         if significant_changes:
             await self._notify_agent(significant_changes)

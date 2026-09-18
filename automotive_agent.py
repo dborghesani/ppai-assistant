@@ -35,8 +35,13 @@ class ActionType(str, Enum):
     LOCK_DOORS = "lock doors"
     UNLOCK_DOORS = "unlock doors"
     START_NAVIGATION = "start navigation"
+    ENABLE_NIGHT_LIGHTS = "enable night lights"
+    DISABLE_NIGHT_LIGHTS = "disable night lights"
     FIND_REST_AREA = "find rest area"
-    ENABLE_RECIRCULATION = "enable air recirculation"
+    ENABLE_FOG_LIGHTS = "enable fog lights"
+    DISABLE_FOG_LIGHTS = "disable fog lights"
+    ENABLE_AC = "enable air conditioning"
+    DISABLE_AC = "disable air conditioning"
 
 class Action(BaseModel):
 
@@ -46,9 +51,6 @@ class Action(BaseModel):
 
 
 class NotificationDecision(BaseModel):
-    notify: bool = Field(
-        description="Whether the user should be notified now."
-    )
     urgency: Urgency
     reason: str = Field(
         description="Short internal justification. Never spoken to the user."
@@ -57,10 +59,15 @@ class NotificationDecision(BaseModel):
         default=None,
         description=(
             "Exact message to speak directly to the user. "
-            "Must be null when notify is false."
+            "Must be null when urgency is none."
         ),
     )
     action: Action | None = None
+
+    @property
+    def notify(self) -> bool:
+        """Derived, not model-provided: avoids the model setting notify inconsistently with urgency."""
+        return self.urgency is not Urgency.NONE
 
 class AutomotiveAgent:
     def __init__(
@@ -98,7 +105,8 @@ class AutomotiveAgent:
                 ActionType.INCREASE_TEMPERATURE,
                 ActionType.DECREASE_TEMPERATURE,
                 ActionType.FIND_REST_AREA,
-                ActionType.ENABLE_RECIRCULATION,
+                ActionType.ENABLE_AC,
+                ActionType.DISABLE_AC,
             ),
             SkillType.NAVIGATION_AND_COACHING: (
                 ActionType.NONE,
@@ -108,6 +116,10 @@ class AutomotiveAgent:
                 ActionType.UNLOCK_DOORS,
                 ActionType.START_NAVIGATION,
                 ActionType.FIND_REST_AREA,
+                ActionType.ENABLE_FOG_LIGHTS,
+                ActionType.DISABLE_FOG_LIGHTS,
+                ActionType.ENABLE_NIGHT_LIGHTS,
+                ActionType.DISABLE_NIGHT_LIGHTS,
             ),
             SkillType.PROACTIVE_SUGGESTIONS: (
                 ActionType.NONE,
@@ -148,8 +160,7 @@ class AutomotiveAgent:
                 available_actions={available_actions}
 
                 Rules:
-                - If user_input is not empty, answer that request. Set notify=true.
-                - Otherwise, remain silent unless the data shows a concrete current
+                - Remain silent (urgency=none) unless the data shows a concrete current
                     safety risk, abnormal condition, or useful action needed now.
                 - Do not speak about normal, stable, low, unchanged, or merely changing
                     values. Do not summarize telemetry or say that no action is needed.
@@ -158,24 +169,38 @@ class AutomotiveAgent:
                 - For proactive alerts, require all of the following: a concrete current
                     hazard or action, direct evidence for it in changed_knowledge or
                     context, and a timely benefit from interrupting the driver. Otherwise
-                    choose Silent.
-                - In particular, choose Silent for a speed increase or fluctuation without
-                    a known speed-limit exceedance or explicitly unsafe manoeuvre; an
-                    indicator being off without an explicitly reported turn or lane change;
-                    or a vague lane assessment not tied to a reported dangerous deviation
-                    or upcoming exit. Never turn missing information into a warning.
+                    urgency=none.
+                - Never turn missing information into a warning: a trend or state change is
+                    only a risk when skill_instructions or context ties it to an explicit
+                    threshold or consequence.
                 - You may use lookup_speed_limit only when explicit latitude and longitude
                     are available in the supplied context or user request. Treat unavailable
                     tool results as no speed-limit information; do not estimate a limit.
+                - skill_instructions may list example values to illustrate a rule; they are
+                    not the current data. Only state a specific value (e.g. a turn-signal
+                    direction, a light or door state) if that exact value appears verbatim
+                    in changed_knowledge or context. Never substitute an example value from
+                    skill_instructions for the actual reported one.
+                - If you cannot name a concrete current risk or useful action, that is
+                    the Silent case: set urgency=none and spoken_message=null (the JSON
+                    null, not a sentence). Never say things like "no action is needed",
+                    "notifications remain silent" or describe the telemetry out loud
+                    instead of setting the fields.
 
                 Output:
-                - Silent: notify=false, urgency=none, spoken_message=null, action=null.
-                - Alert: notify=true, urgency is not none, reason names the concrete
-                    risk, and spoken_message is one short natural sentence.
+                - Silent: urgency=none, spoken_message=null, action=null.
+                  These fields always go together — never leave urgency=none while
+                  spoken_message has text, and never give urgency above none while
+                  spoken_message is null.
+                  Example Silent output:
+                  {{"urgency": "none", "reason": "<why nothing qualifies>",
+                  "spoken_message": null, "action": null}}
+                - Alert: urgency is not none, reason names the concrete risk, and
+                    spoken_message is one short natural sentence.
                 - Never expose internal reasoning or implementation details.
                 """,
             expected_output=(
-                "A structured notification decision containing notify, urgency, "
+                "A structured notification decision containing urgency, "
                 "reason and spoken_message."
             ),
             output_pydantic=NotificationDecision,

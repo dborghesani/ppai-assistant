@@ -550,6 +550,10 @@ ApplicationWindow {
                                 ButtonGroup.group: trafficGroup
                             }
                             RadioButton {
+                                text: "Medium"
+                                ButtonGroup.group: trafficGroup
+                            }
+                            RadioButton {
                                 text: "Heavy"
                                 ButtonGroup.group: trafficGroup
                             }
@@ -824,7 +828,7 @@ ApplicationWindow {
                                 text: checked ? "ON" : "OFF"
 
                                 onCheckedChanged: {
-                                    vehicleBridge.boolChanged("VehicleState", "engine_running", checked)
+                                    vehicleBridge.boolChanged("VehicleState", "engine_on", checked)
                                 }
                             }
 
@@ -1114,12 +1118,10 @@ ApplicationWindow {
                 height: parent.height
                 title: "Knowledge"
 
-                Timer {
-                    interval: 2000
-                    repeat: true
-                    running: true
-                    onTriggered: {
-                        knowledgeTextArea.updateKnowledge()
+                Connections {
+                    target: vehicleBridge
+                    function onKnowledgeUpdated(text) {
+                        knowledgeTextArea.applyKnowledge(text)
                     }
                 }
 
@@ -1142,16 +1144,18 @@ ApplicationWindow {
                         font.pixelSize: 12
                         selectByMouse: true
 
-                        function updateKnowledge() {
+                        function applyKnowledge(updatedText) {
                             var flickable = knowledgeScrollView.contentItem
                             if (!flickable) {
+                                if (text !== updatedText) {
+                                    text = updatedText
+                                }
                                 return
                             }
 
                             var oldMaximum = Math.max(0, flickable.contentHeight - flickable.height)
                             var wasAtBottom = oldMaximum - flickable.contentY < 4
                             var savedContentY = flickable.contentY
-                            var updatedText = vehicleBridge.dumpKnowledge()
                             if (text !== updatedText) {
                                 text = updatedText
                             }

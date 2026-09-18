@@ -20,6 +20,7 @@ class VehicleBridge(QObject):
     responseReceived = Signal(str)
     isDarkModeChanged = Signal(bool)
     conversationModeChanged = Signal(bool)
+    knowledgeUpdated = Signal(str)
 
     def __init__(
         self,
@@ -38,6 +39,7 @@ class VehicleBridge(QObject):
         self.loop = loop
         self.database_manager = database_manager
         self.knowledge_manager = knowledge_manager
+        self.knowledge_manager.on_context_updated = self._on_knowledge_updated
         self.stt_manager = stt_manager
         self.agent.on_response = self.responseReceived.emit
         self._check_dark_mode()
@@ -251,6 +253,10 @@ class VehicleBridge(QObject):
     @Slot(str, str, bool)
     def boolChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)
+
+    def _on_knowledge_updated(self) -> None:
+        """Called synchronously by KnowledgeManager right after its context changes."""
+        self.knowledgeUpdated.emit(self.knowledge_manager.dump_knowledge())
 
     @Slot(result=str)
     def dumpKnowledge(self) -> str:

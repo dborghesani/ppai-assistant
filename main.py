@@ -160,6 +160,9 @@ async def main(opt: ConfigAssistant):
         knowledge_event_queue=agent.event_queue,
         opt=opt,
     )
+    # publish the known baseline (doors closed, lights off, ...) before any
+    # real telemetry source starts feeding data
+    await knowledge_manager.seed_default_knowledge()
 
     # initialize source manager
     source_manager = SourceManager(data_event_queue=data_event_queue, opt=opt)

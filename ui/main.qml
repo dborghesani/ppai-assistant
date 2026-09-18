@@ -23,6 +23,35 @@ ApplicationWindow {
     palette.highlightedText: "#ffffff"
     palette.mid: isDark ? "#48484a" : "#d1d1d6"
 
+    // Simulates a gradually changing sensor: instead of sending a single
+    // jump when a slider is released, sends several interpolated points
+    // between the drag's start and end value, spaced out over time.
+    function sendProgressive(fn, fromValue, toValue, steps) {
+        steps = steps || 5
+        if (fromValue === toValue) {
+            fn(toValue)
+            return
+        }
+        // Each call gets its own independent Timer (instead of a shared
+        // queue/timer) so a slow fn() call on one tick can never cause
+        // ticks to be dropped or interfere with another in-flight call.
+        var timer = Qt.createQmlObject(
+            "import QtQuick; Timer { interval: 150; repeat: true; running: true }",
+            root,
+            "progressiveTimer"
+        )
+        var count = 0
+        timer.triggered.connect(function() {
+            count++
+            var v = fromValue + (toValue - fromValue) * count / steps
+            fn(v)
+            if (count >= steps) {
+                timer.stop()
+                timer.destroy()
+            }
+        })
+    }
+
     Row {
         width: parent.width
         height: parent.height
@@ -159,9 +188,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverEmotionState", "angry", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverEmotionState", "angry", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -190,9 +223,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverEmotionState", "disgust", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverEmotionState", "disgust", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -221,9 +258,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverEmotionState", "fear", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverEmotionState", "fear", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -252,9 +293,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverEmotionState", "happy", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverEmotionState", "happy", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -283,9 +328,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverEmotionState", "sad", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverEmotionState", "sad", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -314,9 +363,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverEmotionState", "surprise", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverEmotionState", "surprise", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -345,9 +398,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 1
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverEmotionState", "neutral", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverEmotionState", "neutral", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -389,9 +446,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverPhysicalState", "fatigue_level", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverPhysicalState", "fatigue_level", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -420,9 +481,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 1
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverPhysicalState", "attention_level", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverPhysicalState", "attention_level", v) }, dragStartValue, value)
                                         }
                                     }
                                 }
@@ -449,9 +514,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("DriverDrivingStyle", "aggressiveness_level", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverDrivingStyle", "aggressiveness_level", v) }, dragStartValue, value)
                                         }
                                     }
                                 }
@@ -745,9 +814,13 @@ ApplicationWindow {
                                     to: 1
                                     value: 0
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("EnvironmentState","visibility", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("EnvironmentState","visibility", v) }, dragStartValue, value)
                                         }
                                     }
 
@@ -778,9 +851,13 @@ ApplicationWindow {
                                     stepSize: 0.5
                                     value: 22
 
+                                    property real dragStartValue: value
+
                                     onPressedChanged: {
-                                        if (!pressed) {
-                                            vehicleBridge.floatChanged("EnvironmentState","external_temperature", value)
+                                        if (pressed) {
+                                            dragStartValue = value
+                                        } else {
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("EnvironmentState","external_temperature", v) }, dragStartValue, value)
                                         }
                                     }
                                 }
@@ -874,9 +951,13 @@ ApplicationWindow {
                                 stepSize: 0.5
                                 value: 22
 
+                                property real dragStartValue: value
+
                                 onPressedChanged: {
-                                    if (!pressed) {
-                                        vehicleBridge.floatChanged("VehicleState", "internal_temperature", value)
+                                    if (pressed) {
+                                        dragStartValue = value
+                                    } else {
+                                        root.sendProgressive(function(v) { vehicleBridge.floatChanged("VehicleState", "internal_temperature", v) }, dragStartValue, value)
                                     }
                                 }
                             }
@@ -922,9 +1003,13 @@ ApplicationWindow {
                                 stepSize: 1
                                 value: 0
 
+                                property real dragStartValue: value
+
                                 onPressedChanged: {
-                                    if (!pressed) {
-                                        vehicleBridge.floatChanged("VehicleMotion", "speed", value)
+                                    if (pressed) {
+                                        dragStartValue = value
+                                    } else {
+                                        root.sendProgressive(function(v) { vehicleBridge.floatChanged("VehicleMotion", "speed", v) }, dragStartValue, value)
                                     }
                                 }
                             }
@@ -966,9 +1051,14 @@ ApplicationWindow {
                                 value: 0
                                 stepSize: 1
                                 snapMode: Slider.SnapAlways
+
+                                property real dragStartValue: value
+
                                 onPressedChanged: {
-                                    if (!pressed) {
-                                        vehicleBridge.intChanged("DetectedObjects", "people_around", value)
+                                    if (pressed) {
+                                        dragStartValue = value
+                                    } else {
+                                        root.sendProgressive(function(v) { vehicleBridge.intChanged("DetectedObjects", "people_around", Math.round(v)) }, dragStartValue, value)
                                     }
                                 }
                             }
@@ -996,9 +1086,14 @@ ApplicationWindow {
                                 value: 0
                                 stepSize: 1
                                 snapMode: Slider.SnapAlways
+
+                                property real dragStartValue: value
+
                                 onPressedChanged: {
-                                    if (!pressed) {
-                                        vehicleBridge.intChanged("DetectedObjects", "vehicles_around", value)
+                                    if (pressed) {
+                                        dragStartValue = value
+                                    } else {
+                                        root.sendProgressive(function(v) { vehicleBridge.intChanged("DetectedObjects", "vehicles_around", Math.round(v)) }, dragStartValue, value)
                                     }
                                 }
                             }

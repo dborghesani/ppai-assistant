@@ -101,6 +101,48 @@ class KnowledgeManager:
             "Heavy": "Current traffic is heavy.",
         }.get(value, f"Current traffic is {value}."),
     }
+    _INTENSITY_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[float], str]] = {
+        ("DriverPhysicalState", "fatigue_level"): lambda value: (
+            "No fatigue detected." if value <= 0.0
+            else f"Fatigue level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverPhysicalState", "attention_level"): lambda value: (
+            "No attention detected." if value <= 0.0
+            else f"Attention level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverEmotionState", "angry"): lambda value: (
+            "No anger detected." if value <= 0.0
+            else f"Anger level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverEmotionState", "disgust"): lambda value: (
+            "No disgust detected." if value <= 0.0
+            else f"Disgust level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverEmotionState", "fear"): lambda value: (
+            "No fear detected." if value <= 0.0
+            else f"Fear level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverEmotionState", "happy"): lambda value: (
+            "No happiness detected." if value <= 0.0
+            else f"Happiness level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverEmotionState", "sad"): lambda value: (
+            "No sadness detected." if value <= 0.0
+            else f"Sadness level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverEmotionState", "surprise"): lambda value: (
+            "No surprise detected." if value <= 0.0
+            else f"Surprise level is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverEmotionState", "neutral"): lambda value: (
+            "The driver shows no neutral affect." if value <= 0.0
+            else f"Neutral affect is {KnowledgeManager._intensity_level(value)}."
+        ),
+        ("DriverDrivingStyle", "aggressiveness_level"): lambda value: (
+            "No aggressiveness detected; driving style is calm." if value <= 0.0
+            else f"Driving style aggressiveness is {KnowledgeManager._intensity_level(value)}."
+        ),
+    }
 
     def __init__(
         self,
@@ -132,6 +174,16 @@ class KnowledgeManager:
         if count > 10:
             return "high"
         if count > 5:
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _intensity_level(value: float) -> str:
+        if value >= 0.8:
+            return "very high"
+        if value >= 0.6:
+            return "high"
+        if value >= 0.3:
             return "medium"
         return "low"
 
@@ -208,6 +260,16 @@ class KnowledgeManager:
 
         display_measure = self._display_measure(measure)
         return f"The {display_measure} count is {value}."
+
+    def _intensity_knowledge(self, name: str, measure: str, value: float) -> str:
+        formatter = self._INTENSITY_KNOWLEDGE_FORMATTERS.get((name, measure))
+        if formatter is not None:
+            return formatter(value)
+
+        display_measure = self._display_measure(measure)
+        if value <= 0.0:
+            return f"No {display_measure} detected."
+        return f"{display_measure.capitalize()} level is {self._intensity_level(value)}."
 
     def _categorical_knowledge(
         self, name: str, measure: str, value: str
@@ -502,6 +564,15 @@ class KnowledgeManager:
                 value is not None
                 and not isinstance(value, bool)
                 and isinstance(value, (int, float))
+                and metadata.get("value_kind") == "intensity"
+            ):
+                knowledge = await asyncio.to_thread(
+                    self._intensity_knowledge, name, measure, float(value)
+                )
+            elif (
+                value is not None
+                and not isinstance(value, bool)
+                and isinstance(value, (int, float))
             ):
                 knowledge, trend = await asyncio.to_thread(
                     self._numeric_knowledge, name, measure, value, window
@@ -527,6 +598,11 @@ class KnowledgeManager:
             elif metadata.get("value_kind") == "category":
                 # Compare as a label, not a magnitude: any change is significant.
                 change_value = self._format_value(value) if isinstance(value, (int, float)) else str(value)
+            elif metadata.get("value_kind") == "intensity":
+                # Compare as a bucketed label, not the raw float; keep "none"
+                # distinct so a zero-to-nonzero change is still flagged.
+                numeric_value = float(value)
+                change_value = "none" if numeric_value <= 0.0 else self._intensity_level(numeric_value)
             if (
                 self._is_significant_change(name, measure, key, change_value, trend)
             ):
@@ -564,5 +640,5 @@ class KnowledgeManager:
         output_knowledge = ""
         for key, value in self.context.items():
             #output_knowledge += f"{key}: {value}\n\n"
-            output_knowledge += f"{value}\n\n"
+            output_knowledge += f"{value}\n"
         return output_knowledge

@@ -90,7 +90,11 @@ class VehicleBridge(QObject):
     def _publish_mqtt(self, class_name: str, member_name: str, value: Any):
         topic = f"telemetry/{class_name}"
         payload = json.dumps({"name": class_name, "data": {member_name: value}})
-        if self._mqtt_client is None or not self._mqtt_client.publish(topic, payload):
+        published = self._mqtt_client is not None and self._mqtt_client.publish(topic, payload)
+        self.logger.debug(
+            "MQTT publish", topic=topic, payload=payload, published=published
+        )
+        if not published:
             self.logger.warning("MQTT unavailable, writing UI event locally")
             self.database_manager.write_measure(class_name, member_name, value)
 

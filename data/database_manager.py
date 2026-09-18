@@ -1,12 +1,13 @@
 import asyncio
 import json
+import time
 from dataclasses import asdict, fields, is_dataclass
 from typing import Any
 
 import structlog
 from config import ConfigAssistant
 from data.assistant_dataclasses import *
-from influxdb_client import InfluxDBClient, Point
+from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import WriteOptions
 
 
@@ -33,7 +34,15 @@ class DatabaseManager:
                     batch_size=500,
                     flush_interval=1_000,
                     max_retries=3,
-                )
+                ),
+                success_callback=lambda conf, data:
+                    self.logger.info("InfluxDB batch written"),
+                error_callback=lambda conf, data, exception:
+                    self.logger.error(
+                        "InfluxDB batch write failed",
+                        error=str(exception),
+                        data=data,
+                    ),
             )
             self.logger.info("Connected to InfluxDB")
         except Exception as e:
@@ -52,6 +61,7 @@ class DatabaseManager:
         while True:
             event = await self.data_event_queue.get()
             if event.get("type") == "data_received":
+                self.logger.debug("Received data event", data=event["data"])
                 self.write_dataclass(event["data"])
 
     @staticmethod
@@ -97,13 +107,13 @@ class DatabaseManager:
             return
 
         name = type(data).__name__
-        point = Point(name)
+        point = Point(name).time(time.time_ns(), write_precision=WritePrecision.NS)
         for field_name, field_value in values.items():
             point.field(field_name, self._influx_field_value(field_value))
         for field_name, field_value in knowledge_values.items():
             if field_name not in values:
                 point.field(field_name, self._influx_field_value(field_value))
-        self.logger.debug("Writing telemetry point", data_type=name)
+        self.logger.warning("Writing telemetry point", data_type=name, values=values, time=time.time_ns(), write_precision=WritePrecision.NS)
         self.write_point(point)
         self.current_state[name] = data
 
@@ -126,7 +136,7 @@ class DatabaseManager:
                 self.logger.error(f"Class {name} not found in assistant_dataclasses.py")
                 return
         setattr(self.current_state[name], measure, value)
-        point = Point(name)
+        point = Point(name).time(time.time_ns())
         point.field(measure, self._influx_field_value(value))
         self.logger.info(f"Writing point for {name}.{measure} with value {value}")
         self.write_point(point)
@@ -146,6 +156,7 @@ class DatabaseManager:
             bucket=self.opt.influxdb_bucket,
             org=self.opt.influxdb_org,
             record=point,
+            write_precision=WritePrecision.NS,
         )
 
     def run_query(self, query: str):

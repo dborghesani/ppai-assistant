@@ -58,9 +58,25 @@ class SourceManager:
         valid_fields = {field.name for field in fields(data_class)}
         data = {key: value for key, value in values.items() if key in valid_fields}
         try:
-            return data_class(**data)
+            instance = data_class(**data)
         except TypeError:
             return None
+        return SourceManager._null_out_unprovided_fields(instance, data)
+
+    @staticmethod
+    def _null_out_unprovided_fields(instance: Any, provided: dict[str, Any]) -> Any:
+        """Reset fields not present in the incoming payload to None.
+
+        Dataclass fields now carry real (non-None) baseline defaults, so
+        constructing an instance from a partial payload would otherwise
+        silently fill in unrelated fields with those defaults, and those
+        would then get written to InfluxDB, clobbering previously-reported
+        values for fields this message never actually mentioned.
+        """
+        for data_field in fields(instance):
+            if data_field.name not in provided:
+                setattr(instance, data_field.name, None)
+        return instance
 
     @staticmethod
     def deserialize_vehicle_motion(values: Any) -> VehicleMotion | None:
@@ -105,7 +121,9 @@ class SourceManager:
                     if source_name in group:
                         normalized[target_name] = group[source_name]
 
-        return VehicleMotion(**normalized)
+        return SourceManager._null_out_unprovided_fields(
+            VehicleMotion(**normalized), normalized
+        )
 
     @staticmethod
     def deserialize_gpsimu_data(values: Any) -> GPSIMUData | None:
@@ -122,7 +140,9 @@ class SourceManager:
                 if axis in magnetic_field:
                     normalized[f"magnetic_field_{axis}"] = magnetic_field[axis]
 
-        return GPSIMUData(**normalized)
+        return SourceManager._null_out_unprovided_fields(
+            GPSIMUData(**normalized), normalized
+        )
 
     @staticmethod
     def deserialize_vehicle_state(values: Any) -> VehicleState | None:
@@ -173,7 +193,9 @@ class SourceManager:
             if isinstance(value, (bool, int)):
                 normalized[field_name] = bool(value)
 
-        return VehicleState(**normalized)
+        return SourceManager._null_out_unprovided_fields(
+            VehicleState(**normalized), normalized
+        )
 
     @staticmethod
     def deserialize_lane_tracing(values: Any) -> LaneTracing | None:
@@ -191,7 +213,9 @@ class SourceManager:
             if isinstance(value, int) and value in (0, 1):
                 normalized[field_name] = bool(value)
 
-        return LaneTracing(**normalized)
+        return SourceManager._null_out_unprovided_fields(
+            LaneTracing(**normalized), normalized
+        )
 
     async def process_message(self, message: str | bytes) -> None:
         try:
@@ -310,8 +334,9 @@ class SourceManager:
             )
             if isinstance(data, dict):
                 valid_fields = {f.name for f in fields(DriverEmotionState)}
-                driver_emotion = DriverEmotionState(
-                    **{k: v for k, v in data.items() if k in valid_fields}
+                provided = {k: v for k, v in data.items() if k in valid_fields}
+                driver_emotion = self._null_out_unprovided_fields(
+                    DriverEmotionState(**provided), provided
                 )
                 await self.data_event_queue.put(
                     {"type": "data_received", "data": driver_emotion}
@@ -328,8 +353,9 @@ class SourceManager:
             )
             if isinstance(data, dict):
                 valid_fields = {f.name for f in fields(DriverDrivingStyle)}
-                driver_style = DriverDrivingStyle(
-                    **{k: v for k, v in data.items() if k in valid_fields}
+                provided = {k: v for k, v in data.items() if k in valid_fields}
+                driver_style = self._null_out_unprovided_fields(
+                    DriverDrivingStyle(**provided), provided
                 )
                 await self.data_event_queue.put(
                     {"type": "data_received", "data": driver_style}
@@ -444,6 +470,7 @@ class SourceManager:
         loop = asyncio.get_running_loop()
 
         def on_message(_topic: str, payload: bytes) -> None:
+            self.logger.debug("MQTT message received", topic=_topic, payload=payload)
             try:
                 future = asyncio.run_coroutine_threadsafe(
                     self.process_message(payload), loop

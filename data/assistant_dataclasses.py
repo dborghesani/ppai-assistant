@@ -239,22 +239,22 @@ class DetectedObjects:
 @dataclass
 class DriverPhysicalState:
     activity: str | None = knowledge_field(default="Idle", skills=("driver_health",))  # ["Idle", "Driving", "Talking", "Using Phone", "Eating", "Sleeping"]
-    attention_level: float | None = knowledge_field(default=1.0, change_threshold=0.1, skills=("driver_health",))  # [0.0, 1.0]
-    fatigue_level: float | None = knowledge_field(default=0.0, change_threshold=0.1, skills=("driver_health",))  # [0.0, 1.0]
+    attention_level: float | None = knowledge_field(default=1.0, value_kind="intensity", skills=("driver_health",))  # [0.0, 1.0]
+    fatigue_level: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health",))  # [0.0, 1.0]
 
 @dataclass
 class DriverEmotionState:
-    angry: float | None = knowledge_field(default=0.0, change_threshold=0.15, skills=("driver_health",))
-    disgust: float | None = knowledge_field(default=0.0, change_threshold=0.15, skills=("driver_health",))
-    fear: float | None = knowledge_field(default=0.0, change_threshold=0.15, skills=("driver_health",))
-    happy: float | None = knowledge_field(default=0.0, change_threshold=0.15, skills=("driver_health",))
-    sad: float | None = knowledge_field(default=0.0, change_threshold=0.15, skills=("driver_health",))
-    surprise: float | None = knowledge_field(default=0.0, change_threshold=0.15, skills=("driver_health",))
-    neutral: float | None = knowledge_field(default=1.0, change_threshold=0.15, skills=("driver_health",))
+    angry: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health",))
+    disgust: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health",))
+    fear: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health",))
+    happy: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health",))
+    sad: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health",))
+    surprise: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health",))
+    neutral: float | None = knowledge_field(default=1.0, value_kind="intensity", skills=("driver_health",))
 
 @dataclass
 class DriverDrivingStyle:
-    aggressiveness_level: float | None = knowledge_field(default=0.0, change_threshold=0.1, skills=("driver_health", "navigation_and_coaching"))  # [0.0, 1.0] [safe, aggressive]
+    aggressiveness_level: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health", "navigation_and_coaching"))  # [0.0, 1.0] [safe, aggressive]
     
 @dataclass
 class EnvironmentState:

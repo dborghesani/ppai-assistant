@@ -36,9 +36,9 @@ class DatabaseManager:
                     max_retries=3,
                 ),
                 success_callback=lambda conf, data:
-                    self.logger.info("InfluxDB batch written"),
+                    self.logger.debug("InfluxDB batch written"),
                 error_callback=lambda conf, data, exception:
-                    self.logger.error(
+                    self.logger.debug(
                         "InfluxDB batch write failed",
                         error=str(exception),
                         data=data,
@@ -113,7 +113,7 @@ class DatabaseManager:
         for field_name, field_value in knowledge_values.items():
             if field_name not in values:
                 point.field(field_name, self._influx_field_value(field_value))
-        self.logger.warning("Writing telemetry point", data_type=name, values=values, time=time.time_ns(), write_precision=WritePrecision.NS)
+        self.logger.debug("Writing telemetry point", data_type=name, values=values, time=time.time_ns(), write_precision=WritePrecision.NS)
         self.write_point(point)
         self.current_state[name] = data
 
@@ -138,7 +138,7 @@ class DatabaseManager:
         setattr(self.current_state[name], measure, value)
         point = Point(name).time(time.time_ns())
         point.field(measure, self._influx_field_value(value))
-        self.logger.info(f"Writing point for {name}.{measure} with value {value}")
+        self.logger.debug(f"Writing point for {name}.{measure} with value {value}")
         self.write_point(point)
 
         # Keep compatibility with callers that write one measurement at a time.

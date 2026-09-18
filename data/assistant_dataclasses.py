@@ -270,6 +270,9 @@ class EnvironmentState:
     road_condition: str | None = knowledge_field(default="Dry", skills=("driver_health", "navigation_and_coaching"))  # ["Dry", "Wet", "Icy", "Snowy", "Gravel"]
     road_type: str | None = knowledge_field(default="Urban", skills=("driver_health", "navigation_and_coaching"))  # ["Urban", "Rural", "Highway", "Residential"]
     risk_level: str | None = knowledge_field(default="Low", skills=("driver_health", "navigation_and_coaching"))  # ["Low", "Medium", "High"]
-    visibility: str | None = knowledge_field(skills=("driver_health", "navigation_and_coaching"))  # ["Clear", "Moderate", "Poor"]
+    visibility: int | None = knowledge_field(default=100,
+                                             change_threshold=10.0,
+                                             value_kind="intensity",
+                                             skills=("driver_health", "navigation_and_coaching"))
     traffic: str | None = knowledge_field(default="No traffic", skills=("driver_health", "navigation_and_coaching"))  # ["No traffic", "Light", "Medium", "Heavy"]
 

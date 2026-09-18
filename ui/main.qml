@@ -92,6 +92,8 @@ ApplicationWindow {
                         running: true
                         onTriggered: {
                             eventProcessingSwitch.checked = true
+                            // dump current knowledge
+                            knowledgeTextArea.text = vehicleBridge.dumpKnowledge()
                         }
                     }
                 }
@@ -811,8 +813,8 @@ ApplicationWindow {
                                     width: parent.width*0.5
 
                                     from: 0
-                                    to: 1
-                                    value: 0
+                                    to: 1.0
+                                    value: 1.0
 
                                     property real dragStartValue: value
 
@@ -828,7 +830,7 @@ ApplicationWindow {
 
                                 Label {
                                     width: parent.width*0.2
-                                    text: visibilitySlider.value + " %"
+                                    text: (visibilitySlider.value*100).toFixed(0) + " %"
                                 }
                             }
 

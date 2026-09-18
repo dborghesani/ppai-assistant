@@ -373,7 +373,7 @@ class SourceManager:
         files: list[Path],
     ) -> None:
         previous_timestamp: int | None = None
-        self.logger.info("Replay consumer connected...", file_count=len(files))
+        self.logger.info("Replay consumer connected", file_count=len(files))
         try:
             for index, path in enumerate(files):
                 timestamp = int(path.stem.split("_")[-1])

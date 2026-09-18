@@ -142,6 +142,10 @@ class KnowledgeManager:
             "No aggressiveness detected; driving style is calm." if value <= 0.0
             else f"Driving style aggressiveness is {KnowledgeManager._intensity_level(value)}."
         ),
+        ("EnvironmentState", "visibility"): lambda value: (
+            "Driving visibility is optimal." if value >= 1.0
+            else f"Driving visibility is {KnowledgeManager._intensity_level(value)}."
+        ),
     }
 
     def __init__(

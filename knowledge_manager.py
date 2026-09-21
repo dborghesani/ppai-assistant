@@ -78,7 +78,7 @@ class KnowledgeManager:
         ("DetectedObjects", "vehicles_around"): lambda value: (
             "No vehicles are currently detected around the vehicle."
             if value == 0
-            else f"Vehicle density around the vehicle is "
+            else f"Traffic around the vehicle is "
             f"{KnowledgeManager._density_level(value)}."
         ),
         ("DetectedObjects", "dangerous_objects_around"): lambda value: (
@@ -135,12 +135,12 @@ class KnowledgeManager:
             else f"Surprise level is {KnowledgeManager._intensity_level(value)}."
         ),
         ("DriverEmotionState", "neutral"): lambda value: (
-            "The driver shows no neutral affect." if value <= 0.0
-            else f"Neutral affect is {KnowledgeManager._intensity_level(value)}."
+            "The driver seems emotionally neutral." if value >= 1.0
+            else f"The driver's emotional neutrality is {KnowledgeManager._intensity_level(value)}."
         ),
-        ("DriverDrivingStyle", "aggressiveness_level"): lambda value: (
-            "No aggressiveness detected; driving style is calm." if value <= 0.0
-            else f"Driving style aggressiveness is {KnowledgeManager._intensity_level(value)}."
+        ("DriverDrivingStyle", "driving_tension"): lambda value: (
+            "The driving style is calm and relaxed." if value <= 0.0
+            else f"The driving style shows a {KnowledgeManager._intensity_level(value)} level of tension."
         ),
         ("EnvironmentState", "visibility"): lambda value: (
             "Driving visibility is optimal." if value >= 1.0
@@ -380,6 +380,17 @@ class KnowledgeManager:
         return value != previous.value
 
     async def _notify_agent(self, changes: dict[str, Any]) -> None:
+        if self.opt.use_laya:
+            await self.knowledge_event_queue.put(
+                CarEvent(
+                    skill="vehicle_assistance",
+                    event_name="knowledge_updated",
+                    event_value=dict(changes),
+                    context=list(self.context.values()),
+                )
+            )
+            return
+
         changes_by_skill: dict[str, dict[str, Any]] = {}
         for key, value in changes.items():
             name, separator, measure = key.partition(".")

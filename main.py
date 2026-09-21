@@ -41,7 +41,7 @@ logger = structlog.get_logger()
 
 
 def _load_ollama_model(opt: ConfigAssistant) -> str:
-    raw_model = opt.ollama_llm.removeprefix("ollama/")
+    raw_model = opt.ollama_model.removeprefix("ollama/")
     if "-ctx" in raw_model or opt.context_window_size <= 4096:
         model_to_use = raw_model
     else:
@@ -148,9 +148,7 @@ async def main(opt: ConfigAssistant):
     agent = AutomotiveAgent(
         llm=llm,
         tts_manager=tts_manager,
-        ollama_host=opt.ollama_host,
-        ollama_port=opt.ollama_port,
-        ollama_model=actual_model.removeprefix("ollama/"),
+        opt=opt,
     )
 
     # initialize knowledge manager to extract knowledge from data

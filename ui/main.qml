@@ -506,11 +506,11 @@ ApplicationWindow {
 
                                 Label {
                                     width: parent.width*0.3
-                                    text: "Aggressiveness"
+                                    text: "Driving Tension"
                                 }
 
                                 Slider {
-                                    id: aggressivenessSlider
+                                    id: drivingTensionSlider
                                     width: parent.width*0.5
                                     from: 0
                                     to: 1
@@ -522,14 +522,14 @@ ApplicationWindow {
                                         if (pressed) {
                                             dragStartValue = value
                                         } else {
-                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverDrivingStyle", "aggressiveness_level", v) }, dragStartValue, value)
+                                            root.sendProgressive(function(v) { vehicleBridge.floatChanged("DriverDrivingStyle", "driving_tension", v) }, dragStartValue, value)
                                         }
                                     }
                                 }
 
                                 Label {
                                     width: parent.width*0.2
-                                    text: aggressivenessSlider.value.toFixed(2)
+                                    text: drivingTensionSlider.value.toFixed(2)
                                 }
                             }
                         }

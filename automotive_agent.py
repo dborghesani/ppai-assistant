@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from openai import AsyncOpenAI
 import structlog
+from config import ConfigAssistant
 from skill_manager import SkillManager, SkillType
 from events import CarEvent
 from tools.speed_limit_tool import SpeedLimitTool
@@ -12,6 +13,7 @@ from voice.tts_manager import TTSManager
 from crewai import Agent, Task, Crew
 from crewai.process import Process
 from crewai import LLM, Agent, Task, Crew
+import laya
 
 logger = structlog.get_logger()
 
@@ -20,11 +22,11 @@ from pydantic import BaseModel, Field
 
 
 class Urgency(str, Enum):
-    NONE = "none"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
+    NONE = "no urgency"
+    LOW = "low urgency"
+    MEDIUM = "medium urgency"
+    HIGH = "high urgency"
+    CRITICAL = "critical urgency"
 
 class ActionType(str, Enum):
     NONE = "no action required"
@@ -43,12 +45,43 @@ class ActionType(str, Enum):
     ENABLE_AC = "enable air conditioning"
     DISABLE_AC = "disable air conditioning"
 
+class InterventionAction(str, Enum):
+    NONE = "no additional concrete assistance is needed"
+    INCREASE_TEMPERATURE = "increase internal temperature to improve driver comfort"
+    DECREASE_TEMPERATURE = "decrease internal temperature to improve driver comfort"
+    LOCK_DOORS = "lock doors to ensure driver safety."
+    UNLOCK_DOORS = "unlock doors, no longer restricting driver access"
+    #START_NAVIGATION = "help the driver navigate to an appropriate destination"
+    #ENABLE_NIGHT_LIGHTS = "enable night lights to improve visibility during nighttime driving"
+    #DISABLE_NIGHT_LIGHTS = "disable night lights, no longer improving visibility during nighttime driving"
+    FIND_REST_AREA = "help the driver to find rest area"
+    ENABLE_FOG_LIGHTS = "enable fog lights to improve visibility in foggy conditions"
+    DISABLE_FOG_LIGHTS = "disable fog lights, no longer improving visibility in foggy conditions"
+    #ENABLE_AC = "enable air conditioning to improve driver comfort"
+    #DISABLE_AC = "disable air conditioning, no longer improving driver comfort"
+
+class SuggestionTarget(str, Enum):
+    GENERIC = "general contextual suggestion"
+    DRIVING = "driving behavior assistance"
+    WELLBEING = "driver wellbeing assistance"
+    #COMFORT = "cabin comfort assistance"
+
+class InterventionType(str, Enum):
+    NONE = (
+        "No assistant intervention is useful or appropriate."
+    )
+    SUGGEST = (
+        "Communicate with the driver because a suggestion, recommendation, "
+        "or other helpful guidance would be appropriate."
+    )
+    #ACT = (
+    #    "Perform or offer a concrete assistance action that can help the driver "
+    #    "or improve the current situation."
+    #)
+
 class Action(BaseModel):
-
     action_type: ActionType
-
     parameters: dict = {}
-
 
 class NotificationDecision(BaseModel):
     urgency: Urgency
@@ -73,11 +106,10 @@ class AutomotiveAgent:
     def __init__(
         self,
         llm: LLM,
-        tts_manager: TTSManager | None = None,
-        ollama_host: str = "localhost",
-        ollama_port: int = 11434,
-        ollama_model: str = "qwen2.5:3b-instruct",
+        opt: ConfigAssistant,
+        tts_manager: TTSManager | None = None
     ):
+        self.opt = opt
         self.llm = llm
         self.is_active = True
         self.event_queue: asyncio.Queue[CarEvent] = asyncio.Queue()
@@ -87,9 +119,11 @@ class AutomotiveAgent:
         self._conversation_history: list[dict[str, str]] = []
         self._voice_llm = AsyncOpenAI(
             api_key="ollama",
-            base_url=f"http://{ollama_host}:{ollama_port}/v1",
+            base_url=f"http://{self.opt.ollama_host}:{self.opt.ollama_port}/v1",
         )
-        self._voice_llm_model = ollama_model
+
+        if self.opt.use_laya:
+            self.laya_td = laya.load("convaiinnovations/laya", subfolder="typed-decisions")
 
         self.skill_manager = SkillManager()
 
@@ -362,7 +396,7 @@ class AutomotiveAgent:
         stream = None
         try:
             stream = await self._voice_llm.chat.completions.create(
-                model=self._voice_llm_model,
+                model=self.opt.ollama_model.removeprefix("ollama/"),
                 messages=messages,
                 stream=True,
                 temperature=0.3,
@@ -407,6 +441,259 @@ class AutomotiveAgent:
             self._voice_response_task.cancel()
 
     async def _process_event(self, event: CarEvent):
+        if self.opt.use_laya:
+            await self._process_event_laya(event)
+        else:
+            await self._process_event_llm(event)
+
+    def format_laya_answers(self, answers: dict, precision: int = 3) -> list[str]:
+        lines = []
+
+        for name, answer in answers.items():
+            answer_type = answer.get("type", "unknown")
+            confidence = answer.get("confidence")
+
+            if answer_type == "noul":
+                value = answer.get("noul")
+
+                text = f"{name}: {value:.{precision}f}"
+
+            elif answer_type == "score":
+                score = answer.get("score")
+                legend = answer.get("legend", {})
+                probabilities = answer.get("probabilities", {})
+
+                text = f"{name}: {score:.{precision}f}"
+
+                if probabilities:
+                    probs_str = ", ".join(
+                        f"{legend.get(k, k)}[{k}]={v:.{precision}f}"
+                        for k, v in probabilities.items()
+                    )
+                    text += f" | {probs_str}"
+
+            elif answer_type == "choice":
+                choice = answer.get("choice")
+                probabilities = answer.get("probabilities", {})
+
+                text = f"{name}: {choice}"
+
+                if probabilities:
+                    probs_str = ", ".join(
+                        f"{k}={v:.{precision}f}"
+                        for k, v in probabilities.items()
+                    )
+                    text += f" | {probs_str}"
+
+            else:
+                # Fallback nel caso Laya introduca un tipo che non gestiamo
+                text = f"{name}: {answer}"
+
+            if confidence is not None:
+                text += f" | confidence={confidence:.{precision}f}"
+
+            lines.append(text)
+
+        return lines
+
+    async def _process_event_laya(self, event: CarEvent): 
+        logger.info(f">>> [LAYA] Processing event: {event.event_value}")
+        laya_start = time.time()
+        # format events for laya
+        state = {
+            "event": event.event_value,
+            "state": event.context,
+        }
+        laya_actions = {f.name: f.value for f in InterventionAction}
+        laya_questions = {
+            "urgency": {
+                "type": "score",
+                "instructions": (
+                    "Considering the triggering event, the driver state, and the overall context, "
+                    "how urgent is an assistant intervention?"
+                ),
+                "criteria": {
+                    k.name.lower(): k.value
+                    for k in Urgency
+                }
+            },
+
+            "intervention": {
+                "type": "choice",
+                "instructions": (
+                    "Considering the triggering event and the overall driving context, "
+                    "including the driver's emotional, physical, attentional, and driving state, "
+                    "would it be useful to provide the driver with a suggestion?"
+                ),
+                "criteria": {
+                    k.name.lower(): k.value
+                    for k in InterventionType
+                }
+            },
+            "suggestion_target": {
+                "type": "choice",
+                "instructions": (
+                    "If a suggestion is useful, which aspect should it primarily address? "
+                    "Choose the most relevant target from the available criteria."
+                ),
+                "criteria": {
+                    k.name.lower(): k.value
+                    for k in SuggestionTarget
+                }
+            },
+        }
+        """
+        laya_questions = {
+            "urgency": {
+                "type": "score",
+                "instructions":
+                    "Considering the triggering event, the driver state, and the overall context, "
+                    "how urgent is an assistant intervention?",
+                "criteria": {
+                    k.name.lower(): k.value
+                    for k in Urgency
+                }
+            },
+            "intervention": {
+                "type": "choice",
+                "instructions":
+                    "Considering the triggering event and the overall driving context, "
+                    "including the driver's emotional, physical and attentional state, "
+                    "what type of assistant intervention would be most appropriate?",
+                "criteria": {
+                    k.name.lower(): k.value
+                    for k in InterventionType
+                }
+            },
+            "action": {
+                "type": "choice",
+                "instructions":
+                    "Considering the triggering event and the overall context, "
+                    "which concrete action would be most appropriate?",
+                "criteria": {
+                    k.name.lower(): k.value
+                    for k in InterventionAction
+                }
+            }
+        }
+        """
+        result = self.laya_td.predict(state, laya_questions)
+        laya_elapsed = time.time() - laya_start
+        answers = result["answers"]
+        output_lines = self.format_laya_answers(answers)
+        for line in output_lines:
+            logger.info(f">>> [LAYA] {line}")
+        logger.info(f">>> finished processing intervention analysis in {laya_elapsed:.3f} seconds")
+
+        answers = result["answers"]
+
+        # LLM output will be generated based on this decision.
+        decision = {
+            "urgency": answers["urgency"]["legend"][str(round(answers["urgency"]["score"]))],
+            "intervention": answers["intervention"]["choice"],
+            "suggestion_target": answers["suggestion_target"]["choice"],
+        }
+
+        # Skip if intervention is none or urgency is not medium/high
+        if decision["intervention"] == "none" or decision["urgency"] not in {"medium", "high"}:
+            return
+
+        system_message = """
+            You are an in-vehicle assistant.
+
+            Your task is to communicate naturally with the driver based on the current
+            driving context and the decision provided by the decision model. If not 
+            specified, prefer English as the default language.
+
+            The decision has already been made. Do not override or reinterpret it.
+            Treat the intervention and suggestion_target values as internal instructions. Never
+            mention, repeat, or prefix the response with decision labels or values
+            such as "intervention", "suggestion_target", "suggest", "driving", or
+            "wellbeing".
+
+            Interpret the intervention as follows:
+            - none: no response should be generated.
+            - suggest: suggest an appropriate behavior or response based on the triggering
+            event, current context, and suggestion_target.
+
+            The suggestion_target field identifies the aspect that the suggestion should
+            address. Use it to focus the response, but do not name the category itself.
+
+            Do not mention internal models, scores, probabilities, confidence values,
+            or internal reasoning.
+
+            Prefer concise and clear communication.
+            Respond directly to the driver in one or two short sentences.
+            """.strip()
+
+        user_message = f"""
+            Triggering event:
+            {event.event_value}
+
+            Current context:
+            {event.context}
+
+            Decision:
+            {decision}
+
+            Driver input:
+            {event.user_input or "None"}
+
+            Generate the appropriate response to the driver.
+        """.strip()
+
+        messages = [
+            {"role": "system", "content": system_message},
+            *self._conversation_history[-8:],
+            {"role": "user", "content": user_message},
+        ]
+
+        full_response = ""
+        sentence_buffer = ""
+        stream = None
+        try:
+            stream = await self._voice_llm.chat.completions.create(
+                model=self.opt.ollama_model.removeprefix("ollama/"),
+                messages=messages,
+                stream=True,
+                temperature=0.3,
+            )
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                token = chunk.choices[0].delta.content or ""
+                if not token:
+                    continue
+                full_response += token
+                sentence_buffer += token
+
+                split = re.search(r"[.!?](?:\s|$)", sentence_buffer)
+                while split is not None:
+                    sentence = sentence_buffer[: split.end()].strip()
+                    sentence_buffer = sentence_buffer[split.end() :]
+                    if sentence and self.tts_manager is not None:
+                        await self.tts_manager.speak(sentence)
+                    split = re.search(r"[.!?](?:\s|$)", sentence_buffer)
+        finally:
+            if stream is not None:
+                await stream.close()
+
+        if sentence_buffer.strip() and self.tts_manager is not None:
+            await self.tts_manager.speak(sentence_buffer.strip())
+
+        full_response = full_response.strip()
+        if full_response:
+            self._conversation_history.extend(
+                [
+                    {"role": "user", "content": event.user_input},
+                    {"role": "assistant", "content": full_response},
+                ]
+            )
+            self._conversation_history = self._conversation_history[-8:]
+            if self.on_response is not None:
+                self.on_response(full_response + "\n")
+        
+    async def _process_event_llm(self, event: CarEvent):
         logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         logger.info(">>> generating...")
         if event.user_input:

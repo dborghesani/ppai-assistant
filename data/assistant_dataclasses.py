@@ -254,7 +254,7 @@ class DriverEmotionState:
 
 @dataclass
 class DriverDrivingStyle:
-    aggressiveness_level: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health", "navigation_and_coaching"))  # [0.0, 1.0] [safe, aggressive]
+    driving_tension: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=("driver_health", "navigation_and_coaching"))  # [0.0, 1.0] [safe, aggressive]
     
 @dataclass
 class EnvironmentState:

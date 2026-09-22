@@ -124,12 +124,23 @@ class STTManager:
         if not self.enabled or self._stream is not None:
             return
         self._frames = []
-        self._stream = sd.InputStream(
-            samplerate=self._sample_rate,
-            channels=1,
-            dtype="float32",
-            callback=self._on_audio,
-        )
+        try:
+            self._stream = sd.InputStream(
+                samplerate=self._sample_rate,
+                channels=1,
+                dtype="float32",
+                callback=self._on_audio,
+            )
+            self._stream.start()
+        except Exception:
+            if self._stream is not None:
+                try:
+                    self._stream.close()
+                except Exception:
+                    pass
+            self._stream = None
+            self._frames = []
+            raise
 
     def _on_audio(self, indata, frames, time_info, status):
         if status:
@@ -307,6 +318,18 @@ class STTManager:
             except Exception:
                 pass
             self._conversation_stream = None
+
+    def close(self) -> None:
+        """Release every audio input stream without starting transcription."""
+        self.stop_conversation()
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+        self._frames = []
 
     def _conversation_loop(
         self,

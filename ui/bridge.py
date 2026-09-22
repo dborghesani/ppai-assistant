@@ -90,7 +90,9 @@ class VehicleBridge(QObject):
     def _publish_mqtt(self, class_name: str, member_name: str, value: Any):
         topic = f"telemetry/{class_name}"
         payload = json.dumps({"name": class_name, "data": {member_name: value}})
-        published = self._mqtt_client is not None and self._mqtt_client.publish(topic, payload)
+        published = self._mqtt_client is not None and self._mqtt_client.publish(
+            topic, payload
+        )
         self.logger.debug(
             "MQTT publish", topic=topic, payload=payload, published=published
         )
@@ -99,7 +101,11 @@ class VehicleBridge(QObject):
             self.database_manager.write_measure(class_name, member_name, value)
 
     def close(self) -> None:
-        """Stop the thread-backed MQTT publisher before the event loop closes."""
+        """Release audio and thread-backed resources before the event loop closes."""
+        if self.stt_manager is not None:
+            self.stt_manager.close()
+        if self.agent.tts_manager is not None:
+            self.agent.tts_manager.stop()
         if self._mqtt_client is not None:
             self._mqtt_client.stop()
             self._mqtt_client = None

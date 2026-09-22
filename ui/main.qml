@@ -69,9 +69,11 @@ ApplicationWindow {
             Row {
                 width: parent.width
                 height: parent.height*0.02
+                spacing: parent.spacing
 
                 Switch {
-
+                    width: parent.width*0.2
+                    height: parent.height
                     id: eventProcessingSwitch
 
                     checked: false
@@ -95,6 +97,25 @@ ApplicationWindow {
                             // dump current knowledge
                             knowledgeTextArea.text = vehicleBridge.dumpKnowledge()
                         }
+                    }
+                }
+
+
+                Label {
+                    width: parent.width*0.1
+                    height: parent.height
+                    text: "Minimum urgency"
+                }
+
+                ComboBox {
+                    width: parent.width*0.1
+                    height: parent.height
+                    id: layaUrgencyFilter
+                    model: ["low", "medium", "high", "critical"]
+                    currentIndex: 1
+
+                    onActivated: {
+                        vehicleBridge.layaMinimumUrgencyChanged(currentText)
                     }
                 }
                 
@@ -158,6 +179,11 @@ ApplicationWindow {
 
                             RadioButton {
                                 text: "Sleeping"
+                                ButtonGroup.group: activityGroup
+                            }
+
+                            RadioButton {
+                                text: "About to exit"
                                 ButtonGroup.group: activityGroup
                             }
                         }
@@ -596,6 +622,48 @@ ApplicationWindow {
                     GroupBox {
                         width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
                         height: parent.height
+                        title: "Weather Forecast"
+
+                        Column {
+                            anchors.fill: parent
+
+                            ButtonGroup {
+                                id: weatherForecastGroup
+
+                                onCheckedButtonChanged: {
+                                    if (weatherForecastGroup.checkedButton) {
+                                        vehicleBridge.stringChanged("EnvironmentState","forecast_weather", weatherForecastGroup.checkedButton.text)
+                                    }
+                                }
+                            }
+
+                            RadioButton {
+                                text: "Sunny"
+                                ButtonGroup.group: weatherForecastGroup
+                                checked: true
+                            }
+                            RadioButton {
+                                text: "Cloudy"
+                                ButtonGroup.group: weatherForecastGroup
+                            }
+                            RadioButton {
+                                text: "Rainy"
+                                ButtonGroup.group: weatherForecastGroup
+                            }
+                            RadioButton {
+                                text: "Snowy"
+                                ButtonGroup.group: weatherForecastGroup
+                            }
+                            RadioButton {
+                                text: "Foggy"
+                                ButtonGroup.group: weatherForecastGroup
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        width: parent.width*environmentStateRow.groupColSizePerc-environmentStateRow.spacing
+                        height: parent.height
                         title: "Traffic"
 
                         Column {
@@ -688,10 +756,14 @@ ApplicationWindow {
                             }
 
                             RadioButton {
-                                text: "Low"
+                                text: "None"
                                 ButtonGroup.group: riskLevelGroup
                                 checked: true
                             }
+                            RadioButton {
+                                text: "Low"
+                                ButtonGroup.group: riskLevelGroup
+                            }   
                             RadioButton {
                                 text: "Medium"
                                 ButtonGroup.group: riskLevelGroup
@@ -790,7 +862,7 @@ ApplicationWindow {
                     }
                     
                     GroupBox {
-                        width: parent.width*(1.0-environmentStateRow.groupColSizePerc*6)-environmentStateRow.spacing
+                        width: parent.width*(1.0-environmentStateRow.groupColSizePerc*7)
                         height: parent.height
                         title: "Other"
                         
@@ -839,7 +911,7 @@ ApplicationWindow {
                                 spacing: 10
 
                                 Label {
-                                    text: "Temperature (extl)"
+                                    text: "Extl. Temp."
                                     width: parent.width*0.3
                                 }
 
@@ -887,10 +959,9 @@ ApplicationWindow {
 
                     Column {
                         id: vehicleStateRow
-                        anchors.margins: 10
+                        //anchors.margins: 10
                         width: parent.width
                         height: parent.height
-                        spacing: 10
 
                         Row {
                             id: engineRow
@@ -925,10 +996,32 @@ ApplicationWindow {
                             Switch {
                                 id: doorsSwitch
                                 width: parent.width*0.7
-                                text: checked ? "Unlocked" : "Locked"
+                                text: checked ? "Locked" : "Unlocked"
+                                checked: False
 
                                 onCheckedChanged: {
-                                    vehicleBridge.boolChanged("VehicleState", "doors_unlocked", checked)
+                                    vehicleBridge.boolChanged("VehicleState", "doors_locked", checked)
+                                }
+                            }
+                        }
+
+                        Row {
+                            id: trunkRow
+                            width: parent.width
+
+                            Label {
+                                text: "Trunk"
+                                width: parent.width*0.3
+                            }
+
+                            Switch {
+                                id: trunkSwitch
+                                width: parent.width*0.7
+                                text: checked ? "Opened" : "Closed"
+                                checked: False
+
+                                onCheckedChanged: {
+                                    vehicleBridge.boolChanged("VehicleState", "trunk_open", checked)
                                 }
                             }
                         }
@@ -938,7 +1031,7 @@ ApplicationWindow {
                             spacing: 10
 
                             Label {
-                                text: "Temperature (intl)"
+                                text: "Intl. Temp."
                                 width: parent.width*0.3
                             }
 
@@ -997,7 +1090,7 @@ ApplicationWindow {
                             Slider {
 
                                 id: speedSlider
-                                width: parent.width*0.5
+                                width: parent.width*0.45
 
                                 from: 0
                                 to: 200
@@ -1017,7 +1110,7 @@ ApplicationWindow {
                             }
 
                             Label {
-                                width: parent.width*0.2
+                                width: parent.width*0.25
                                 text: speedSlider.value.toFixed(1) + " km/h"
                             }
                         }
@@ -1104,6 +1197,41 @@ ApplicationWindow {
                                 width: parent.width*0.2
                                 text: Math.round(vehicleSlider.value)
                             }   
+                        }
+
+                        Row {
+                            width: parent.width
+                            spacing: 10
+
+                            Text {
+                                text: "Dangers Around"
+                                width: parent.width*0.3
+                            }
+
+                            Slider {
+                                id: dangerousObjectsSlider
+                                width: parent.width*0.5
+                                from: 0
+                                to: 20
+                                value: 0
+                                stepSize: 1
+                                snapMode: Slider.SnapAlways
+
+                                property real dragStartValue: value
+
+                                onPressedChanged: {
+                                    if (pressed) {
+                                        dragStartValue = value
+                                    } else {
+                                        root.sendProgressive(function(v) { vehicleBridge.intChanged("DetectedObjects", "dangerous_objects_around", Math.round(v)) }, dragStartValue, value)
+                                    }
+                                }
+                            }
+
+                            Label {
+                                width: parent.width*0.2
+                                text: Math.round(dangerousObjectsSlider.value)
+                            }
                         }
                     }
                 }

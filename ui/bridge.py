@@ -142,6 +142,13 @@ class VehicleBridge(QObject):
     def eventProcessingChanged(self, enabled: bool):
         self.agent.is_listening = enabled
 
+    @Slot(str)
+    def layaMinimumUrgencyChanged(self, urgency: str):
+        try:
+            self.agent.set_laya_minimum_urgency(urgency)
+        except ValueError:
+            self.logger.warning("Ignoring invalid Laya urgency threshold", urgency=urgency)
+
     @Slot()
     def startVoiceInput(self):
         if not self.agent.is_listening or self.stt_manager is None:

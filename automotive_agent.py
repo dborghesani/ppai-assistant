@@ -115,6 +115,7 @@ class AutomotiveAgent:
         self.event_queue: asyncio.Queue[CarEvent] = asyncio.Queue()
         self.is_listening = False
         self.tts_manager = tts_manager
+        self.laya_minimum_urgency = Urgency.MEDIUM
         self._voice_response_task: asyncio.Task | None = None
         self._conversation_history: list[dict[str, str]] = []
         self._voice_llm = AsyncOpenAI(
@@ -440,6 +441,21 @@ class AutomotiveAgent:
         if self._voice_response_task is not None and not self._voice_response_task.done():
             self._voice_response_task.cancel()
 
+    def set_laya_minimum_urgency(self, urgency: str) -> None:
+        if urgency == "low":
+            self.laya_minimum_urgency = Urgency.LOW
+            return
+        if urgency == "medium":
+            self.laya_minimum_urgency = Urgency.MEDIUM
+            return
+        if urgency == "high":
+            self.laya_minimum_urgency = Urgency.HIGH
+            return
+        if urgency == "critical":
+            self.laya_minimum_urgency = Urgency.CRITICAL
+            return
+        self.laya_minimum_urgency = Urgency.MEDIUM
+
     async def _process_event(self, event: CarEvent):
         if self.opt.use_laya:
             await self._process_event_laya(event)
@@ -594,8 +610,21 @@ class AutomotiveAgent:
             "suggestion_target": answers["suggestion_target"]["choice"],
         }
 
-        # Skip if intervention is none or urgency is not medium/high
-        if decision["intervention"] == "none" or decision["urgency"] not in {"medium", "high"}:
+        urgency_ranks = {
+            Urgency.NONE: 0,
+            Urgency.LOW: 1,
+            Urgency.MEDIUM: 2,
+            Urgency.HIGH: 3,
+            Urgency.CRITICAL: 4,
+        }
+        decision_urgency = Urgency[decision["urgency"].upper()]
+
+        # Skip decisions below the urgency selected in the UI.
+        if (
+            decision["intervention"] == "none"
+            or urgency_ranks[decision_urgency]
+            < urgency_ranks[self.laya_minimum_urgency]
+        ):
             return
 
         system_message = """

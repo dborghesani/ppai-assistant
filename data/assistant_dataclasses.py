@@ -94,7 +94,7 @@ class VehicleState:
     door_open_front_right: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
     door_open_rear_left: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
     door_open_rear_right: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
-    doors_unlocked: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
+    doors_locked: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
     lights_on_sidelights: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
     lights_on_low_beams: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
     lights_on_high_beams: bool | None = knowledge_field(default=False, skills=("navigation_and_coaching",))
@@ -265,11 +265,11 @@ class EnvironmentState:
         skills=("driver_health", "navigation_and_coaching"),
     )  # °C
     weather: str | None = knowledge_field(default="Sunny", skills=("driver_health", "navigation_and_coaching"))  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
-    forecast_weather: str | None = knowledge_field(skills=("driver_health", "navigation_and_coaching"))  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
+    forecast_weather: str | None = knowledge_field(default="Sunny", skills=("driver_health", "navigation_and_coaching"))  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
     time_of_day: str | None = knowledge_field(default="Morning", skills=("driver_health", "navigation_and_coaching"))  # ["Morning", "Afternoon", "Evening", "Night"]
     road_condition: str | None = knowledge_field(default="Dry", skills=("driver_health", "navigation_and_coaching"))  # ["Dry", "Wet", "Icy", "Snowy", "Gravel"]
     road_type: str | None = knowledge_field(default="Urban", skills=("driver_health", "navigation_and_coaching"))  # ["Urban", "Rural", "Highway", "Residential"]
-    risk_level: str | None = knowledge_field(default="Low", skills=("driver_health", "navigation_and_coaching"))  # ["Low", "Medium", "High"]
+    risk_level: str | None = knowledge_field(default="None", skills=("driver_health", "navigation_and_coaching"))  # ["None", "Low", "Medium", "High"]
     visibility: int | None = knowledge_field(default=100,
                                              change_threshold=10.0,
                                              value_kind="intensity",

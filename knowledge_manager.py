@@ -32,10 +32,10 @@ class KnowledgeManager:
             if value
             else "No lane crossing to the right is currently detected."
         ),
-        ("VehicleState", "doors_unlocked"): lambda value: (
-            "The vehicle doors are unlocked."
+        ("VehicleState", "doors_locked"): lambda value: (
+            "The vehicle doors are locked."
             if value
-            else "The vehicle doors are locked."
+            else "The vehicle doors are unlocked."
         ),
         ("VehicleState", "trunk_open"): lambda value: (
             "The trunk is open." if value else "The trunk is closed."
@@ -62,7 +62,7 @@ class KnowledgeManager:
             "The high beam headlights are on." if value else "The high beam headlights are off."
         ),
         ("VehicleState", "lights_on_fog_lights"): lambda value: (
-            "The fog lights are on." if value else "The fog lights are off."
+            "The lights for fog are on." if value else "The lights for fog are off."
         ),
         ("VehicleState", "engine_on"): lambda value: (
             "The engine is on." if value else "The engine is off."
@@ -100,6 +100,41 @@ class KnowledgeManager:
             "Medium": "Current traffic is medium.",
             "Heavy": "Current traffic is heavy.",
         }.get(value, f"Current traffic is {value}."),
+        ("DriverPhysicalState", "activity"): lambda value: {
+            "Idle": "No distracting driver activity is detected.",
+            "About to exit": "The driver is about to exit the vehicle.",
+            "Driving": "Normal driving activity is detected.",
+            "Talking": "The driver is talking, which may distract from driving.",
+            "Eating": "The driver is eating, which distracts from driving.",
+            "On the phone": "The driver is using a phone, which seriously distracts from driving.",
+            "Sleeping": "The driver appears to be asleep and unable to drive safely.",
+        }.get(value, f"The driver's current activity is {value}."),
+        ("EnvironmentState", "forecast_weather"): lambda value: {
+            "Sunny": "The weather forecast predicts sunny conditions.",
+            "Cloudy": "The weather forecast predicts cloudy conditions.",
+            "Rainy": "The weather forecast predicts rainy conditions.",
+            "Snowy": "The weather forecast predicts snowy conditions.",
+            "Foggy": "The weather forecast predicts foggy conditions.",
+        }.get(value, f"The weather forecast is {value}."),
+        ("EnvironmentState", "weather"): lambda value: {
+            "Sunny": "The current weather is sunny.",
+            "Cloudy": "The current weather is cloudy.",
+            "Rainy": "The current weather is rainy.",
+            "Snowy": "The current weather is snowy.",
+            "Foggy": "The current weather is foggy.",
+        }.get(value, f"The current weather is {value}."),
+        ("EnvironmentState", "risk_level"): lambda value: {
+            "None": "There is no current risk in this area.",
+            "Low": "The current risk level in this area is low.",
+            "Medium": "The current risk level in this area is medium.",
+            "High": "The current risk level in this area is high.",
+        }.get(value, f"The current risk level in this area is {value}."),
+        ("EnvironmentState", "road_type"): lambda value: {
+            "Urban": "The vehicle is currently driving on an urban road.",
+            "Rural": "The vehicle is currently driving on a rural road.",
+            "Highway": "The vehicle is currently driving on a highway.",
+            "Residential": "The vehicle is currently driving on a residential road.",
+        }.get(value, f"The current road type is {value}."),
     }
     _INTENSITY_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[float], str]] = {
         ("DriverPhysicalState", "fatigue_level"): lambda value: (
@@ -402,7 +437,7 @@ class KnowledgeManager:
             else:
                 skills = self._field_skills(name, measure)
             for skill in skills:
-                changes_by_skill.setdefault(skill, {})[measure] = value
+                changes_by_skill.setdefault(skill, {})[key] = value
 
         for skill, skill_changes in changes_by_skill.items():
             if self._SPEED_STATUS_KEY in changes:
@@ -416,7 +451,10 @@ class KnowledgeManager:
                     ):
                         skill_context[context_key] = context_value
 
-            skill_context_all_values_as_list = list(skill_context.values())
+            skill_context_all_values_as_list = [
+                f"{context_key}: {context_value}"
+                for context_key, context_value in skill_context.items()
+            ]
             await self.knowledge_event_queue.put(
                 CarEvent(
                     skill=skill,

@@ -4,7 +4,7 @@ import logging
 
 # fake openAI api key
 import os
-import sys
+import webbrowser
 from datetime import datetime, timezone
 from logging import warning
 from urllib.error import URLError
@@ -19,10 +19,8 @@ from data.database_manager import DatabaseManager
 from data.source_manager import SourceManager
 from knowledge_manager import KnowledgeManager
 from omegaconf import OmegaConf
-from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtWidgets import QApplication
-from qasync import QEventLoop
 from ui.bridge import VehicleBridge
+from ui.web_server import WebUIServer
 from voice.stt_manager import STTManager
 from voice.tts_manager import TTSManager
 
@@ -165,7 +163,6 @@ async def main(opt: ConfigAssistant):
     # initialize source manager
     source_manager = SourceManager(data_event_queue=data_event_queue, opt=opt)
 
-    engine = QQmlApplicationEngine()
     if opt.stt_enabled:
         stt_manager = await asyncio.to_thread(
             STTManager,
@@ -183,17 +180,14 @@ async def main(opt: ConfigAssistant):
         stt_manager=stt_manager,
         opt=opt,
     )
-    app.aboutToQuit.connect(bridge.close)
-    engine.rootContext().setContextProperty(
-        "vehicleBridge",
-        bridge,
+    web_ui = WebUIServer(
+        bridge=bridge,
+        host=opt.web_ui_host,
+        port=opt.web_ui_port,
     )
-    engine.load("ui/main.qml")
-    engine.warnings.connect(
-        lambda warnings: [logger.warning(w.toString()) for w in warnings]
-    )
-    if not engine.rootObjects():
-        raise RuntimeError("Failed to load main.qml")
+    await web_ui.start()
+    if opt.web_ui_open_browser:
+        await asyncio.to_thread(webbrowser.open, web_ui.url)
 
     # run everything concurrently
     tasks = [
@@ -216,6 +210,7 @@ async def main(opt: ConfigAssistant):
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await web_ui.close()
         bridge.close()
         await asyncio.to_thread(database_manager.close)
 
@@ -226,10 +221,9 @@ if __name__ == "__main__":
     merged = OmegaConf.merge(opt_default, opt_cli)
     opt = OmegaConf.structured(merged)
 
-    app = QApplication(sys.argv)
-    loop = QEventLoop(app)
-    with loop:
-        loop.create_task(main(opt))
-        loop.run_forever()
+    try:
+        asyncio.run(main(opt))
+    except KeyboardInterrupt:
+        logger.info("Application interrupted.")
 
     logger.info("Application exited.")

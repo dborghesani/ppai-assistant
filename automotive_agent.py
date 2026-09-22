@@ -3,21 +3,21 @@ import re
 import time
 from typing import Any, Callable
 
-from openai import AsyncOpenAI
+import laya
 import structlog
 from config import ConfigAssistant
-from skill_manager import SkillManager, SkillType
+from crewai import LLM, Agent, Crew, Task
+from crewai.process import Process
 from events import CarEvent
+from openai import AsyncOpenAI
+from skill_manager import SkillManager, SkillType
 from tools.speed_limit_tool import SpeedLimitTool
 from voice.tts_manager import TTSManager
-from crewai import Agent, Task, Crew
-from crewai.process import Process
-from crewai import LLM, Agent, Task, Crew
-import laya
 
 logger = structlog.get_logger()
 
 from enum import Enum
+
 from pydantic import BaseModel, Field
 
 
@@ -27,6 +27,7 @@ class Urgency(str, Enum):
     MEDIUM = "medium urgency"
     HIGH = "high urgency"
     CRITICAL = "critical urgency"
+
 
 class ActionType(str, Enum):
     NONE = "no action required"
@@ -45,43 +46,48 @@ class ActionType(str, Enum):
     ENABLE_AC = "enable air conditioning"
     DISABLE_AC = "disable air conditioning"
 
+
 class InterventionAction(str, Enum):
     NONE = "no additional concrete assistance is needed"
     INCREASE_TEMPERATURE = "increase internal temperature to improve driver comfort"
     DECREASE_TEMPERATURE = "decrease internal temperature to improve driver comfort"
     LOCK_DOORS = "lock doors to ensure driver safety."
     UNLOCK_DOORS = "unlock doors, no longer restricting driver access"
-    #START_NAVIGATION = "help the driver navigate to an appropriate destination"
-    #ENABLE_NIGHT_LIGHTS = "enable night lights to improve visibility during nighttime driving"
-    #DISABLE_NIGHT_LIGHTS = "disable night lights, no longer improving visibility during nighttime driving"
+    # START_NAVIGATION = "help the driver navigate to an appropriate destination"
+    # ENABLE_NIGHT_LIGHTS = "enable night lights to improve visibility during nighttime driving"
+    # DISABLE_NIGHT_LIGHTS = "disable night lights, no longer improving visibility during nighttime driving"
     FIND_REST_AREA = "help the driver to find rest area"
     ENABLE_FOG_LIGHTS = "enable fog lights to improve visibility in foggy conditions"
-    DISABLE_FOG_LIGHTS = "disable fog lights, no longer improving visibility in foggy conditions"
-    #ENABLE_AC = "enable air conditioning to improve driver comfort"
-    #DISABLE_AC = "disable air conditioning, no longer improving driver comfort"
+    DISABLE_FOG_LIGHTS = (
+        "disable fog lights, no longer improving visibility in foggy conditions"
+    )
+    # ENABLE_AC = "enable air conditioning to improve driver comfort"
+    # DISABLE_AC = "disable air conditioning, no longer improving driver comfort"
+
 
 class SuggestionTarget(str, Enum):
     GENERIC = "general contextual suggestion"
     DRIVING = "driving behavior assistance"
     WELLBEING = "driver wellbeing assistance"
-    #COMFORT = "cabin comfort assistance"
+    # COMFORT = "cabin comfort assistance"
+
 
 class InterventionType(str, Enum):
-    NONE = (
-        "No assistant intervention is useful or appropriate."
-    )
+    NONE = "No assistant intervention is useful or appropriate."
     SUGGEST = (
         "Communicate with the driver because a suggestion, recommendation, "
         "or other helpful guidance would be appropriate."
     )
-    #ACT = (
+    # ACT = (
     #    "Perform or offer a concrete assistance action that can help the driver "
     #    "or improve the current situation."
-    #)
+    # )
+
 
 class Action(BaseModel):
     action_type: ActionType
     parameters: dict = {}
+
 
 class NotificationDecision(BaseModel):
     urgency: Urgency
@@ -102,12 +108,10 @@ class NotificationDecision(BaseModel):
         """Derived, not model-provided: avoids the model setting notify inconsistently with urgency."""
         return self.urgency is not Urgency.NONE
 
+
 class AutomotiveAgent:
     def __init__(
-        self,
-        llm: LLM,
-        opt: ConfigAssistant,
-        tts_manager: TTSManager | None = None
+        self, llm: LLM, opt: ConfigAssistant, tts_manager: TTSManager | None = None
     ):
         self.opt = opt
         self.llm = llm
@@ -124,11 +128,14 @@ class AutomotiveAgent:
         )
 
         if self.opt.use_laya:
-            self.laya_td = laya.load("convaiinnovations/laya", subfolder="typed-decisions")
+            self.laya_td = laya.load(
+                "convaiinnovations/laya", subfolder="typed-decisions"
+            )
 
         self.skill_manager = SkillManager()
 
         self.on_response: Callable[[str], None] | None = None
+        self.on_response_update: Callable[[str], None] | None = None
 
         self.recent_notifications: list[dict[str, Any]] = []
 
@@ -180,7 +187,7 @@ class AutomotiveAgent:
             ),
             verbose=False,
             llm=llm,
-            tools=[]#[SpeedLimitTool()],
+            tools=[],  # [SpeedLimitTool()],
         )
 
         task = Task(
@@ -241,7 +248,7 @@ class AutomotiveAgent:
             output_pydantic=NotificationDecision,
             agent=agent,
         )
-    
+
         # Crew
         self.crew = Crew(
             agents=[agent],
@@ -331,18 +338,36 @@ class AutomotiveAgent:
             prev_rank = urgency_ranks.get(Urgency(prev_urgency_str), 1)
 
             # 1. Exact or near-exact identical message within cooldown
-            if norm_message == prev_norm_msg or norm_message in prev_norm_msg or prev_norm_msg in norm_message:
+            if (
+                norm_message == prev_norm_msg
+                or norm_message in prev_norm_msg
+                or prev_norm_msg in norm_message
+            ):
                 if current_rank <= prev_rank:
-                    return True, f"Identical/similar message spoken {int(elapsed)}s ago with same or higher urgency"
+                    return (
+                        True,
+                        f"Identical/similar message spoken {int(elapsed)}s ago with same or higher urgency",
+                    )
 
             # 2. Same underlying measure(s) within cooldown unless urgency escalated to critical/high.
             # Skill is too coarse (e.g. "vehicle" covers doors, temperature, engine, ...): only
             # suppress if the notifications actually concern at least one common measure.
             prev_measures = set(prev.get("measures") or [])
-            if measures and prev_measures and measures & prev_measures and elapsed < (cooldown_seconds / 2):
-                if current_rank <= prev_rank and current_rank < urgency_ranks[Urgency.HIGH]:
+            if (
+                measures
+                and prev_measures
+                and measures & prev_measures
+                and elapsed < (cooldown_seconds / 2)
+            ):
+                if (
+                    current_rank <= prev_rank
+                    and current_rank < urgency_ranks[Urgency.HIGH]
+                ):
                     shared = ", ".join(sorted(measures & prev_measures))
-                    return True, f"Recent notification for measure(s) '{shared}' already spoken {int(elapsed)}s ago"
+                    return (
+                        True,
+                        f"Recent notification for measure(s) '{shared}' already spoken {int(elapsed)}s ago",
+                    )
 
         return False, ""
 
@@ -351,7 +376,10 @@ class AutomotiveAgent:
         """Reject model notifications that explicitly describe no actionable risk."""
         if decision.urgency is Urgency.NONE:
             return True
-        if decision.action is not None and decision.action.action_type is ActionType.NONE:
+        if (
+            decision.action is not None
+            and decision.action.action_type is ActionType.NONE
+        ):
             return True
 
         text = " ".join(
@@ -375,9 +403,7 @@ class AutomotiveAgent:
 
     async def stream_user_response(self, event: CarEvent) -> None:
         """Stream a conversational answer directly from Ollama to Kyutai TTS."""
-        conversation_instructions = self.skill_manager.get_skill(
-            SkillType.CONVERSATION
-        )
+        conversation_instructions = self.skill_manager.get_skill(SkillType.CONVERSATION)
         system_message = (
             "You are an in-vehicle assistant. Answer the driver directly and concisely. "
             "Use the vehicle context when relevant. Never reveal internal reasoning, "
@@ -393,6 +419,7 @@ class AutomotiveAgent:
         ]
 
         full_response = ""
+        displayed_response = ""
         sentence_buffer = ""
         stream = None
         try:
@@ -415,15 +442,24 @@ class AutomotiveAgent:
                 while split is not None:
                     sentence = sentence_buffer[: split.end()].strip()
                     sentence_buffer = sentence_buffer[split.end() :]
-                    if sentence and self.tts_manager is not None:
-                        await self.tts_manager.speak(sentence)
+                    if sentence:
+                        displayed_response = f"{displayed_response} {sentence}".strip()
+                        if self.on_response_update is not None:
+                            self.on_response_update(displayed_response)
+                        if self.tts_manager is not None:
+                            await self.tts_manager.speak(sentence)
                     split = re.search(r"[.!?](?:\s|$)", sentence_buffer)
         finally:
             if stream is not None:
                 await stream.close()
 
-        if sentence_buffer.strip() and self.tts_manager is not None:
-            await self.tts_manager.speak(sentence_buffer.strip())
+        trailing_sentence = sentence_buffer.strip()
+        if trailing_sentence:
+            displayed_response = f"{displayed_response} {trailing_sentence}".strip()
+            if self.on_response_update is not None:
+                self.on_response_update(displayed_response)
+            if self.tts_manager is not None:
+                await self.tts_manager.speak(trailing_sentence)
 
         full_response = full_response.strip()
         if full_response:
@@ -438,7 +474,10 @@ class AutomotiveAgent:
                 self.on_response(full_response + "\n")
 
     def cancel_voice_response(self) -> None:
-        if self._voice_response_task is not None and not self._voice_response_task.done():
+        if (
+            self._voice_response_task is not None
+            and not self._voice_response_task.done()
+        ):
             self._voice_response_task.cancel()
 
     def set_laya_minimum_urgency(self, urgency: str) -> None:
@@ -496,8 +535,7 @@ class AutomotiveAgent:
 
                 if probabilities:
                     probs_str = ", ".join(
-                        f"{k}={v:.{precision}f}"
-                        for k, v in probabilities.items()
+                        f"{k}={v:.{precision}f}" for k, v in probabilities.items()
                     )
                     text += f" | {probs_str}"
 
@@ -512,7 +550,7 @@ class AutomotiveAgent:
 
         return lines
 
-    async def _process_event_laya(self, event: CarEvent): 
+    async def _process_event_laya(self, event: CarEvent):
         logger.info(f">>> [LAYA] Processing event: {event.event_value}")
         laya_start = time.time()
         # format events for laya
@@ -528,12 +566,8 @@ class AutomotiveAgent:
                     "Considering the triggering event, the driver state, and the overall context, "
                     "how urgent is an assistant intervention?"
                 ),
-                "criteria": {
-                    k.name.lower(): k.value
-                    for k in Urgency
-                }
+                "criteria": {k.name.lower(): k.value for k in Urgency},
             },
-
             "intervention": {
                 "type": "choice",
                 "instructions": (
@@ -541,10 +575,7 @@ class AutomotiveAgent:
                     "including the driver's emotional, physical, attentional, and driving state, "
                     "would it be useful to provide the driver with a suggestion?"
                 ),
-                "criteria": {
-                    k.name.lower(): k.value
-                    for k in InterventionType
-                }
+                "criteria": {k.name.lower(): k.value for k in InterventionType},
             },
             "suggestion_target": {
                 "type": "choice",
@@ -552,10 +583,7 @@ class AutomotiveAgent:
                     "If a suggestion is useful, which aspect should it primarily address? "
                     "Choose the most relevant target from the available criteria."
                 ),
-                "criteria": {
-                    k.name.lower(): k.value
-                    for k in SuggestionTarget
-                }
+                "criteria": {k.name.lower(): k.value for k in SuggestionTarget},
             },
         }
         """
@@ -599,13 +627,17 @@ class AutomotiveAgent:
         output_lines = self.format_laya_answers(answers)
         for line in output_lines:
             logger.info(f">>> [LAYA] {line}")
-        logger.info(f">>> finished processing intervention analysis in {laya_elapsed:.3f} seconds")
+        logger.info(
+            f">>> finished processing intervention analysis in {laya_elapsed:.3f} seconds"
+        )
 
         answers = result["answers"]
 
         # LLM output will be generated based on this decision.
         decision = {
-            "urgency": answers["urgency"]["legend"][str(round(answers["urgency"]["score"]))],
+            "urgency": answers["urgency"]["legend"][
+                str(round(answers["urgency"]["score"]))
+            ],
             "intervention": answers["intervention"]["choice"],
             "suggestion_target": answers["suggestion_target"]["choice"],
         }
@@ -678,6 +710,7 @@ class AutomotiveAgent:
         ]
 
         full_response = ""
+        displayed_response = ""
         sentence_buffer = ""
         stream = None
         try:
@@ -700,15 +733,24 @@ class AutomotiveAgent:
                 while split is not None:
                     sentence = sentence_buffer[: split.end()].strip()
                     sentence_buffer = sentence_buffer[split.end() :]
-                    if sentence and self.tts_manager is not None:
-                        await self.tts_manager.speak(sentence)
+                    if sentence:
+                        displayed_response = f"{displayed_response} {sentence}".strip()
+                        if self.on_response_update is not None:
+                            self.on_response_update(displayed_response)
+                        if self.tts_manager is not None:
+                            await self.tts_manager.speak(sentence)
                     split = re.search(r"[.!?](?:\s|$)", sentence_buffer)
         finally:
             if stream is not None:
                 await stream.close()
 
-        if sentence_buffer.strip() and self.tts_manager is not None:
-            await self.tts_manager.speak(sentence_buffer.strip())
+        trailing_sentence = sentence_buffer.strip()
+        if trailing_sentence:
+            displayed_response = f"{displayed_response} {trailing_sentence}".strip()
+            if self.on_response_update is not None:
+                self.on_response_update(displayed_response)
+            if self.tts_manager is not None:
+                await self.tts_manager.speak(trailing_sentence)
 
         full_response = full_response.strip()
         if full_response:
@@ -721,9 +763,11 @@ class AutomotiveAgent:
             self._conversation_history = self._conversation_history[-8:]
             if self.on_response is not None:
                 self.on_response(full_response + "\n")
-        
+
     async def _process_event_llm(self, event: CarEvent):
-        logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
+        logger.info(
+            f">>> received {event.event_name} event with value: {event.event_value}"
+        )
         logger.info(">>> generating...")
         if event.user_input:
             self.cancel_voice_response()
@@ -766,7 +810,7 @@ class AutomotiveAgent:
         )
         llm_elapsed = time.time() - llm_start
         logger.info(f">>> LLM generation took {llm_elapsed:.2f}s")
-        response = result.raw if hasattr(result, 'raw') else str(result)
+        response = result.raw if hasattr(result, "raw") else str(result)
         logger.info(f">>> {response}")
 
         decision: NotificationDecision = result.pydantic
@@ -789,30 +833,39 @@ class AutomotiveAgent:
                 logger.info(f">>> [suppressed duplicate] {reason}")
             else:
                 logger.info(f">>> [speak] {decision.spoken_message}")
+                if self.on_response is not None:
+                    response = decision.spoken_message + "\n"
+                    response += (
+                        f"Action: {decision.action.action_type}, Parameters: {decision.action.parameters}\n"
+                        if decision.action
+                        else "no action required\n"
+                    )
+                    self.on_response(response)
                 if self.tts_manager is not None:
                     tts_start = time.time()
                     await self.tts_manager.speak(decision.spoken_message)
-                    logger.info(f">>> TTS synthesis+playback took {time.time() - tts_start:.2f}s")
-                self.recent_notifications.append({
-                    "urgency": decision.urgency.value,
-                    "message": decision.spoken_message,
-                    "skill": event.skill,
-                    "event": event.event_name,
-                    "measures": sorted(measures),
-                    "timestamp": time.time(),
-                })
+                    logger.info(
+                        f">>> TTS synthesis+playback took {time.time() - tts_start:.2f}s"
+                    )
+                self.recent_notifications.append(
+                    {
+                        "urgency": decision.urgency.value,
+                        "message": decision.spoken_message,
+                        "skill": event.skill,
+                        "event": event.event_name,
+                        "measures": sorted(measures),
+                        "timestamp": time.time(),
+                    }
+                )
                 if len(self.recent_notifications) > 5:
                     self.recent_notifications.pop(0)
                 if decision.action:
                     logger.info(f">>> [action] {decision.action.action_type}")
                     # handle the action accordingly
                     if decision.action.action_type is not ActionType.NONE:
-                        logger.info(f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}")
-
-                if self.on_response is not None:
-                    response = decision.spoken_message + "\n"
-                    response += f"Action: {decision.action.action_type}, Parameters: {decision.action.parameters}\n" if decision.action else "no action required\n"
-                    self.on_response(response)
+                        logger.info(
+                            f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}"
+                        )
 
     def _format_available_actions(self, skill: SkillType | None) -> str:
         actions = self.actions_by_skill.get(skill, (ActionType.NONE,))

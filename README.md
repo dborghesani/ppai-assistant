@@ -1,6 +1,6 @@
 # ppai-assistant
 
-Automotive AI Assistant powered by **CrewAI**, **Qt**, and **Kyutai** voice models.
+Automotive AI Assistant powered by **CrewAI**, a browser dashboard, and **Kyutai** voice models.
 
 This project demonstrates an in-vehicle intelligent assistant capable of handling user requests, vehicle telemetry, and proactive suggestions using a multi-agent system, with optional spoken (TTS/STT) and hands-free continuous-conversation interaction.
 
@@ -14,19 +14,18 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
   - **Navigation**: Handling route and location data.
   - **Proactive Suggestions**: Anticipating driver needs.
   - **Vehicle**: Managing vehicle states and services.
-- **Voice (optional, GPU required)**: Kyutai Delayed Streams Modeling TTS/STT, with three usage modes:
+- **Voice (optional, GPU required)**: Kyutai Delayed Streams Modeling TTS/STT:
   - **Text-only**: type in the UI, read the spoken response as text (default, no GPU needed).
   - **Spoken responses (TTS)**: agent replies are synthesized and played out loud.
-  - **Push-to-talk (STT)**: hold a mic button to record a question, released to transcribe and send it.
-  - **Continuous conversation**: always-listening mode with automatic turn-taking (semantic VAD, or a silence-based fallback), barge-in (interrupt the assistant mid-sentence), and an echo-suppression heuristic (raw-energy gate + cross-correlation against the TTS's own recent output) to avoid the assistant re-transcribing itself.
-- **Real-Time UI**: Built with PySide6 and QML for a responsive dashboard interface.
+   - **Continuous conversation**: click the microphone once to start always-listening mode and click it again to stop. It includes automatic turn-taking (semantic VAD, or a silence-based fallback), barge-in, and echo suppression.
+- **Real-Time UI**: Touch-friendly HTML dashboard with live context, telemetry simulation, chat, and voice controls.
 
 ## 🛠 Tech Stack
 
 - **Python**: Core logic.
 - **CrewAI**: Agent framework.
-- **PySide6**: UI framework (Qt for Python).
-- **QML**: Declarative UI language (with automatic OS Dark/Light theme switching).
+- **aiohttp**: Local HTTP and WebSocket server for the dashboard.
+- **HTML/CSS/JavaScript**: Responsive in-car interface with no frontend build step.
 - **Ollama**: Local LLM inference (default: `qwen2.5:3b-instruct`).
 - **Kyutai `moshi` (Delayed Streams Modeling)**: PyTorch TTS/STT models for voice input/output, run locally on GPU.
 - **sounddevice**: Microphone capture and speaker playback.
@@ -55,11 +54,12 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
 │   └── source_manager.py        # WebSocket/MQTT source and replay manager
 ├── voice/               # Kyutai TTS/STT (Delayed Streams Modeling, PyTorch backend)
 │   ├── tts_manager.py   # Text-to-speech: warmup, playback, barge-in stop(), echo reference buffer
-│   ├── stt_manager.py   # Push-to-talk transcription + continuous conversation loop (turn-taking, barge-in)
+│   ├── stt_manager.py   # Continuous conversation loop (turn-taking, barge-in)
 │   └── gpu_lock.py      # Shared lock serializing STT/TTS GPU access (avoids CUDA graph capture races)
-├── ui/                  # QML interface and Qt Bridge
-│   ├── main.qml         # Dashboard UI with dark/light mode, text input, push-to-talk and conversation toggle
-│   └── bridge.py        # PySide6 VehicleBridge communicating with async agent/broker/voice managers
+├── ui/                  # Browser dashboard and backend bridge
+│   ├── web/             # Static HTML, CSS, and JavaScript dashboard
+│   ├── web_server.py    # HTTP/WebSocket transport
+│   └── bridge.py        # Agent/broker/voice integration
 └── tools/               # Agent tools directory
 ```
 
@@ -146,12 +146,18 @@ Run the application with default settings (text-only, no voice, no MQTT):
 python main.py
 ```
 
+The dashboard opens automatically at `http://127.0.0.1:8765`. For a dashboard on another device,
+run with `web_ui_host=0.0.0.0 web_ui_open_browser=False` and open the host machine's address.
+
 ### Configuration
 The application supports command-line configuration via **OmegaConf**. You can override settings defined in `config.py`.
 
 | Argument | Description | Default |
 | :--- | :--- | :--- |
 | `crewai_verbose` | Enable verbose CrewAI logging | `False` |
+| `web_ui_host` | Dashboard bind address | `127.0.0.1` |
+| `web_ui_port` | Dashboard HTTP/WebSocket port | `8765` |
+| `web_ui_open_browser` | Open the dashboard in the default browser at startup | `True` |
 | `ollama_host` | Ollama server host | `localhost` |
 | `ollama_port` | Ollama server port | `11434` |
 | `ollama_llm` | LLM model to use | `ollama/qwen2.5:3b-instruct` |
@@ -173,7 +179,7 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `tts_device` | Device for TTS inference | `cuda` |
 | `tts_n_q` | Number of audio codebooks used by the TTS model | `16` |
 | `tts_cfg_coef` | Classifier-free guidance coefficient (ignored if the checkpoint has no CFG distillation support) | `3.0` |
-| `stt_enabled` | Enable push-to-talk / continuous conversation (Kyutai STT, requires GPU) | `False` |
+| `stt_enabled` | Enable continuous conversation (Kyutai STT, requires GPU) | `False` |
 | `stt_hf_repo` | Hugging Face repo of the STT checkpoint | `kyutai/stt-1b-en_fr` |
 | `stt_device` | Device for STT inference | `cuda` |
 | `conversation_vad_head_index` | Semantic-VAD pause-duration head to use, if the checkpoint provides one (0=0.5s, 1=1.0s, 2=2.0s, 3=3.0s) | `2` |
@@ -202,11 +208,8 @@ python main.py mqtt_enabled=True mqtt_embedded_broker=True
 # Enable spoken responses only (TTS), keep typing questions in the UI
 python main.py tts_enabled=True
 
-# Enable push-to-talk: hold the mic button to record, release to transcribe and send
-python main.py tts_enabled=True stt_enabled=True
-
 # Full hands-free continuous conversation (always-listening, barge-in, auto turn-taking)
-# toggled from the "🎙️ Conversation" button in the UI once stt_enabled/tts_enabled are on
+# Click the microphone once to start and again to stop.
 python main.py tts_enabled=True stt_enabled=True
 
 # Continuous conversation with headphones: disable the echo-avoidance mute so
@@ -225,12 +228,12 @@ python main.py \
 
 ## 🧠 How It Works
 
-1. **Initialization**: The app starts a PySide6 event loop alongside an async loop using `qasync`. If enabled,
+1. **Initialization**: The app starts the dashboard server and backend workers on one asyncio event loop. If enabled,
    `TTSManager`/`STTManager` load their Kyutai models and run a warmup inference off the event loop, so the
    first real interaction isn't slowed down by CUDA kernel compilation.
 2. **Ingress & Source Management**:
    - Telemetry from WebSockets or MQTT is received, deserialized into strongly-typed dataclasses, and routed into `data_event_queue`.
-   - MQTT uses a dedicated Paho worker thread so socket polling remains compatible with both Windows and Linux qasync event loops.
+   - MQTT uses a dedicated Paho worker thread for consistent socket polling on Windows and Linux.
    - UI adjustments (e.g. `DriverEmotionState`, `DriverDrivingStyle`) are routed via MQTT or direct database writes.
 3. **Storage & Knowledge Extraction**:
    - `DatabaseManager` writes telemetry time-series into InfluxDB and notifies `KnowledgeManager`.
@@ -239,12 +242,12 @@ python main.py \
    - `AutomotiveAgent` evaluates significant events and user inputs using CrewAI against domain skills (`skills/*.md`).
    - Applies deduplication and urgency-based cooldowns to prevent alert fatigue, while direct user requests always get a real response.
 5. **Voice Input/Output** (optional):
-   - Push-to-talk records the mic while the button is held and transcribes on release.
-   - Continuous conversation mode keeps the mic open, detects end-of-turn (semantic VAD or a silence-token fallback), and supports barge-in: loud audio while the assistant is speaking is checked against a raw-energy gate and, if a recent-playback reference is available, cross-correlated against what was just played to tell apart a genuine interruption from the assistant's own voice leaking into the mic.
+   - The microphone button toggles continuous conversation mode without needing to be held down.
+   - Continuous conversation keeps the mic open, detects end-of-turn (semantic VAD or a silence-token fallback), and supports barge-in: loud audio while the assistant is speaking is checked against a raw-energy gate and, if a recent-playback reference is available, cross-correlated against what was just played to tell apart a genuine interruption from the assistant's own voice leaking into the mic.
    - `voice/gpu_lock.py` serializes GPU access between STT and TTS, since Kyutai's CUDA-graph-based inference isn't safe to run concurrently from multiple threads.
 6. **UI & Speech Output**:
-   - Spoken responses and actions are published back to `VehicleBridge` and displayed live in `responseField` in [ui/main.qml](ui/main.qml), and spoken aloud when `tts_enabled=True`.
-   - The UI automatically synchronizes its color palette with the operating system's Dark/Light mode theme.
+   - Responses and live knowledge are published through `VehicleBridge` and streamed to the browser over WebSocket.
+   - The dashboard supports text chat, toggleable hands-free conversation, and every telemetry simulator control from the previous QML interface.
 
 ## ⚠️ Known Limitations
 

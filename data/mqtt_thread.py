@@ -1,9 +1,7 @@
-"""Thread-backed MQTT client for Qt/qasync applications.
+"""Thread-backed MQTT client for asyncio applications.
 
-Paho owns its socket polling loop in a normal thread.  This is important on
-Windows because qasync does not implement asyncio's add_reader/add_writer,
-which aiomqtt requires.  The public methods are safe to call from the Qt or
-asyncio thread.
+Paho owns its socket polling loop in a normal thread. The public methods are
+safe to call from either the application thread or a background worker.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ MessageCallback = Callable[[str, bytes], None]
 
 
 class MqttThreadClient:
-    """Run one Paho MQTT connection outside the qasync event loop."""
+    """Run one Paho MQTT connection outside the application event loop."""
 
     def __init__(
         self,

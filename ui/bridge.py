@@ -1,7 +1,9 @@
 import asyncio
 import json
 import time
-from typing import Any, Dict, List, Tuple
+from collections import defaultdict
+from dataclasses import asdict, is_dataclass
+from typing import Any, Callable, DefaultDict, Tuple
 
 import structlog
 from automotive_agent import AutomotiveAgent
@@ -10,18 +12,11 @@ from data.database_manager import DatabaseManager
 from data.mqtt_thread import MqttThreadClient
 from events import CarEvent
 from knowledge_manager import KnowledgeManager
-from PySide6.QtCore import Property, QObject, Signal, Slot
-from PySide6.QtGui import QGuiApplication, Qt
 from skill_manager import SkillType
 from voice.stt_manager import STTManager
 
 
-class VehicleBridge(QObject):
-    responseReceived = Signal(str)
-    isDarkModeChanged = Signal(bool)
-    conversationModeChanged = Signal(bool)
-    knowledgeUpdated = Signal(str)
-
+class VehicleBridge:
     def __init__(
         self,
         agent: AutomotiveAgent,
@@ -30,9 +25,7 @@ class VehicleBridge(QObject):
         database_manager: DatabaseManager,
         knowledge_manager: KnowledgeManager,
         stt_manager: STTManager | None = None,
-        parent=None,
     ):
-        super().__init__(parent)
         self.logger = structlog.get_logger()
         self.opt = opt
         self.agent = agent
@@ -41,8 +34,11 @@ class VehicleBridge(QObject):
         self.knowledge_manager = knowledge_manager
         self.knowledge_manager.on_context_updated = self._on_knowledge_updated
         self.stt_manager = stt_manager
-        self.agent.on_response = self.responseReceived.emit
-        self._check_dark_mode()
+        self._listeners: DefaultDict[str, list[Callable[..., None]]] = defaultdict(list)
+        self.agent.on_response = lambda message: self._emit("responseReceived", message)
+        self.agent.on_response_update = lambda message: self._emit(
+            "responseUpdated", message
+        )
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:
@@ -55,27 +51,12 @@ class VehicleBridge(QObject):
             )
             self._mqtt_client.start()
 
-        style_hints = QGuiApplication.styleHints()
-        if style_hints is not None:
-            style_hints.colorSchemeChanged.connect(self._on_color_scheme_changed)
+    def on(self, event_name: str, callback: Callable[..., None]) -> None:
+        self._listeners[event_name].append(callback)
 
-    def _check_dark_mode(self) -> bool:
-        style_hints = QGuiApplication.styleHints()
-        if style_hints is not None:
-            self._is_dark_mode = style_hints.colorScheme() == Qt.ColorScheme.Dark
-        else:
-            self._is_dark_mode = False
-        return self._is_dark_mode
-
-    def _on_color_scheme_changed(self, scheme):
-        is_dark = scheme == Qt.ColorScheme.Dark
-        if is_dark != self._is_dark_mode:
-            self._is_dark_mode = is_dark
-            self.isDarkModeChanged.emit(self._is_dark_mode)
-
-    @Property(bool, notify=isDarkModeChanged)
-    def isDarkMode(self) -> bool:
-        return self._is_dark_mode
+    def _emit(self, event_name: str, *args: Any) -> None:
+        for callback in tuple(self._listeners[event_name]):
+            callback(*args)
 
     def get_dataclass_from_ui_event_type(
         self, ui_event_type: str
@@ -130,7 +111,6 @@ class VehicleBridge(QObject):
             dataclass_class_name, dataclass_member, value
         )
 
-    @Slot(str)
     def userInput(self, text: str):
         text = text.strip()
         if not text:
@@ -144,24 +124,22 @@ class VehicleBridge(QObject):
         )
         self.agent.event_queue.put_nowait(event)
 
-    @Slot(bool)
     def eventProcessingChanged(self, enabled: bool):
         self.agent.is_listening = enabled
 
-    @Slot(str)
     def layaMinimumUrgencyChanged(self, urgency: str):
         try:
             self.agent.set_laya_minimum_urgency(urgency)
         except ValueError:
-            self.logger.warning("Ignoring invalid Laya urgency threshold", urgency=urgency)
+            self.logger.warning(
+                "Ignoring invalid Laya urgency threshold", urgency=urgency
+            )
 
-    @Slot()
     def startVoiceInput(self):
         if not self.agent.is_listening or self.stt_manager is None:
             return
         self.stt_manager.start_recording()
 
-    @Slot()
     def stopVoiceInput(self):
         if not self.agent.is_listening or self.stt_manager is None:
             return
@@ -174,9 +152,8 @@ class VehicleBridge(QObject):
             f">>> STT transcription took {time.time() - stt_start:.2f}s", text=text
         )
         if text:
-            self.userInput(text)
+            self._submit_transcription(text)
 
-    @Slot()
     def startConversation(self):
         self.logger.info("Starting conversation mode")
         """Enter always-listening mode: turn-taking, auto-timeout and barge-in."""
@@ -184,19 +161,19 @@ class VehicleBridge(QObject):
             self.logger.warning(
                 "Cannot start conversation: event processing is disabled"
             )
-            self.conversationModeChanged.emit(False)
+            self._emit("conversationModeChanged", False)
             return
         if self.stt_manager is None:
             self.logger.warning(
                 "Cannot start conversation: STT manager is not configured"
             )
-            self.conversationModeChanged.emit(False)
+            self._emit("conversationModeChanged", False)
             return
         if not self.stt_manager.enabled:
             self.logger.warning(
                 "Cannot start conversation: STT manager failed to load/is disabled"
             )
-            self.conversationModeChanged.emit(False)
+            self._emit("conversationModeChanged", False)
             return
         try:
             started = self.stt_manager.start_conversation(
@@ -227,9 +204,8 @@ class VehicleBridge(QObject):
             )
             started = False
         # Keep the UI toggle in sync with whether the mic actually started.
-        self.conversationModeChanged.emit(started)
+        self._emit("conversationModeChanged", started)
 
-    @Slot()
     def stopConversation(self):
         self.logger.info("Stopping conversation mode")
         if self.stt_manager is not None:
@@ -237,7 +213,14 @@ class VehicleBridge(QObject):
 
     def _on_conversation_utterance(self, text: str):
         # Called from the STT background thread; hop back onto the event loop.
-        self.loop.call_soon_threadsafe(self.userInput, text)
+        self.loop.call_soon_threadsafe(self._submit_transcription, text)
+
+    def _submit_transcription(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        self._emit("userSpeechReceived", text)
+        self.userInput(text)
 
     def _on_conversation_speech_start(self):
         # Called from the STT background thread: barge-in, stop any TTS playback now.
@@ -252,29 +235,31 @@ class VehicleBridge(QObject):
     def _handle_conversation_timeout(self):
         if self.stt_manager is not None:
             self.stt_manager.stop_conversation()
-        self.conversationModeChanged.emit(False)
+        self._emit("conversationModeChanged", False)
 
     # generic slots
-    @Slot(str, str, float)
     def floatChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)
 
-    @Slot(str, str, int)
     def intChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)
 
-    @Slot(str, str, str)
     def stringChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)
 
-    @Slot(str, str, bool)
     def boolChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)
 
     def _on_knowledge_updated(self) -> None:
         """Called synchronously by KnowledgeManager right after its context changes."""
-        self.knowledgeUpdated.emit(self.knowledge_manager.dump_knowledge())
+        self._emit("knowledgeUpdated", self.dumpKnowledgeData())
 
-    @Slot(result=str)
     def dumpKnowledge(self) -> str:
         return self.knowledge_manager.dump_knowledge()
+
+    def dumpKnowledgeData(self) -> dict[str, Any]:
+        knowledge = {
+            str(key): asdict(value) if is_dataclass(value) else value
+            for key, value in self.knowledge_manager.context.items()
+        }
+        return json.loads(json.dumps(knowledge, default=str))

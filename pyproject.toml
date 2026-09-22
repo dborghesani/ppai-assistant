@@ -1,13 +1,12 @@
 [project]
 name = "ppai-assistant"
 version = "0.1.0"
-description = "Automotive AI Assistant demo with CrewAI, PySide6/QML and Kyutai voice (TTS/STT)"
+description = "Automotive AI Assistant demo with CrewAI, a web dashboard and Kyutai voice (TTS/STT)"
 requires-python = ">=3.10"
 dependencies = [
-    "PySide6",
+    "aiohttp",
     "crewai",
     "crewai-core",
-    "qasync",
     "numpy-quaternion",
     "structlog",
     "omegaconf",

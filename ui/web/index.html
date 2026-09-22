@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101417">
+  <title>Stellantis Drive Assistant</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand" aria-label="Drive Assistant">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>DRIVE</strong><small>ASSISTANT</small></span>
+      </div>
+      <div class="drive-status">
+        <span id="connection-dot" class="status-dot"></span>
+        <span id="connection-label">Connecting</span>
+      </div>
+      <div class="topbar-actions">
+        <label class="compact-select">
+          <span>Urgency</span>
+          <select id="urgency-select" aria-label="Minimum urgency">
+            <option value="low">Low</option>
+            <option value="medium" selected>Medium</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+        </label>
+        <label class="switch-control">
+          <input id="processing-toggle" type="checkbox" checked>
+          <span class="switch-track"></span>
+          <span>Events</span>
+        </label>
+      </div>
+    </header>
+
+    <main class="dashboard">
+      <aside class="control-panel" aria-label="Demo telemetry controls">
+        <div class="panel-heading">
+          <div><span class="eyebrow">DEMO INPUTS</span><h2>Vehicle context</h2></div>
+          <button id="reset-controls" class="icon-button" type="button" title="Reset controls" aria-label="Reset controls">&#8634;</button>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Context categories">
+          <button class="tab active" data-tab="driver" role="tab" aria-selected="true">Driver</button>
+          <button class="tab" data-tab="road" role="tab" aria-selected="false">Road</button>
+          <button class="tab" data-tab="vehicle" role="tab" aria-selected="false">Vehicle</button>
+        </div>
+        <div id="control-content" class="control-content"></div>
+      </aside>
+
+      <section class="assistant-panel" aria-label="Assistant conversation">
+        <div class="assistant-header">
+          <div>
+            <span class="eyebrow">IN-CAR COPILOT</span>
+            <h1>How can I help?</h1>
+          </div>
+          <span id="listening-badge" class="listening-badge" hidden><i></i> Listening</span>
+        </div>
+
+        <div id="conversation" class="conversation" aria-live="polite">
+          <div class="welcome-state" id="welcome-state">
+            <div class="voice-rings"><span></span><span></span><span></span></div>
+            <p>Ask about your route, comfort, vehicle, or what is happening around you.</p>
+            <div class="suggestions">
+              <button type="button">How am I doing?</button>
+              <button type="button">Summarize the drive</button>
+              <button type="button">Is everything safe?</button>
+            </div>
+          </div>
+        </div>
+
+        <form id="composer" class="composer">
+          <button id="conversation-toggle" class="voice-button" type="button" title="Start conversation" aria-label="Start conversation" aria-pressed="false" disabled>
+            <span class="mic-icon" aria-hidden="true">&#127908;</span>
+          </button>
+          <label class="message-field">
+            <span class="sr-only">Message</span>
+            <textarea id="message-input" rows="1" placeholder="Message your drive assistant"></textarea>
+          </label>
+          <button id="send-button" class="send-button" type="submit" aria-label="Send message">Send</button>
+        </form>
+      </section>
+
+      <aside class="knowledge-panel" aria-label="Live vehicle knowledge">
+        <div class="panel-heading">
+          <div><span class="eyebrow">LIVE CONTEXT</span><h2>What the car knows</h2></div>
+          <span class="live-pill"><i></i> Live</span>
+        </div>
+        <div id="knowledge-content" class="knowledge-content">
+          <div class="empty-knowledge">Waiting for vehicle context...</div>
+        </div>
+      </aside>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  </div>
+</body>
+</html>

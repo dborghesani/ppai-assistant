@@ -183,6 +183,7 @@ async def main(opt: ConfigAssistant):
         stt_manager=stt_manager,
         opt=opt,
     )
+    app.aboutToQuit.connect(bridge.close)
     engine.rootContext().setContextProperty(
         "vehicleBridge",
         bridge,

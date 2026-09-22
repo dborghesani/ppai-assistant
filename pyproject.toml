@@ -22,6 +22,7 @@ dependencies = [
     "sphn",
     "sounddevice",
     "numpy",
+    "laya>=0.3.5",
 ]
 
 [[tool.uv.index]]

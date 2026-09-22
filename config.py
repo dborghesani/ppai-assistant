@@ -6,6 +6,11 @@ from datetime import datetime
 class ConfigAssistant:
     crewai_verbose: bool = False
 
+    # Browser dashboard
+    web_ui_host: str = "127.0.0.1"
+    web_ui_port: int = 8765
+    web_ui_open_browser: bool = True
+
     stellantis_llm: str = ""
 
     # custom LLM configuration (optional)

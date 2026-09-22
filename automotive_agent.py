@@ -496,6 +496,9 @@ class AutomotiveAgent:
         self.laya_minimum_urgency = Urgency.MEDIUM
 
     async def _process_event(self, event: CarEvent):
+        if event.user_input:
+            await self._process_event_llm(event)
+            return
         if self.opt.use_laya:
             await self._process_event_laya(event)
         else:

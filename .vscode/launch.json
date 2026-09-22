@@ -22,7 +22,7 @@
                 "tts_enabled=True",
                 "stt_enabled=True",
                 "is_socket_enabled=False",
-                "use_laya=False"
+                "use_laya=True"
             ],
         },
         {

@@ -15,7 +15,7 @@ class WebUIServer:
         "eventProcessingChanged",
         "floatChanged",
         "intChanged",
-        "layaMinimumUrgencyChanged",
+        "minimumUrgencyChanged",
         "startConversation",
         "startVoiceInput",
         "stopConversation",

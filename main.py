@@ -11,13 +11,13 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 import structlog
-from automotive_agent import AutomotiveAgent
+from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
 from crewai import LLM
 from crewai_core.printer import set_suppress_console_output
 from data.database_manager import DatabaseManager
 from data.source_manager import SourceManager
-from knowledge_manager import KnowledgeManager
+from managers.knowledge_manager import KnowledgeManager
 from omegaconf import OmegaConf
 from ui.bridge import VehicleBridge
 from ui.web_server import WebUIServer

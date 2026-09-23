@@ -6,8 +6,8 @@ import structlog
 from config import ConfigAssistant
 from data import assistant_dataclasses
 from data.database_manager import DatabaseManager
-from events import CarEvent
-from skill_manager import SkillType
+from data.events import CarEvent
+from managers.skill_manager import SkillType
 
 
 @dataclass(frozen=True)

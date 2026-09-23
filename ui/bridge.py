@@ -6,13 +6,13 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Callable, DefaultDict, Tuple
 
 import structlog
-from automotive_agent import AutomotiveAgent
+from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
 from data.database_manager import DatabaseManager
 from data.mqtt_thread import MqttThreadClient
-from events import CarEvent
-from knowledge_manager import KnowledgeManager
-from skill_manager import SkillType
+from data.events import CarEvent
+from managers.knowledge_manager import KnowledgeManager
+from managers.skill_manager import SkillType
 from voice.stt_manager import STTManager
 
 
@@ -127,9 +127,9 @@ class VehicleBridge:
     def eventProcessingChanged(self, enabled: bool):
         self.agent.is_listening = enabled
 
-    def layaMinimumUrgencyChanged(self, urgency: str):
+    def minimumUrgencyChanged(self, urgency: str):
         try:
-            self.agent.set_laya_minimum_urgency(urgency)
+            self.agent.set_minimum_urgency(urgency)
         except ValueError:
             self.logger.warning(
                 "Ignoring invalid Laya urgency threshold", urgency=urgency

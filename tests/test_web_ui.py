@@ -4,7 +4,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 from aiohttp.test_utils import TestClient, TestServer
-from automotive_agent import AutomotiveAgent
+from agents.automotive_agent import AutomotiveAgent
 from ui.bridge import VehicleBridge
 from ui.web_server import WebUIServer
 

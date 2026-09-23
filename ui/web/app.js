@@ -220,7 +220,7 @@ document.querySelector("#processing-toggle").addEventListener("change", event =>
   bridge.call("eventProcessingChanged", event.target.checked).catch(() => {});
 });
 document.querySelector("#urgency-select").addEventListener("change", event => {
-  bridge.call("layaMinimumUrgencyChanged", event.target.value).catch(() => {});
+  bridge.call("minimumUrgencyChanged", event.target.value).catch(() => {});
 });
 
 function addMessage(role, text) {
@@ -324,7 +324,7 @@ bridge.on("ready", data => {
   renderKnowledge(data.knowledge);
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
-  bridge.call("layaMinimumUrgencyChanged", document.querySelector("#urgency-select").value).catch(() => {});
+  bridge.call("minimumUrgencyChanged", document.querySelector("#urgency-select").value).catch(() => {});
 });
 bridge.on("responseUpdated", data => updateAssistantMessage(data[0]));
 bridge.on("responseReceived", data => updateAssistantMessage(data[0], true));

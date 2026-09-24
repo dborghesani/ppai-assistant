@@ -2,9 +2,11 @@ import asyncio
 import queue
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import structlog
+from agents.agents_dataclasses import VoiceType
 from voice import moshi_compat  # noqa: F401  # must run before importing Moshi
 from voice.gpu_lock import GPU_LOCK
 
@@ -29,6 +31,18 @@ logger = structlog.get_logger()
 DEFAULT_TTS_REPO = "kyutai/tts-0.75b-en-public"
 DEFAULT_VOICE = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
 
+# Project-local custom voice references. These are not guaranteed to be part of the
+# base Kyutai voice pack, so we keep a verified fallback and only use custom files
+# when they exist on disk.
+CUSTOM_VOICES_DIR = Path(__file__).resolve().parent / "custom"
+DEFAULT_VOICES_BY_TYPE: dict[VoiceType, str] = {
+    VoiceType.CALM: DEFAULT_VOICE,
+    VoiceType.ENTHUSIASTIC: DEFAULT_VOICE,
+    VoiceType.SERIOUS: DEFAULT_VOICE,
+    VoiceType.EMPATIC: DEFAULT_VOICE,
+    VoiceType.WHISPER: DEFAULT_VOICE,
+}
+
 
 class TTSManager:
     """Text-to-speech using Kyutai TTS (Delayed Streams Modeling, PyTorch backend)."""
@@ -37,7 +51,6 @@ class TTSManager:
         self,
         enabled: bool = True,
         hf_repo: str = DEFAULT_TTS_REPO,
-        voice: str = DEFAULT_VOICE,
         device: str = "cuda",
         n_q: int = 16,
         cfg_coef: float = 3.0,
@@ -80,33 +93,7 @@ class TTSManager:
             self._model = TTSModel.from_checkpoint_info(
                 checkpoint_info, n_q=n_q, temp=0.6, device=device
             )
-            voice_path = self._model.get_voice_path(voice)
-            # Not every checkpoint was trained with CFG distillation (e.g. the 0.75B
-            # public model); passing cfg_coef to a model that doesn't support it raises.
-            supports_cfg = bool(self._model.valid_cfg_conditionings)
-            effective_cfg_coef = self._cfg_coef if supports_cfg else None
-            if not supports_cfg and self._cfg_coef != 1.0:
-                logger.info(
-                    "TTS checkpoint has no CFG distillation support, ignoring cfg_coef",
-                    requested_cfg_coef=self._cfg_coef,
-                )
-
-            if self._model.multi_speaker:
-                # CFG-conditioned voice embedding (requires a precomputed .safetensors file)
-                self._prefix = None
-                self._condition_attributes = self._model.make_condition_attributes(
-                    [voice_path], cfg_coef=effective_cfg_coef
-                )
-            else:
-                # Single-speaker model: clone the voice via an audio prefix instead
-                self._prefix = self._model.get_prefix(voice_path)
-                self._condition_attributes = (
-                    self._model.make_condition_attributes(
-                        [], cfg_coef=effective_cfg_coef
-                    )
-                    if supports_cfg
-                    else None
-                )
+            self.set_voice(VoiceType.CALM)
             logger.info("Kyutai TTS model loaded successfully")
         except Exception as e:
             logger.warning(
@@ -117,6 +104,74 @@ class TTSManager:
 
         self._playback_ring_max_samples = int(self._model.mimi.sample_rate * 1.5)
         self._warmup()
+
+    @staticmethod
+    def resolve_voice_name(voice: str | VoiceType | None) -> str:
+        if isinstance(voice, VoiceType):
+            resolved = DEFAULT_VOICES_BY_TYPE.get(voice)
+            if resolved and Path(resolved).exists():
+                return resolved
+            return DEFAULT_VOICE
+
+        if isinstance(voice, str):
+            normalized = voice.strip().lower()
+            for voice_type, default_voice in DEFAULT_VOICES_BY_TYPE.items():
+                if normalized == voice_type.value.lower():
+                    if Path(default_voice).exists():
+                        return default_voice
+                    return DEFAULT_VOICE
+
+            if Path(voice).exists():
+                return voice
+            return DEFAULT_VOICE
+
+        return DEFAULT_VOICE
+
+    def set_voice(self, voice: str | VoiceType | None) -> bool:
+        """Switch the active TTS voice at runtime for multi-speaker models."""
+        if not self.enabled or self._model is None:
+            return False
+
+        try:
+            resolved_voice = self.resolve_voice_name(voice) or DEFAULT_VOICE
+            voice_path = self._model.get_voice_path(resolved_voice)
+            supports_cfg = bool(self._model.valid_cfg_conditionings)
+            effective_cfg_coef = self._cfg_coef if supports_cfg else None
+
+            if not supports_cfg and self._cfg_coef != 1.0:
+                logger.info(
+                    "TTS checkpoint has no CFG distillation support, ignoring cfg_coef",
+                    requested_cfg_coef=self._cfg_coef,
+                )
+
+            if self._model.multi_speaker:
+                self._prefix = None
+                self._condition_attributes = self._model.make_condition_attributes(
+                    [voice_path], cfg_coef=effective_cfg_coef
+                )
+            else:
+                self._prefix = self._model.get_prefix(voice_path)
+                self._condition_attributes = (
+                    self._model.make_condition_attributes(
+                        [], cfg_coef=effective_cfg_coef
+                    )
+                    if supports_cfg
+                    else None
+                )
+
+            self._current_voice = resolved_voice
+            logger.info("TTS voice updated", voice=resolved_voice)
+            return True
+        except Exception as e:
+            logger.warning(
+                "Failed to switch TTS voice, falling back to default voice",
+                requested_voice=voice,
+                error=str(e),
+            )
+            if self._current_voice != DEFAULT_VOICE:
+                self._current_voice = DEFAULT_VOICE
+                return self.set_voice(DEFAULT_VOICE)
+            return False
 
     def _warmup(self) -> None:
         """Run a dummy generation (no audio playback) so CUDA kernel compilation/

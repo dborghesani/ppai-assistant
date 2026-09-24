@@ -134,7 +134,6 @@ async def main(opt: ConfigAssistant):
             TTSManager,
             enabled=opt.tts_enabled,
             hf_repo=opt.tts_hf_repo,
-            voice=opt.tts_voice,
             device=opt.tts_device,
             n_q=opt.tts_n_q,
             cfg_coef=opt.tts_cfg_coef,

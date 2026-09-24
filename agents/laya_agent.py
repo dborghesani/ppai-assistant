@@ -10,11 +10,10 @@ import structlog
 from agents.agents_dataclasses import (
     ActionType,
     InterventionType,
-    SkillType,
-    SuggestionTarget,
+    SkillScope,
     SuggestionType,
-    Urgency,
     UrgencyType,
+    VoiceType,
 )
 from data.events import CarEvent
 
@@ -90,21 +89,36 @@ class LayaAgent:
     async def process_event(self, event: CarEvent) -> None:
         self.logger.info(f">>> [LAYA] Processing event: {event.event_value}")
         laya_start = time.time()
-        # format events for laya
+        # Align the Laya input to a knowledge-oriented state, similar to the
+        # generated training dataset: facts are exposed as a list of knowledge items,
+        # while skill scope remains unset until it is aligned with the dataset.
+        skill_scope = SkillScope.NONE.value
+
         state = {
             "event": event.event_value,
-            "state": event.context,
+            "state": {
+                "knowledge": list(event.context or []),
+                "skill_scope": skill_scope,
+            },
         }
         laya_questions = {
             "urgency": {
                 "instructions": (
                     "How urgent is an intervention for the current automotive situation?"
                 ),
-                "type": "score",
+                "type": "choice",
                 "criteria": {k.name.lower(): k.value for k in UrgencyType},
             },
 
-            "intervention_type": {
+            "voice": {
+                "instructions": (
+                    "What should the voice response be for the current situation?"
+                ),
+                "type": "choice",
+                "criteria": {k.name.lower(): k.value for k in VoiceType},
+            },
+
+            "intervention": {
                 "instructions": (
                     "What type of intervention is most appropriate for the current situation?"
                 ),
@@ -117,22 +131,22 @@ class LayaAgent:
                     "Which assistant skill is most appropriate for handling the situation?"
                 ),
                 "type": "choice",
-                "criteria": {k.name.lower(): k.value for k in SkillType},
+                "criteria": {k.name.lower(): k.value for k in SkillScope},
             },
 
             "action": {
                 "instructions": (
                     "Which direct action should be executed? "
-                    "Select none when intervention_type is not act."
+                    "Select none when intervention is not act."
                 ),
                 "type": "choice",
                 "criteria": {k.name.lower(): k.value for k in ActionType},
             },
 
-            "suggestion_type": {
+            "suggestion": {
                 "instructions": (
                     "What semantic suggestion should be communicated to the driver? "
-                    "Select none when intervention_type is not suggest. "
+                    "Select none when intervention is not suggest. "
                     "Select the intent of the suggestion, not the final driver-facing wording."
                 ),
                 "type": "choice",
@@ -150,14 +164,21 @@ class LayaAgent:
             f">>> finished processing intervention analysis in {laya_elapsed:.3f} seconds"
         )
 
+        selected_voice = answers.get("voice", {}).get("choice", "neutral")
+        if self.agent.tts_manager is not None and hasattr(
+            self.agent.tts_manager, "set_voice"
+        ):
+            if self.agent.tts_manager._current_voice != selected_voice:
+                self.agent.tts_manager.set_voice(selected_voice)
+
         # LLM output will be generated based on this decision.
         decision = {
-            "urgency": answers["urgency"]["legend"][
-                str(round(answers["urgency"]["score"]))
-            ],
-            "intervention": answers["intervention_type"]["choice"],
+            "urgency": answers["urgency"]["choice"],
+            "voice": selected_voice,
+            "intervention": answers["intervention"]["choice"],
             "action": answers["action"]["choice"],
-            "suggestion": answers["suggestion_type"]["choice"],
+            "suggestion": answers["suggestion"]["choice"],
+            "skill": answers["skill"]["choice"],
         }
 
         intervention = InterventionType[decision["intervention"].upper()]

@@ -8,6 +8,13 @@ class UrgencyType(str, Enum):
     HIGH = "high: prompt intervention is strongly advisable"
     CRITICAL = "critical: immediate attention is required to reduce a serious safety risk"
 
+class VoiceType(str, Enum):
+    CALM = "calm"
+    ENTHUSIASTIC = "enthusiastic"
+    SERIOUS = "serious"
+    EMPATIC = "empathic"
+    WHISPER = "whisper"
+
 class ActionType(str, Enum):
     NONE = "Do not execute a direct action"
     INCREASE_TEMPERATURE = "Increase the cabin temperature"
@@ -30,12 +37,10 @@ class ActionType(str, Enum):
     DISABLE_FOG_LIGHTS = "Disable fog lights"
 
 
-class SkillType(str, Enum):
-    NONE = "No skill is required"
-    DRIVING = ("Driving, navigation, vehicle state, road conditions, "
-               "safety, or driving coaching")
-    WELLBEING = ("Driver fatigue, attention, emotional state, "
-                 "physical state, or comfort")
+class SkillScope(str, Enum):
+    NONE = "none"
+    DRIVING = "driving"  # "Driving, navigation, vehicle state, road conditions, safety, or driving coaching"
+    WELLBEING = "wellbeing"  # "Driver fatigue, attention, emotional state, physical state, or comfort"
 
 class InterventionType(str, Enum):
     NONE = "No assistant intervention is useful or appropriate."

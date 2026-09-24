@@ -20,7 +20,6 @@ class KnowledgeManager:
     _SPEED_KEY = "VehicleMotion.speed"
     _SPEED_LIMIT_KEY = "DetectedObjects.traffic_signs.speed_limit"
     _SPEED_STATUS_KEY = "VehicleMotion.speed_status"
-    event_skill_map: dict[str, List[SkillType]] = {}
     _BOOLEAN_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[bool], str]] = {
         ("LaneTracing", "lane_crossing_left"): lambda value: (
             "The driver is crossing the lane to the left."

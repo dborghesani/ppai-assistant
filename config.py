@@ -40,7 +40,6 @@ class ConfigAssistant:
     # Text-to-speech (Kyutai TTS, Delayed Streams Modeling)
     tts_enabled: bool = False
     tts_hf_repo: str = "kyutai/tts-1.6b-en_fr"  # tts-0.75b-en-public English-only model
-    tts_voice: str = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
     tts_device: str = "cuda"
     tts_n_q: int = 16
     tts_cfg_coef: float = 3.0

@@ -2,7 +2,6 @@
 from enum import Enum
 import enum
 
-
 class SkillType(Enum):
     CONVERSATION = "conversation"
     DRIVER_HEALTH = "driver_health"

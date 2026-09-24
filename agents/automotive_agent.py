@@ -14,7 +14,7 @@ from voice.tts_manager import TTSManager
 
 logger = structlog.get_logger()
 
-from agents.agents_dataclasses import Urgency, UrgencyType
+from agents.agents_dataclasses import UrgencyType
 from agents.laya_agent import LayaAgent
 
 

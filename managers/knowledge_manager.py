@@ -7,7 +7,7 @@ from config import ConfigAssistant
 from data import assistant_dataclasses
 from data.database_manager import DatabaseManager
 from data.events import CarEvent
-from managers.skill_manager import SkillType
+from agents.agents_dataclasses import SkillType
 
 
 @dataclass(frozen=True)
@@ -365,10 +365,9 @@ class KnowledgeManager:
         return None
 
     @classmethod
-    def _field_skills(cls, name: str, measure: str) -> tuple[str, ...]:
+    def _field_skills(cls, name: str, measure: str) -> tuple[SkillType, ...]:
         metadata = cls._knowledge_metadata(name, measure) or {}
-        skills = metadata.get("skills", ())
-        return tuple(skill.value if isinstance(skill, SkillType) else skill for skill in skills)
+        return tuple(metadata.get("skills", ()))
 
     def _is_significant_change(
         self,
@@ -417,7 +416,7 @@ class KnowledgeManager:
         if self.opt.use_laya:
             await self.knowledge_event_queue.put(
                 CarEvent(
-                    skill="vehicle_assistance",
+                    skill=SkillType.NONE,
                     event_name="knowledge_updated",
                     event_value=dict(changes),
                     context=list(self.context.values()),
@@ -432,7 +431,7 @@ class KnowledgeManager:
                 continue
             # management of specific derived knowledge
             if key == self._SPEED_STATUS_KEY:
-                skills = (SkillType.NAVIGATION_AND_COACHING.value,)
+                skills = (SkillType.DRIVING,)
             else:
                 skills = self._field_skills(name, measure)
             for skill in skills:

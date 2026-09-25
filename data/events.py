@@ -1,20 +1,19 @@
 from typing import Any
+from agents.agents_dataclasses import SkillType
 from datetime import datetime
 
 class CarEvent:
-    skill: str
+    skill: SkillType
     event_name: str
     event_value: Any
     context: list[str]
     timestamp: datetime
     user_input: str
 
-    def __init__(self, skill: str, event_name: str, event_value: Any, 
+    def __init__(self, skill: SkillType, event_name: str, event_value: Any, 
                  context: list[str],
-                 user_input: str = "",
-                 skill_scope: str | None = None):
+                 user_input: str = ""):
         self.skill = skill
-        self.skill_scope = skill_scope
         self.event_name = event_name
         self.event_value = event_value
         self.context = list(context)

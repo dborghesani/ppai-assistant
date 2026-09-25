@@ -5,7 +5,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "main",
+            "name": "main_laya",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
@@ -22,7 +22,30 @@
                 "tts_enabled=True",
                 "stt_enabled=True",
                 "is_socket_enabled=False",
-                "use_laya=True"
+                "use_laya=True",
+                "laya_custom_model=models/laya_automotive_typed_decisions_50k"
+            ],
+        },
+        {
+            "name": "main_llm",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "console": "integratedTerminal",
+            "env": {
+                "OPENAI_API_KEY": "fake",
+            },
+            "args": [
+                //"ollama_llm=ollama/qwen3.5:4b",
+                //"ollama_llm=ollama/qwen2.5:7b-instruct",
+                //"data_replay_folder=${workspaceFolder}/../Dataset/assistant/json_output_20260310_113315",
+                "mqtt_enabled=True",
+                "mqtt_embedded_broker=True",
+                "tts_enabled=True",
+                "stt_enabled=True",
+                "is_socket_enabled=False",
+                "use_laya=False",
+                //"laya_custom_model=models/laya_automotive_typed_decisions_50k"
             ],
         },
         {

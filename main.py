@@ -30,6 +30,9 @@ logging.basicConfig(level=logging.INFO)
 # Silence noisy third-party libraries
 logging.getLogger("transitions").setLevel(logging.WARNING)
 logging.getLogger("amqtt").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 structlog.configure(
     wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),

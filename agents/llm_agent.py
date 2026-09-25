@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 import structlog
-from agents.agents_dataclasses import Urgency, ActionType, UrgencyType
+from agents.agents_dataclasses import ActionType, UrgencyType
 from data.events import CarEvent
 from managers.skill_manager import SkillType
 from crewai import LLM, Agent, Crew, Process, Task
@@ -44,46 +44,7 @@ class LLMAgent:
         self.agent = agent
         self.recent_notifications: list[dict] = []
         self.minimum_urgency = UrgencyType.MEDIUM
-        self.urgency_ranks = {
-            UrgencyType.NONE: 0,
-            UrgencyType.LOW: 1,
-            UrgencyType.MEDIUM: 2,
-            UrgencyType.HIGH: 3,
-            UrgencyType.CRITICAL: 4,
-        }
-        self.actions_by_skill = {
-            SkillType.DRIVER_HEALTH: (
-                ActionType.NONE,
-                ActionType.SUGGEST,
-                ActionType.WARN,
-                ActionType.INCREASE_TEMPERATURE,
-                ActionType.DECREASE_TEMPERATURE,
-                ActionType.FIND_REST_AREA,
-                ActionType.ENABLE_AC,
-                ActionType.DISABLE_AC,
-            ),
-            SkillType.NAVIGATION_AND_COACHING: (
-                ActionType.NONE,
-                ActionType.SUGGEST,
-                ActionType.WARN,
-                ActionType.LOCK_DOORS,
-                ActionType.UNLOCK_DOORS,
-                ActionType.START_NAVIGATION,
-                ActionType.FIND_REST_AREA,
-                ActionType.ENABLE_FOG_LIGHTS,
-                ActionType.DISABLE_FOG_LIGHTS,
-                ActionType.ENABLE_NIGHT_LIGHTS,
-                ActionType.DISABLE_NIGHT_LIGHTS,
-            ),
-            SkillType.PROACTIVE_SUGGESTIONS: (
-                ActionType.NONE,
-                ActionType.SUGGEST,
-                ActionType.WARN,
-                ActionType.START_NAVIGATION,
-                ActionType.FIND_REST_AREA,
-            ),
-        }
-
+        
         agent = Agent(
             role="In-Vehicle Personal Assistant",
             goal=(
@@ -210,7 +171,7 @@ class LLMAgent:
     ) -> tuple[bool, str]:
         """Deterministic safety filter: prevent repeating duplicate or same-measure notifications within cooldown."""
         now = time.time()
-        current_rank = self.urgency_ranks.get(urgency, 1)
+        current_rank = UrgencyType(urgency).rank
 
         norm_message = message.strip().lower()
 
@@ -223,7 +184,7 @@ class LLMAgent:
 
             prev_norm_msg = prev.get("message", "").strip().lower()
             prev_urgency_str = prev.get("urgency", "none").lower()
-            prev_rank = self.urgency_ranks.get(UrgencyType(prev_urgency_str), 1)
+            prev_rank = UrgencyType(prev_urgency_str).rank
 
             # 1. Exact or near-exact identical message within cooldown
             if (
@@ -249,7 +210,7 @@ class LLMAgent:
             ):
                 if (
                     current_rank <= prev_rank
-                    and current_rank < self.urgency_ranks[UrgencyType.HIGH]
+                    and current_rank < UrgencyType(UrgencyType.HIGH).rank
                 ):
                     shared = ", ".join(sorted(measures & prev_measures))
                     return (
@@ -291,8 +252,9 @@ class LLMAgent:
             skill = None
             skill_instructions = "No additional skill-specific instructions."
 
-        actions = self.actions_by_skill.get(skill, (ActionType.NONE,))
-        available_actions = "".join(f"{action.name}\n- {action.value}\n\n" for action in actions)
+        available_actions = "".join(
+            f"{action.name}\n- {action.description}\n\n" for action in ActionType
+        )
 
         inputs = {
             "skill_instructions": skill_instructions,

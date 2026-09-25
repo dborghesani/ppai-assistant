@@ -116,7 +116,7 @@ class VehicleBridge:
         if not text:
             return
         event = CarEvent(
-            skill=SkillType.CONVERSATION.value,
+            skill=SkillType.CONVERSATION,
             event_name="user_input",
             event_value=text,
             context=list(self.knowledge_manager.context.values()),

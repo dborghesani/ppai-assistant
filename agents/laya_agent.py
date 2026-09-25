@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import laya
@@ -10,10 +11,9 @@ import structlog
 from agents.agents_dataclasses import (
     ActionType,
     InterventionType,
-    SkillScope,
+    SkillType,
     SuggestionType,
     UrgencyType,
-    VoiceType,
 )
 from data.events import CarEvent
 
@@ -25,16 +25,21 @@ class LayaAgent:
     def __init__(self, agent: "AutomotiveAgent"):
         self.agent = agent
         self.logger = structlog.get_logger()
+        custom_model = getattr(agent.opt, "laya_custom_model", None)
+        if custom_model:
+            model_source = Path(custom_model).expanduser()
+            if not model_source.is_dir():
+                raise FileNotFoundError(
+                    f"Custom Laya model directory does not exist: {model_source}"
+                )
+            model_subfolder = None
+        else:
+            model_source = "convaiinnovations/laya"
+            model_subfolder = "typed-decisions"
         self.laya_td = laya.load(
-            "convaiinnovations/laya", subfolder="typed-decisions"
+            model_source,
+            subfolder=model_subfolder,
         )
-        self.urgency_ranks = {
-            UrgencyType.NONE: 0,
-            UrgencyType.LOW: 1,
-            UrgencyType.MEDIUM: 2,
-            UrgencyType.HIGH: 3,
-            UrgencyType.CRITICAL: 4,
-        }
         self.minimum_urgency = UrgencyType.MEDIUM
 
     def format_laya_answers(self, answers: dict, precision: int = 3) -> list[str]:
@@ -86,20 +91,20 @@ class LayaAgent:
 
         return lines
 
+    @staticmethod
+    def _criteria(enum_type: type[SkillType]) -> dict[str, str]:
+        return {
+            member.name.lower(): member.description
+            for member in enum_type
+        }
+
     async def process_event(self, event: CarEvent) -> None:
         self.logger.info(f">>> [LAYA] Processing event: {event.event_value}")
         laya_start = time.time()
-        # Align the Laya input to a knowledge-oriented state, similar to the
-        # generated training dataset: facts are exposed as a list of knowledge items,
-        # while skill scope remains unset until it is aligned with the dataset.
-        skill_scope = SkillScope.NONE.value
-
+        # Keep the inference payload identical to the fine-tuning dataset schema.
         state = {
-            "event": event.event_value,
-            "state": {
-                "knowledge": list(event.context or []),
-                "skill_scope": skill_scope,
-            },
+            "knowledge": list(event.context or []),
+            "skill_scope": SkillType.NONE.value,
         }
         laya_questions = {
             "urgency": {
@@ -107,50 +112,31 @@ class LayaAgent:
                     "How urgent is an intervention for the current automotive situation?"
                 ),
                 "type": "choice",
-                "criteria": {k.name.lower(): k.value for k in UrgencyType},
+                "criteria": self._criteria(UrgencyType),
             },
 
-            "voice": {
-                "instructions": (
-                    "What should the voice response be for the current situation?"
-                ),
+            "intervention_type": {
+                "instructions": "What type of intervention is appropriate?",
                 "type": "choice",
-                "criteria": {k.name.lower(): k.value for k in VoiceType},
-            },
-
-            "intervention": {
-                "instructions": (
-                    "What type of intervention is most appropriate for the current situation?"
-                ),
-                "type": "choice",
-                "criteria": {k.name.lower(): k.value for k in InterventionType},
+                "criteria": self._criteria(InterventionType),
             },
 
             "skill": {
-                "instructions": (
-                    "Which assistant skill is most appropriate for handling the situation?"
-                ),
+                "instructions": "Which assistant skill should handle the situation?",
                 "type": "choice",
-                "criteria": {k.name.lower(): k.value for k in SkillScope},
+                "criteria": self._criteria(SkillType),
             },
 
             "action": {
-                "instructions": (
-                    "Which direct action should be executed? "
-                    "Select none when intervention is not act."
-                ),
+                "instructions": "Which direct action should be executed? Select none unless intervention_type is act.",
                 "type": "choice",
-                "criteria": {k.name.lower(): k.value for k in ActionType},
+                "criteria": self._criteria(ActionType),
             },
 
-            "suggestion": {
-                "instructions": (
-                    "What semantic suggestion should be communicated to the driver? "
-                    "Select none when intervention is not suggest. "
-                    "Select the intent of the suggestion, not the final driver-facing wording."
-                ),
+            "suggestion_type": {
+                "instructions": "Which semantic suggestion should be communicated? Select none unless intervention_type is suggest.",
                 "type": "choice",
-                "criteria": {k.name.lower(): k.value for k in SuggestionType},
+                "criteria": self._criteria(SuggestionType),
             },
         }
 
@@ -164,20 +150,12 @@ class LayaAgent:
             f">>> finished processing intervention analysis in {laya_elapsed:.3f} seconds"
         )
 
-        selected_voice = answers.get("voice", {}).get("choice", "neutral")
-        if self.agent.tts_manager is not None and hasattr(
-            self.agent.tts_manager, "set_voice"
-        ):
-            if self.agent.tts_manager._current_voice != selected_voice:
-                self.agent.tts_manager.set_voice(selected_voice)
-
         # LLM output will be generated based on this decision.
         decision = {
             "urgency": answers["urgency"]["choice"],
-            "voice": selected_voice,
-            "intervention": answers["intervention"]["choice"],
+            "intervention": answers["intervention_type"]["choice"],
             "action": answers["action"]["choice"],
-            "suggestion": answers["suggestion"]["choice"],
+            "suggestion": answers["suggestion_type"]["choice"],
             "skill": answers["skill"]["choice"],
         }
 
@@ -186,7 +164,7 @@ class LayaAgent:
         # Skip decisions below the urgency selected in the UI.
         if (
             intervention == InterventionType.NONE
-            or self.urgency_ranks[urgency] < self.urgency_ranks[self.minimum_urgency]
+            or urgency.rank < self.minimum_urgency.rank
         ):
             return
 

@@ -86,3 +86,4 @@ class ConfigAssistant:
 
     # LLM or LAYA
     use_laya: bool = False
+    laya_custom_model: str | None = None

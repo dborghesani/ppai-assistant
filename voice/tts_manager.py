@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import structlog
-from agents.agents_dataclasses import VoiceType
+from agents.agents_dataclasses import ToneType
 from voice import moshi_compat  # noqa: F401  # must run before importing Moshi
 from voice.gpu_lock import GPU_LOCK
 
@@ -35,12 +35,12 @@ DEFAULT_VOICE = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
 # base Kyutai voice pack, so we keep a verified fallback and only use custom files
 # when they exist on disk.
 CUSTOM_VOICES_DIR = Path(__file__).resolve().parent / "custom"
-DEFAULT_VOICES_BY_TYPE: dict[VoiceType, str] = {
-    VoiceType.CALM: DEFAULT_VOICE,
-    VoiceType.ENTHUSIASTIC: DEFAULT_VOICE,
-    VoiceType.SERIOUS: DEFAULT_VOICE,
-    VoiceType.EMPATIC: DEFAULT_VOICE,
-    VoiceType.WHISPER: DEFAULT_VOICE,
+DEFAULT_VOICES_BY_TYPE: dict[ToneType, str] = {
+    ToneType.CALM: DEFAULT_VOICE,
+    ToneType.ENTHUSIASTIC: DEFAULT_VOICE,
+    ToneType.SERIOUS: DEFAULT_VOICE,
+    ToneType.EMPATHETIC: DEFAULT_VOICE,
+    ToneType.DISCREET: DEFAULT_VOICE,
 }
 
 
@@ -93,7 +93,7 @@ class TTSManager:
             self._model = TTSModel.from_checkpoint_info(
                 checkpoint_info, n_q=n_q, temp=0.6, device=device
             )
-            self.set_voice(VoiceType.CALM)
+            self.set_voice(ToneType.CALM)
             logger.info("Kyutai TTS model loaded successfully")
         except Exception as e:
             logger.warning(
@@ -106,8 +106,8 @@ class TTSManager:
         self._warmup()
 
     @staticmethod
-    def resolve_voice_name(voice: str | VoiceType | None) -> str:
-        if isinstance(voice, VoiceType):
+    def resolve_voice_name(voice: str | ToneType | None) -> str:
+        if isinstance(voice, ToneType):
             resolved = DEFAULT_VOICES_BY_TYPE.get(voice)
             if resolved and Path(resolved).exists():
                 return resolved
@@ -115,8 +115,8 @@ class TTSManager:
 
         if isinstance(voice, str):
             normalized = voice.strip().lower()
-            for voice_type, default_voice in DEFAULT_VOICES_BY_TYPE.items():
-                if normalized == voice_type.value.lower():
+            for tone_type, default_voice in DEFAULT_VOICES_BY_TYPE.items():
+                if normalized == tone_type.value.lower():
                     if Path(default_voice).exists():
                         return default_voice
                     return DEFAULT_VOICE
@@ -127,7 +127,7 @@ class TTSManager:
 
         return DEFAULT_VOICE
 
-    def set_voice(self, voice: str | VoiceType | None) -> bool:
+    def set_voice(self, voice: str | ToneType | None) -> bool:
         """Switch the active TTS voice at runtime for multi-speaker models."""
         if not self.enabled or self._model is None:
             return False

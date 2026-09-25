@@ -1,22 +1,15 @@
-
-from enum import Enum
-import enum
-
-class SkillType(Enum):
-    CONVERSATION = "conversation"
-    DRIVER_HEALTH = "driver_health"
-    NAVIGATION_AND_COACHING = "navigation_and_coaching"
-    PROACTIVE_SUGGESTIONS = "proactive_suggestions"
-    VEHICLE_STATUS = "vehicle_status"
+from agents.agents_dataclasses import SkillType
 
 class SkillManager:
 
     def __init__(self):
         self.skill_map: dict[SkillType, str] = {}
-        for skill in enum.EnumMeta.__iter__(SkillType):
+        for skill in SkillType:
             self.skill_map[skill] = self.load(skill)
         
     def load(self, skill_name: SkillType) -> str:
+        if skill_name is SkillType.NONE:
+            return ""
         path = f"skills/{skill_name.value}.md"
         with open(path) as f:
             return f.read()

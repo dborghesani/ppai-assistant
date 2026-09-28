@@ -140,9 +140,8 @@ Use the three intervention labels in the contract above.
 
 ### SKILL
 Define a scope for the potential skills the assistant should have to face the situation.
-Use the four skill labels in the contract above. `skill` is the assistant
-decision; `state["skill_scope"]` is a separate input field and may only be
-`none`, `driving`, or `wellbeing`.
+Use the four skill labels in the contract above. The `skill` label must be
+inferred from the textual knowledge and the complete scenario.
 
 ### ACTION
 Defines what the assistant should actuate if an action is required.
@@ -170,6 +169,47 @@ If intervention_type is suggest:
 - suggestion_type must not be none
 - skill must be driving or wellbeing
 Do not create entries that violate these rules.
+
+### LABEL IDENTIFIABILITY AND EVIDENCE
+
+Derive every target exclusively from the information observable in
+`state["knowledge"]`. Do not use hidden scenario-generation variables, scenario
+IDs, author intent, or facts omitted from the serialized state.
+
+For each row, check that the knowledge supports the complete set of target
+decisions: urgency, tone, intervention_type, skill, action, and
+suggestion_type. Each selected action or recommendation must address the
+condition evidenced by the knowledge and be appropriate in the full context.
+Do not select a label merely to increase its frequency or satisfy a coverage
+target.
+
+The intended labels must be identifiable from the serialized knowledge. If
+materially different labels would be equally reasonable given the same
+knowledge, either add an allowed knowledge fact that distinguishes them or
+choose the least specific valid decision. Do not use arbitrary soft-label
+probabilities to disguise an ambiguous target.
+
+Apply this test to every domain and signal, including combinations of signals:
+for any two examples with the same or nearly identical knowledge, their target
+decisions should be the same unless a meaningful knowledge difference explains
+the change. Conversely, when one relevant fact changes and that change affects
+a decision, the target should reflect it. The state, not an unstated
+interpretation of a particular signal, is the complete evidence available to
+the model.
+
+### SKILL INFERENCE RULES
+
+The model must infer `skill` from knowledge and must not receive the answer as
+an input feature. Do not repeat the intended skill in the state, metadata, or
+scenario identifier.
+
+Choose `wellbeing` when the decisive evidence concerns fatigue, attention,
+emotion, physical state, driver activity, or driver comfort. Choose `driving`
+when the decisive evidence concerns speed, navigation, vehicle state, road
+conditions, traffic, visibility, lighting, lane behavior, or driving coaching.
+Choose `none` only when no intervention is needed or when the available
+knowledge does not support either skill. Shared evidence must be resolved by
+the event's decisive condition.
 
 ### CRITICAL SAFETY RULE
 Do not associate critical safety situations with autonomous safety-critical actions.
@@ -309,20 +349,8 @@ Use only the fields in the allowed knowledge catalog above. Each field is
 already assigned to `driving`, `wellbeing`, or both in that catalog; no source
 lookup or external schema is required.
 
-The generated row has one `state["skill_scope"]` value, not a list:
-- `none`
-- `driving`
-- `wellbeing`
-
-Keep `skill_scope="none"` as the conservative default when the scenario does
-not have one unambiguous scope. Do not infer a scope from `CarEvent.skill`:
-`vehicle_assistance` is routing metadata, not a Laya scope.
-
-When generating a scoped scenario, include knowledge fields relevant to that
-scope and shared fields assigned to both scopes. Do not expose a field that is
-exclusive to another scope. For mixed evidence, either make the scenario
-explicitly shared or use `skill_scope="none"`; never invent a multi-valued
-scope because the current Laya training schema expects one string.
+Do not place the intended skill, source field scope, or routing metadata in the
+state. The skill must remain an output inference problem.
 
 Use only this catalog. Do not introduce legacy skill names such as
 `driver_health` or `navigation_and_coaching`.
@@ -336,15 +364,12 @@ Every `state` value must have exactly this shape:
 	"knowledge": [
 		"Driving visibility is low.",
 		"The current weather is foggy."
-	],
-	"skill_scope": "driving"
+	]
 }
 ```
 
-`skill_scope` is one string: `none`, `driving`, or `wellbeing`. It is not a
-list. Use `none` when the scope is unknown or ambiguous. Do not include an
-extra `event` key, raw telemetry object, dataclass name, field path, or
-`CarEvent.skill` in the state.
+Do not include an extra `event` key, raw telemetry object, dataclass name, field
+path, intended skill, or routing metadata in the state.
 
 Every `questions` value must contain exactly these six keys:
 
@@ -530,6 +555,13 @@ very high fatigue
 
 Generate boundary cases and contrastive examples where changing one relevant condition changes urgency or intervention.
 
+For every contrastive pair, make sure the changed knowledge fact is sufficient
+to explain the changed target. Keep unrelated decisions the same unless the
+changed fact logically affects them. Do not generate near-duplicate rows with
+different gold labels unless the knowledge difference explains the label
+difference. Apply this consistently to every signal and domain, not only to
+the examples listed above.
+
 Examples:
 
 - high fatigue on a stationary vehicle should not be treated like high fatigue at highway speed
@@ -538,10 +570,78 @@ Examples:
 - fog lights should not be enabled only because the weather label is Foggy if visibility is still good
 - an unlocked vehicle in a no-risk area while driving should not always trigger the same decision as an unlocked stationary vehicle in a high-risk area
 
+### DEBUG DESCRIPTION
+
+Every dataset row must contain a top-level `description` field.
+
+`description` is provided exclusively for debugging, inspection, and dataset
+quality analysis. It is not part of the Laya input and must never be included
+in `state`, `questions`, or any model input during training or inference.
+
+The description must briefly explain, in natural English, why the observable
+knowledge supports the selected decisions.
+
+It must explicitly justify all six decisions:
+
+- urgency
+- tone
+- intervention_type
+- skill
+- action
+- suggestion_type
+
+The explanation must be derived exclusively from facts observable in
+`state["knowledge"]` and from the decision contract. Do not use hidden
+generation variables, scenario identifiers, latent factors, intended labels,
+or information that is not present in the serialized knowledge.
+
+The description should explain the causal reasoning behind the decisions,
+rather than merely restating the selected labels.
+
+For example:
+
+"The driver shows very high fatigue and low attention while driving at highway
+speed at night. This represents an immediate safety concern, so urgency is
+critical and a serious tone is appropriate. Because the risk concerns the
+driver's physical condition and attention, the relevant skill is wellbeing.
+The assistant should suggest rather than autonomously control the vehicle, so
+intervention_type is suggest and action is none. The appropriate suggestion is
+take_break because the driver should stop at the next safe opportunity."
+
+Avoid descriptions such as:
+
+"Urgency is critical, tone is serious, intervention is suggest, skill is
+wellbeing, action is none, and suggestion is take_break."
+
+Such descriptions only repeat the labels and do not explain why they follow
+from the knowledge.
+
+For `none` decisions, explain briefly why the observed conditions do not
+justify intervention. For example:
+
+"The driver has good attention, low fatigue, and no relevant safety or comfort
+issue is present. No intervention is therefore warranted, so urgency,
+intervention, skill, action, and suggestion remain none. A discreet tone is
+appropriate because no active communication is required."
+
+For `act` decisions, explicitly identify the observable condition that makes
+the selected reversible action appropriate.
+
+For `suggest` decisions, explicitly identify the combination of observed
+conditions that motivates the recommendation.
+
+The description must remain concise, preferably 2-5 sentences.
+
+`description` is diagnostic metadata only. It must not be used as a training
+feature, must not influence the state representation, and must not be included
+when constructing Laya training sequences.
+
+Generate description only after state["knowledge"] and all six gold decisions have been finalized. The description must explain an already evidence-grounded decision and must never be used to determine, modify, or validate the target labels themselves.
+
 DATASET FORMAT
 
 Each row must contain at least:
-
+ 
 - id
 - workflow
 - split
@@ -549,6 +649,7 @@ Each row must contain at least:
 - questions
 - gold
 - factors
+- description
 - n_questions
 - label_agreement
 
@@ -596,23 +697,23 @@ Do not use one-hot probabilities exclusively. Use plausible soft labels with lim
 
 DISTRIBUTION
 
-Balance urgency exactly:
-
-- none: 10,000
-- low: 10,000
-- medium: 10,000
-- high: 10,000
-- critical: 10,000
+Aim for broad urgency coverage, but do not force exact class counts by
+mislabeling or weakening scenario evidence. Safety and evidence-grounding take
+priority over a perfectly balanced histogram. Report the achieved class
+distribution.
 
 Avoid excessive duplication.
 
 Ensure that:
 
-- every action label is represented in train, validation and test
-- every suggestion_type label is represented in train, validation and test
+- action and suggestion labels are distributed across splits when supported by
+	valid, explicit knowledge; never fabricate a scenario to satisfy label
+	coverage
 - each relevant emotion, activity, road type, road condition, weather, time of day, traffic level and area-risk level is represented in every split
 - suggestion examples substantially outnumber direct ACT examples
 - negative and no-intervention examples are diverse
+- every non-`none` action and suggestion has traceable supporting knowledge
+- actions are not correlated with unrelated event types due to balancing
 
 SPLIT QUALITY
 
@@ -636,6 +737,10 @@ Before creating the ZIP, perform and report automated validation for:
 - probability sums equal to 1 within tolerance
 - target label has maximum probability
 - intervention/action/suggestion consistency
+- every non-`none` action and suggestion is supported by explicit knowledge
+- no action is assigned solely to satisfy class-balance or coverage targets
+- ambiguous scenarios use `none` rather than arbitrary specific labels
+- skill labels are inferable from knowledge without an explicit scope feature
 - no raw float perception values in textual knowledge
 - categorical traffic values only
 - all required action labels represented in every split
@@ -643,5 +748,9 @@ Before creating the ZIP, perform and report automated validation for:
 - all Parquet and JSONL files readable
 - ZIP integrity
 - SHA-256 manifest correctness
-
-Include the validation results and class distributions in
+- every row contains a non-empty description
+- every description explains all six selected decisions
+- descriptions are grounded exclusively in state["knowledge"]
+- descriptions do not introduce facts absent from state["knowledge"]
+- descriptions explain the rationale rather than merely restating labels
+- description is never embedded in state or questions

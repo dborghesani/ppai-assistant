@@ -23,7 +23,7 @@
                 "stt_enabled=True",
                 "is_socket_enabled=False",
                 "use_laya=True",
-                "laya_custom_model=models/laya_automotive_typed_decisions_50k"
+                "laya_custom_model=models/laya_automotive_typed_decisions_50k_v2"
             ],
         },
         {
@@ -46,6 +46,17 @@
                 "is_socket_enabled=False",
                 "use_laya=False",
                 //"laya_custom_model=models/laya_automotive_typed_decisions_50k"
+            ],
+        },
+        {
+            "name": "generate_dataset",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/generate_automotive_dataset.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--out-dir", "${workspaceFolder}/../laya/dataset",
+                "--version", "1.0"
             ],
         },
         {

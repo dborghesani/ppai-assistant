@@ -13,9 +13,11 @@ from agents.agents_dataclasses import (
     InterventionType,
     SkillType,
     SuggestionType,
+    ToneType,
     UrgencyType,
 )
 from data.events import CarEvent
+from managers.knowledge_manager import KnowledgeManager
 
 if TYPE_CHECKING:
     from agents.automotive_agent import AutomotiveAgent
@@ -98,43 +100,62 @@ class LayaAgent:
             for member in enum_type
         }
 
+    @staticmethod
+    def _skill_scope_for_event(event: CarEvent) -> str:
+        if not isinstance(event.event_value, dict):
+            return SkillType.NONE.value
+
+        for key in event.event_value:
+            name, separator, measure = key.partition(".")
+            if not separator:
+                continue
+            skills = KnowledgeManager._field_skills(name, measure)
+            if skills:
+                return skills[0].value
+
+        return SkillType.NONE.value
+
     async def process_event(self, event: CarEvent) -> None:
         self.logger.info(f">>> [LAYA] Processing event: {event.event_value}")
         laya_start = time.time()
         # Keep the inference payload identical to the fine-tuning dataset schema.
         state = {
             "knowledge": list(event.context or []),
-            "skill_scope": SkillType.NONE.value,
+            #"skill_scope": self._skill_scope_for_event(event),
         }
         laya_questions = {
             "urgency": {
-                "instructions": (
-                    "How urgent is an intervention for the current automotive situation?"
-                ),
+                "instructions": "Define how urgent the situation is.",
                 "type": "choice",
                 "criteria": self._criteria(UrgencyType),
             },
 
+            "tone": {
+                "instructions": "Define the communication tone appropriate for the situation.",
+                "type": "choice",
+                "criteria": self._criteria(ToneType),
+            },
+
             "intervention_type": {
-                "instructions": "What type of intervention is appropriate?",
+                "instructions": "Decide what the assistant should do.",
                 "type": "choice",
                 "criteria": self._criteria(InterventionType),
             },
 
             "skill": {
-                "instructions": "Which assistant skill should handle the situation?",
+                "instructions": "Define a scope for the potential skills the assistant should have to face the situation.",
                 "type": "choice",
                 "criteria": self._criteria(SkillType),
             },
 
             "action": {
-                "instructions": "Which direct action should be executed? Select none unless intervention_type is act.",
+                "instructions": "Define what the assistant should actuate if an action is required.",
                 "type": "choice",
                 "criteria": self._criteria(ActionType),
             },
 
             "suggestion_type": {
-                "instructions": "Which semantic suggestion should be communicated? Select none unless intervention_type is suggest.",
+                "instructions": "Define what the assistant should suggest vocally to the driver if a suggestion is required.",
                 "type": "choice",
                 "criteria": self._criteria(SuggestionType),
             },
@@ -153,6 +174,7 @@ class LayaAgent:
         # LLM output will be generated based on this decision.
         decision = {
             "urgency": answers["urgency"]["choice"],
+            "tone": answers["tone"]["choice"],
             "intervention": answers["intervention_type"]["choice"],
             "action": answers["action"]["choice"],
             "suggestion": answers["suggestion_type"]["choice"],

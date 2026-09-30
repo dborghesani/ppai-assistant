@@ -62,9 +62,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .brand-mark i:nth-child(3) { margin-top: 12px; }
 .drive-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .status-dot { --tone-color: #ffffff; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 50%; background: #fff; box-shadow: 0 0 16px rgba(255,255,255,.34); transition: background-color .8s ease, box-shadow .8s ease, transform .5s ease, border-radius .5s ease, width .45s ease, height .45s ease, flex-basis .45s ease; }
-.status-dot.connecting { background: #929da3; box-shadow: 0 0 12px rgba(146,157,163,.35); }
+.status-dot.connecting,
+.status-dot.offline {
+  background: #929da3;
+  border-radius: var(--offline-radius, 76% 24% 38% 62% / 36% 67% 33% 64%);
+  box-shadow: 0 8px 14px -7px rgba(210,218,224,.55);
+  transform: rotate(var(--offline-tilt, 0deg)) skewX(var(--offline-skew, 0deg)) scale(var(--offline-wide, 1.7), var(--offline-flat, .3));
+  transform-origin: center bottom;
+}
 .status-dot.connected { background: #fff; }
-.status-dot.offline { background: #929da3; box-shadow: 0 0 12px rgba(146,157,163,.35); }
 .status-dot.assistant-talking { width: 48px; height: 48px; flex-basis: 48px; animation: voice-wobble 1.15s ease-in-out infinite; }
 .status-dot.assistant-talking[data-tone="calm"] { --tone-color: #78baff; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
 .status-dot.assistant-talking[data-tone="enthusiastic"] { --tone-color: #ffd166; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }

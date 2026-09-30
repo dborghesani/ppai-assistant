@@ -108,6 +108,8 @@ let activeTab = "driver";
 let activeScenario = null;
 let conversationActive = false;
 let connectionState = "connecting";
+let socketWasOpen = false;
+let connectionTimer = null;
 let assistantStatus = "idle";
 let speakingTone = null;
 let actPulseTimer = null;
@@ -122,24 +124,58 @@ function escapeHtml(value) {
 }
 
 function setConnection(state) {
+  clearTimeout(connectionTimer);
+  if (state === "connected") {
+    socketWasOpen = true;
+    if (connectionState === "connected") return;
+    connectionTimer = setTimeout(() => {
+      connectionState = "connected";
+      renderDriveStatus();
+    }, 2500);
+    return;
+  }
+  if (socketWasOpen) {
+    randomizeOfflineShape(document.querySelector("#connection-dot"));
+    socketWasOpen = false;
+  }
+  if (connectionState === state) return;
   connectionState = state;
   renderDriveStatus();
 }
 
+function randomizeOfflineShape(dot) {
+  const random = (min, max) => min + Math.random() * (max - min);
+  const horizontalRadii = Array.from({ length: 4 }, () => random(18, 86));
+  const verticalRadii = Array.from({ length: 4 }, () => random(24, 78));
+  dot.style.setProperty(
+    "--offline-radius",
+    `${horizontalRadii.map(value => `${value}%`).join(" ")} / ${verticalRadii.map(value => `${value}%`).join(" ")}`
+  );
+  dot.style.setProperty("--offline-tilt", "0deg");
+  dot.style.setProperty("--offline-skew", "0deg");
+  dot.style.setProperty("--offline-wide", random(1.55, 1.9));
+  dot.style.setProperty("--offline-flat", random(.24, .33));
+}
+
 function renderDriveStatus() {
   const dot = document.querySelector("#connection-dot");
-  const visualStatus = showActPulse && assistantStatus === "idle"
-    ? "act"
-    : assistantStatus === "background_task_running"
-      ? "background"
-      : assistantStatus;
+  const disconnected = connectionState !== "connected";
+  const visualStatus = disconnected
+    ? "disconnected"
+    : showActPulse && assistantStatus === "idle"
+      ? "act"
+      : assistantStatus === "background_task_running"
+        ? "background"
+        : assistantStatus;
   dot.className = `status-dot ${connectionState} assistant-${visualStatus}`;
-  if (assistantStatus === "talking" && speakingTone) {
+  if (!disconnected && assistantStatus === "talking" && speakingTone) {
     dot.dataset.tone = speakingTone;
     dot.setAttribute("aria-label", `Assistant speaking, ${speakingTone} tone`);
   } else {
     delete dot.dataset.tone;
-    dot.setAttribute("aria-label", `Assistant ${visualStatus.replaceAll("_", " ")}`);
+    dot.setAttribute("aria-label", disconnected
+      ? connectionState === "offline" ? "Assistant reconnecting" : "Assistant connecting"
+      : `Assistant ${visualStatus.replaceAll("_", " ")}`);
   }
 }
 
@@ -408,4 +444,5 @@ bridge.on("conversationModeChanged", data => {
 });
 
 renderControls(activeTab);
+randomizeOfflineShape(document.querySelector("#connection-dot"));
 bridge.connect();

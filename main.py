@@ -1,12 +1,15 @@
 import asyncio
 import json
 import logging
+import shutil
+import subprocess
 
 # fake openAI api key
 import os
 import webbrowser
 from datetime import datetime, timezone
 from logging import warning
+from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -38,6 +41,54 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
+
+
+def _browser_already_running() -> bool:
+    if not Path("/proc").is_dir():
+        return False
+    browser_processes = {"msedge", "firefox", "chrome", "chromium", "chromium-browser"}
+    for process_dir in Path("/proc").iterdir():
+        if not process_dir.name.isdigit():
+            continue
+        try:
+            process_name = (process_dir / "comm").read_text().strip()
+        except OSError:
+            continue
+        if process_name in browser_processes:
+            return True
+    return False
+
+
+def _open_browser_tab(url: str) -> None:
+    if _browser_already_running():
+        logger.info("Browser already running; reusing its existing window", url=url)
+        return
+
+    browser = next(
+        (
+            path
+            for name in (
+                "microsoft-edge-stable",
+                "microsoft-edge",
+                "google-chrome",
+                "chromium",
+                "chromium-browser",
+                "firefox",
+            )
+            if (path := shutil.which(name)) is not None
+        ),
+        None,
+    )
+    if browser is None:
+        webbrowser.open(url, new=0)
+        return
+    subprocess.Popen(
+        [browser, "--new-tab", url],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def _load_ollama_model(opt: ConfigAssistant) -> str:
@@ -184,7 +235,7 @@ async def main(opt: ConfigAssistant):
     )
     await web_ui.start()
     if opt.web_ui_open_browser:
-        await asyncio.to_thread(webbrowser.open, web_ui.url)
+        await asyncio.to_thread(_open_browser_tab, web_ui.url)
 
     # run everything concurrently
     tasks = [

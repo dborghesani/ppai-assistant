@@ -39,6 +39,12 @@ class VehicleBridge:
         self.agent.on_response_update = lambda message: self._emit(
             "responseUpdated", message
         )
+        self.agent.on_speaking_tone_changed = lambda tone: self._emit(
+            "speakingToneChanged", tone
+        )
+        self.agent.on_assistant_status_changed = lambda status: self._emit(
+            "assistantStatusChanged", status.value
+        )
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:

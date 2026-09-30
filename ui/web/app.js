@@ -107,6 +107,11 @@ const conversationButton = document.querySelector("#conversation-toggle");
 let activeTab = "driver";
 let activeScenario = null;
 let conversationActive = false;
+let connectionState = "connecting";
+let assistantStatus = "idle";
+let speakingTone = null;
+let actPulseTimer = null;
+let showActPulse = false;
 let pendingAssistantMessage = null;
 let toastTimer;
 
@@ -117,10 +122,46 @@ function escapeHtml(value) {
 }
 
 function setConnection(state) {
+  connectionState = state;
+  renderDriveStatus();
+}
+
+function renderDriveStatus() {
   const dot = document.querySelector("#connection-dot");
-  const label = document.querySelector("#connection-label");
-  dot.className = `status-dot ${state === "connecting" ? "" : state}`;
-  label.textContent = state === "connected" ? "Assistant online" : state === "offline" ? "Reconnecting" : "Connecting";
+  const visualStatus = showActPulse && assistantStatus === "idle"
+    ? "act"
+    : assistantStatus === "background_task_running"
+      ? "background"
+      : assistantStatus;
+  dot.className = `status-dot ${connectionState} assistant-${visualStatus}`;
+  if (assistantStatus === "talking" && speakingTone) {
+    dot.dataset.tone = speakingTone;
+    dot.setAttribute("aria-label", `Assistant speaking, ${speakingTone} tone`);
+  } else {
+    delete dot.dataset.tone;
+    dot.setAttribute("aria-label", `Assistant ${visualStatus.replaceAll("_", " ")}`);
+  }
+}
+
+function setSpeakingTone(tone) {
+  speakingTone = tone;
+  renderDriveStatus();
+}
+
+function setAssistantStatus(status) {
+  assistantStatus = status;
+  if (status === "act") {
+    showActPulse = true;
+    clearTimeout(actPulseTimer);
+    actPulseTimer = setTimeout(() => {
+      showActPulse = false;
+      renderDriveStatus();
+    }, 760);
+  } else if (status !== "idle") {
+    showActPulse = false;
+    clearTimeout(actPulseTimer);
+  }
+  renderDriveStatus();
 }
 
 function showToast(message) {
@@ -357,6 +398,8 @@ bridge.on("ready", data => {
 });
 bridge.on("responseUpdated", data => updateAssistantMessage(data[0]));
 bridge.on("responseReceived", data => updateAssistantMessage(data[0], true));
+bridge.on("speakingToneChanged", data => setSpeakingTone(data[0]));
+bridge.on("assistantStatusChanged", data => setAssistantStatus(data[0]));
 bridge.on("userSpeechReceived", data => addMessage("user", data[0]));
 bridge.on("knowledgeUpdated", data => renderKnowledge(data[0]));
 bridge.on("conversationModeChanged", data => {

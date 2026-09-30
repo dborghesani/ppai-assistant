@@ -23,11 +23,11 @@ class UrgencyType(str, Enum):
         }[self]
 
 class ToneType(str, Enum):
-    CALM = "calm" # default
-    ENTHUSIASTIC = "enthusiastic"
-    SERIOUS = "serious"
-    EMPATHETIC = "empathetic"
-    DISCREET = "discreet"
+    CALM = "calm"  # UI: blue (#78baff)
+    ENTHUSIASTIC = "enthusiastic"  # UI: yellow (#ffd166)
+    SERIOUS = "serious"  # UI: coral red (#ff7770)
+    EMPATHETIC = "empathetic"  # UI: pink (#efa2c7)
+    DISCREET = "discreet"  # UI: periwinkle (#a9bcff)
 
     @property
     def description(self) -> str:
@@ -162,4 +162,25 @@ class SuggestionType(str, Enum):
             SuggestionType.SECURE_VEHICLE: "Recommend securing doors, trunk or another relevant vehicle state.",
             SuggestionType.PREPARE_FOR_WEATHER: "Recommend preparing for current or forecast weather.",
             SuggestionType.PREPARE_FOR_MANEUVER: "Recommend preparing for an upcoming exit, lane change or navigation event.",
+        }[self]
+
+class AssistantStatus(str, Enum):
+    IDLE = "idle"  # UI: stationary white ball (gray while connecting/reconnecting)
+    TALKING = "talking"  # UI: tone-colored organic wobble
+    ASK_PERMISSION_TO_TALK = "ask_permission_to_talk"  # UI: stationary white ball; no dedicated animation
+    ASK_PERMISSION_TO_ACT = "ask_permission_to_act"  # UI: stationary white ball; no dedicated animation
+    ACT = "act"  # UI: brief enlargement pulse, then returns to idle size
+    NOTIFY = "notify"  # UI: stationary white ball; no dedicated animation
+    BACKGROUND_TASK_RUNNING = "background_task_running"  # UI: vertically focused wobble
+
+    @property
+    def description(self) -> str:
+        return {
+            AssistantStatus.IDLE: "The assistant is idle.",
+            AssistantStatus.TALKING: "The assistant is talking.",
+            AssistantStatus.ASK_PERMISSION_TO_TALK: "The assistant is asking for permission to talk.",
+            AssistantStatus.ASK_PERMISSION_TO_ACT: "The assistant is asking for permission to act.",
+            AssistantStatus.ACT: "The assistant is performing an action.",
+            AssistantStatus.NOTIFY: "The assistant is notifying the user.",
+            AssistantStatus.BACKGROUND_TASK_RUNNING: "The assistant is running a background task.",
         }[self]

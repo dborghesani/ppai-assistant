@@ -10,6 +10,7 @@ import structlog
 
 from agents.agents_dataclasses import (
     ActionType,
+    AssistantStatus,
     InterventionType,
     SimpleInterventionType,
     SkillType,
@@ -219,6 +220,11 @@ class LayaAgent:
             decision["tone"] = answers["tone"]["choice"]
         if "skill" in answers:
             decision["skill"] = answers["skill"]["choice"]
+
+        try:
+            output_tone = ToneType(decision.get("tone", ToneType.CALM.value))
+        except ValueError:
+            output_tone = ToneType.CALM
     
         urgency = UrgencyType[decision["urgency"].upper()]
         # Skip decisions below the urgency selected in the UI.
@@ -305,6 +311,9 @@ class LayaAgent:
         displayed_response = ""
         sentence_buffer = ""
         stream = None
+        self.agent.set_assistant_status(AssistantStatus.TALKING)
+        if self.agent.on_speaking_tone_changed is not None:
+            self.agent.on_speaking_tone_changed(output_tone.value)
         try:
             stream = await self.agent._voice_llm.chat.completions.create(
                 model=self.agent.opt.ollama_model.removeprefix("ollama/"),
@@ -332,17 +341,19 @@ class LayaAgent:
                         if self.agent.tts_manager is not None:
                             await self.agent.tts_manager.speak(sentence)
                     split = re.search(r"[.!?](?:\s|$)", sentence_buffer)
+            trailing_sentence = sentence_buffer.strip()
+            if trailing_sentence:
+                displayed_response = f"{displayed_response} {trailing_sentence}".strip()
+                if self.agent.on_response_update is not None:
+                    self.agent.on_response_update(displayed_response)
+                if self.agent.tts_manager is not None:
+                    await self.agent.tts_manager.speak(trailing_sentence)
         finally:
             if stream is not None:
                 await stream.close()
-
-        trailing_sentence = sentence_buffer.strip()
-        if trailing_sentence:
-            displayed_response = f"{displayed_response} {trailing_sentence}".strip()
-            if self.agent.on_response_update is not None:
-                self.agent.on_response_update(displayed_response)
-            if self.agent.tts_manager is not None:
-                await self.agent.tts_manager.speak(trailing_sentence)
+            if self.agent.on_speaking_tone_changed is not None:
+                self.agent.on_speaking_tone_changed(None)
+            self.agent.set_assistant_status(AssistantStatus.IDLE)
 
         full_response = full_response.strip()
         if full_response:

@@ -61,9 +61,42 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .brand-mark i:nth-child(2) { margin-top: 6px; }
 .brand-mark i:nth-child(3) { margin-top: 12px; }
 .drive-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warning); box-shadow: 0 0 12px currentColor; }
-.status-dot.connected { color: var(--accent); background: var(--accent); }
-.status-dot.offline { color: var(--danger); background: var(--danger); }
+.status-dot { --tone-color: #ffffff; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 50%; background: #fff; box-shadow: 0 0 16px rgba(255,255,255,.34); transition: background-color .8s ease, box-shadow .8s ease, transform .5s ease, border-radius .5s ease, width .45s ease, height .45s ease, flex-basis .45s ease; }
+.status-dot.connecting { background: #929da3; box-shadow: 0 0 12px rgba(146,157,163,.35); }
+.status-dot.connected { background: #fff; }
+.status-dot.offline { background: #929da3; box-shadow: 0 0 12px rgba(146,157,163,.35); }
+.status-dot.assistant-talking { width: 48px; height: 48px; flex-basis: 48px; animation: voice-wobble 1.15s ease-in-out infinite; }
+.status-dot.assistant-talking[data-tone="calm"] { --tone-color: #78baff; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.assistant-talking[data-tone="enthusiastic"] { --tone-color: #ffd166; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.assistant-talking[data-tone="serious"] { --tone-color: #ff7770; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.assistant-talking[data-tone="empathetic"] { --tone-color: #efa2c7; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.assistant-talking[data-tone="discreet"] { --tone-color: #a9bcff; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.assistant-act { animation: action-bloom .76s ease-out both; }
+.status-dot.assistant-background { animation: background-wobble 1.4s ease-in-out infinite; }
+@keyframes voice-wobble {
+  0%, 100% { transform: translate(0, 0) rotate(0) scale(1); border-radius: 50% 50% 50% 50%; }
+  13% { transform: translate(1px, -1px) rotate(7deg) scale(1.08, .94); border-radius: 43% 57% 48% 52%; }
+  29% { transform: translate(-1px, 1px) rotate(-5deg) scale(.94, 1.09); border-radius: 57% 43% 53% 47%; }
+  46% { transform: translate(1px, 0) rotate(3deg) scale(1.11, .97); border-radius: 48% 52% 41% 59%; }
+  63% { transform: translate(-1px, -1px) rotate(-8deg) scale(.97, 1.05); border-radius: 54% 46% 59% 41%; }
+  81% { transform: translate(0, 1px) rotate(5deg) scale(1.06, .92); border-radius: 42% 58% 49% 51%; }
+}
+@keyframes action-bloom {
+  0% { transform: scale(1); }
+  32% { transform: scale(1.55); box-shadow: 0 0 28px var(--accent); }
+  100% { transform: scale(1); }
+}
+@keyframes background-wobble {
+  0%, 100% { transform: scale(1, 1); border-radius: 50%; }
+  25% { transform: scale(.92, 1.22); border-radius: 46% 54% 42% 58%; }
+  50% { transform: scale(1.04, .88); border-radius: 55% 45% 58% 42%; }
+  75% { transform: scale(.96, 1.16); border-radius: 41% 59% 52% 48%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.assistant-talking,
+  .status-dot.assistant-act,
+  .status-dot.assistant-background { animation: none; }
+}
 .topbar-actions { justify-self: end; display: flex; align-items: center; gap: 24px; }
 .compact-select { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
 select { border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: var(--text); padding: 7px 28px 7px 9px; }

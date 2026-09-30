@@ -49,6 +49,8 @@ class WebUIServer:
         for event_name in (
             "responseReceived",
             "responseUpdated",
+            "speakingToneChanged",
+            "assistantStatusChanged",
             "userSpeechReceived",
             "conversationModeChanged",
             "knowledgeUpdated",

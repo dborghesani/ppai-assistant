@@ -6,20 +6,40 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 import structlog
-from agents.agents_dataclasses import ActionType, UrgencyType
+from agents.agents_dataclasses import (
+    ActionType,
+    InterventionType,
+    SkillType,
+    SuggestionType,
+    ToneType,
+    UrgencyType,
+)
 from data.events import CarEvent
-from managers.skill_manager import SkillType
 from crewai import LLM, Agent, Crew, Process, Task
 
 if TYPE_CHECKING:
     from agents.automotive_agent import AutomotiveAgent
 
-class Action(BaseModel):
-    action_type: ActionType
-    parameters: dict = {}
+
+def _enum_options(enum_type: type) -> str:
+    return "\n".join(
+        f"- {member.value}: {member.description}" for member in enum_type
+    )
+
 
 class NotificationDecision(BaseModel):
-    urgency: UrgencyType
+    urgency: UrgencyType = Field(description="Urgency of the assistant's intervention.")
+    tone: ToneType = Field(
+        description="Tone to use when speaking; this describes delivery, not the driver's emotional state."
+    )
+    intervention_type: InterventionType = Field(
+        description="Whether to stay silent, make a suggestion, or perform an action."
+    )
+    skill: SkillType = Field(description="Skill area relevant to the intervention.")
+    action: ActionType = Field(description="Supported action to perform, or none.")
+    suggestion_type: SuggestionType = Field(
+        description="Suggestion category to communicate, or none."
+    )
     reason: str = Field(
         description="Short internal justification. Never spoken to the user."
     )
@@ -30,7 +50,6 @@ class NotificationDecision(BaseModel):
             "Must be null when urgency is none."
         ),
     )
-    action: Action | None = None
 
     @property
     def notify(self) -> bool:
@@ -50,6 +69,27 @@ class LLMAgent:
             base_url=f"http://{opt.ollama_host}:{opt.ollama_port}",
             timeout=opt.ollama_timeout,
             max_tokens=opt.max_tokens,
+        )
+        self.decision_options = {
+            "urgency_options": _enum_options(UrgencyType),
+            "tone_options": _enum_options(ToneType),
+            "intervention_options": _enum_options(InterventionType),
+            "skill_options": _enum_options(SkillType),
+            "action_options": _enum_options(ActionType),
+            "suggestion_options": _enum_options(SuggestionType),
+        }
+        self.meeting_decision_guidance = (
+            f"urgency={UrgencyType.HIGH.value}, tone={ToneType.DISCREET.value}, "
+            f"intervention_type={InterventionType.ACT.value}, "
+            f"skill={SkillType.CONVERSATION.value}, "
+            f"action={ActionType.ASK_ATTEND_MEETING.value}, "
+            f"suggestion_type={SuggestionType.NONE.value}"
+        )
+        self.silent_decision_guidance = (
+            f"urgency={UrgencyType.NONE.value}, tone={ToneType.DISCREET.value}, "
+            f"intervention_type={InterventionType.NONE.value}, "
+            f"skill={SkillType.NONE.value}, action={ActionType.NONE.value}, "
+            f"suggestion_type={SuggestionType.NONE.value}"
         )
 
         agent = Agent(
@@ -79,22 +119,30 @@ class LLMAgent:
                 changed_knowledge={changed_knowledge}
                 context={context}
                 user_input={user_input}
-                available_actions={available_actions}
+                urgency_options={urgency_options}
+                tone_options={tone_options}
+                intervention_options={intervention_options}
+                skill_options={skill_options}
+                action_options={action_options}
+                suggestion_options={suggestion_options}
+                meeting_decision_guidance={meeting_decision_guidance}
+                silent_decision_guidance={silent_decision_guidance}
 
                 Rules:
                 - Exception that always applies first: if changed_knowledge or context
                     indicates the driver is running late for a meeting, this is always a
                     useful action needed now, regardless of the general silence rule below.
-                    Never output urgency=none for this case. Set urgency=high,
-                    action.action_type=ask_attend_meeting, action.parameters={{}}, and
+                    Never use the silent decision for this case. Use
+                    meeting_decision_guidance, and
                     spoken_message asking, in these words or close to them, "Would you like
                     me to attend the meeting on your behalf and brief you once it is over?".
                     Do not claim the meeting has already been joined; only ask.
-                    Example Alert output for this exact case:
-                    {{"urgency": "high", "reason": "driver is late for a meeting",
-                    "spoken_message": "Would you like me to attend the meeting on your
-                    behalf and brief you once it is over?",
-                    "action": {{"action_type": "ask_attend_meeting", "parameters": {{}}}}}}
+                - Choose every structured field only from its matching options list above;
+                    do not invent or rename enum values.
+                - Choose tone using tone_options and make spoken_message consistent with its
+                    description. Tone describes delivery, not the driver's emotional state.
+                - Keep intervention_type, skill, action and suggestion_type mutually
+                    consistent. Use the corresponding none option when a field does not apply.
                 - Outside of that exception, remain silent (urgency=none) unless the data
                     shows a concrete current safety risk, abnormal condition, or useful
                     action needed now.
@@ -118,8 +166,8 @@ class LLMAgent:
                     in changed_knowledge or context. Never substitute an example value from
                     skill_instructions for the actual reported one.
                 - If you cannot name a concrete current risk or useful action, that is
-                    the Silent case: set urgency=none and spoken_message=null (the JSON
-                    null, not a sentence). Never say things like "no action is needed",
+                    the Silent case: use silent_decision_guidance and set spoken_message=null
+                    (the JSON null, not a sentence). Never say things like "no action is needed",
                     "notifications remain silent" or describe the telemetry out loud
                     instead of setting the fields.
                 - Never close spoken_message with a generic filler question such as "is
@@ -128,20 +176,17 @@ class LLMAgent:
                     actually needed to proceed (like ask_attend_meeting above).
 
                 Output:
-                - Silent: urgency=none, spoken_message=null, action=null.
-                    These fields always go together — never leave urgency=none while
-                    spoken_message has text, and never give urgency above none while
-                    spoken_message is null.
-                    Example Silent output:
-                    {{"urgency": "none", "reason": "<why nothing qualifies>",
-                    "spoken_message": null, "action": null}}
+                - Silent: follow silent_decision_guidance and set spoken_message=null.
+                    Never pair a silent urgency with spoken text, or an active urgency with
+                    a null spoken_message.
                 - Alert: urgency is not none, reason names the concrete risk, and
-                    spoken_message is one short natural sentence.
+                    spoken_message is one short natural sentence. Populate all six
+                    structured decision fields, even when some are none.
                 - Never expose internal reasoning or implementation details.
                 """,
             expected_output=(
-                "A structured notification decision containing urgency, "
-                "reason and spoken_message."
+                "A structured notification decision containing urgency, tone, "
+                "intervention_type, skill, action, suggestion_type, reason and spoken_message."
             ),
             output_pydantic=NotificationDecision,
             agent=agent,
@@ -160,11 +205,13 @@ class LLMAgent:
     @staticmethod
     def _is_non_actionable_decision(decision: NotificationDecision) -> bool:
         """Reject model notifications that explicitly describe no actionable risk."""
-        if decision.urgency is UrgencyType.NONE:
-            return True
         if (
-            decision.action is not None
-            and decision.action.action_type is ActionType.NONE
+            decision.urgency is UrgencyType.NONE
+            or decision.intervention_type is InterventionType.NONE
+            or (
+                decision.action is ActionType.NONE
+                and decision.suggestion_type is SuggestionType.NONE
+            )
         ):
             return True
 
@@ -279,26 +326,21 @@ class LLMAgent:
             skill = None
             skill_instructions = "No additional skill-specific instructions."
 
-        available_actions = "".join(
-            f"{action.name}\n- {action.description}\n\n" for action in ActionType
-        )
-
         inputs = {
             "skill_instructions": skill_instructions,
             "changed_knowledge": event.event_value,
             "context": event.context,
-            "available_actions": available_actions,
             "user_input": event.user_input,
+            **self.decision_options,
+            "meeting_decision_guidance": self.meeting_decision_guidance,
+            "silent_decision_guidance": self.silent_decision_guidance,
         }
         # This decision is a classification (urgency/action), not creative writing: lower the
-        # shared LLM's temperature just for this call, so it stays consistent across otherwise
-        # identical knowledge updates, then restore it for other uses (conversation, meeting sim).
+        # shared LLM's temperature just for this call, then restore it for other uses.
         default_temperature = self.llm.temperature
         self.llm.temperature = 0.1
         try:
-            result = await self.crew.kickoff_async(
-                inputs=inputs,
-            )
+            result = await self.crew.kickoff_async(inputs=inputs)
         finally:
             self.llm.temperature = default_temperature
         llm_elapsed = time.time() - llm_start
@@ -326,12 +368,16 @@ class LLMAgent:
                 self.logger.info(f">>> [suppressed duplicate] {reason}")
             else:
                 self.logger.info(f">>> [speak] {decision.spoken_message}")
-                await self.agent.speak(decision.spoken_message)
+                await self.agent.speak(decision.spoken_message, tone=decision.tone)
                 self.recent_notifications.append(
                     {
                         "urgency": decision.urgency.value,
+                        "tone": decision.tone.value,
+                        "intervention_type": decision.intervention_type.value,
+                        "skill": decision.skill.value,
+                        "action": decision.action.value,
+                        "suggestion_type": decision.suggestion_type.value,
                         "message": decision.spoken_message,
-                        "skill": event.skill,
                         "event": event.event_name,
                         "measures": sorted(measures),
                         "timestamp": time.time(),
@@ -339,8 +385,8 @@ class LLMAgent:
                 )
                 if len(self.recent_notifications) > 5:
                     self.recent_notifications.pop(0)
-                if decision.action:
-                    self.logger.info(f">>> [action] {decision.action.action_type}")
+                if decision.action is not ActionType.NONE:
+                    self.logger.info(f">>> [action] {decision.action}")
                     self.agent.action_manager.handle_decision(
-                        decision.action.action_type, decision.action.parameters
+                        decision.action, {}
                     )

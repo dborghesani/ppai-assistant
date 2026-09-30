@@ -4,7 +4,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from agents.agents_dataclasses import ActionType
+from agents.agents_dataclasses import ActionType, AssistantStatus
 from sim.meeting_sim import DEFAULT_TOPIC, build_crew
 
 if TYPE_CHECKING:
@@ -27,9 +27,13 @@ class ActionManager:
         if action_type is ActionType.ASK_ATTEND_MEETING:
             self._mark_awaiting_meeting_confirmation()
         elif action_type is not ActionType.NONE:
-            self.logger.info(
-                f">>> [action] executing {action_type} with parameters: {parameters}"
-            )
+            self.agent.set_assistant_status(AssistantStatus.ACT)
+            try:
+                self.logger.info(
+                    f">>> [action] executing {action_type} with parameters: {parameters}"
+                )
+            finally:
+                self.agent.set_assistant_status(AssistantStatus.IDLE)
 
     def _mark_awaiting_meeting_confirmation(self) -> None:
         if self._meeting_task is not None and not self._meeting_task.done():
@@ -41,6 +45,7 @@ class ActionManager:
         """Called by the agent once it has interpreted the driver's reply as a yes."""
         self.awaiting_confirmation = False
         self.logger.info(">>> [meeting] confirmed by driver, launching simulation")
+        self.agent.set_assistant_status(AssistantStatus.BACKGROUND_TASK_RUNNING)
         self._meeting_task = asyncio.create_task(self._attend_meeting())
 
     def decline_attend_meeting(self) -> None:
@@ -61,6 +66,7 @@ class ActionManager:
             self.logger.error(f"Meeting simulation failed: {error}")
         finally:
             self._meeting_task = None
+            self.agent.set_assistant_status(AssistantStatus.IDLE)
         await self.agent.speak(
             summary or "Sorry, something went wrong while I was attending the meeting."
         )

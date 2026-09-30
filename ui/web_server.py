@@ -16,6 +16,7 @@ class WebUIServer:
         "floatChanged",
         "intChanged",
         "minimumUrgencyChanged",
+        "setScenario",
         "startConversation",
         "startVoiceInput",
         "stopConversation",
@@ -39,7 +40,7 @@ class WebUIServer:
         self._loop = asyncio.get_running_loop()
 
         static_dir = Path(__file__).with_name("web")
-        self._app = web.Application()
+        self._app = web.Application(middlewares=[self._no_cache_middleware])
         self._app.router.add_get("/", self._index)
         self._app.router.add_get("/ws", self._websocket)
         self._app.router.add_get("/health", self._health)
@@ -79,6 +80,18 @@ class WebUIServer:
 
     async def _index(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(Path(__file__).with_name("web") / "index.html")
+
+    @staticmethod
+    @web.middleware
+    async def _no_cache_middleware(
+        request: web.Request, handler: Any
+    ) -> web.StreamResponse:
+        """Always force revalidation: this UI is edited on disk while the server keeps running."""
+        response = await handler(request)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "clients": len(self._clients)})

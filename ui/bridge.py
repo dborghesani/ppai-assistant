@@ -135,6 +135,23 @@ class VehicleBridge:
                 "Ignoring invalid Laya urgency threshold", urgency=urgency
             )
 
+    # Registry of demo scenarios: scenario_id -> (knowledge class, field, active value, inactive value).
+    _SCENARIOS: dict[str, tuple[str, str, Any, Any]] = {
+        "late_for_meeting": ("DriverAgenda", "late_for_meeting", True, False),
+    }
+
+    def setScenario(self, scenario_id: str, active: bool) -> None:
+        """Toggle a demo scenario on/off; activating one deactivates all the others,
+        including their knowledge signal, so at most one scenario is ever active."""
+        if scenario_id not in self._SCENARIOS:
+            self.logger.warning("Unknown scenario", scenario_id=scenario_id)
+            return
+        for other_id, (cls_name, field, _active_value, inactive_value) in self._SCENARIOS.items():
+            if other_id != scenario_id:
+                self.database_manager.write_measure(cls_name, field, inactive_value)
+        cls_name, field, active_value, inactive_value = self._SCENARIOS[scenario_id]
+        self.database_manager.write_measure(cls_name, field, active_value if active else inactive_value)
+
     def startVoiceInput(self):
         if not self.agent.is_listening or self.stt_manager is None:
             return

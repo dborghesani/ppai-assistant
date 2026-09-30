@@ -91,6 +91,10 @@ class VehicleMotion:
     orientation_degrees_roll: float | None = None  # deg
 
 @dataclass
+class DriverAgenda:
+    late_for_meeting: bool | None = knowledge_field(default=False, skills=(SkillType.CONVERSATION,))
+
+@dataclass
 class VehicleState:
     door_open_front_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     door_open_front_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))

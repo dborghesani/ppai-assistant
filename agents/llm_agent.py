@@ -38,13 +38,20 @@ class NotificationDecision(BaseModel):
         return self.urgency is not UrgencyType.NONE
 
 class LLMAgent:
-    def __init__(self, llm: LLM, agent: "AutomotiveAgent"):
+    def __init__(self, agent: "AutomotiveAgent"):
         self.logger = structlog.get_logger()
-        self.llm = llm
         self.agent = agent
         self.recent_notifications: list[dict] = []
         self.minimum_urgency = UrgencyType.MEDIUM
-        
+
+        opt = agent.opt
+        self.llm = LLM(
+            model=opt.ollama_model,
+            base_url=f"http://{opt.ollama_host}:{opt.ollama_port}",
+            timeout=opt.ollama_timeout,
+            max_tokens=opt.max_tokens,
+        )
+
         agent = Agent(
             role="In-Vehicle Personal Assistant",
             goal=(
@@ -59,7 +66,7 @@ class LLMAgent:
                 "events, or implementation details."
             ),
             verbose=False,
-            llm=llm,
+            llm=self.llm,
             tools=[],  # [SpeedLimitTool()],
         )
 
@@ -75,8 +82,22 @@ class LLMAgent:
                 available_actions={available_actions}
 
                 Rules:
-                - Remain silent (urgency=none) unless the data shows a concrete current
-                    safety risk, abnormal condition, or useful action needed now.
+                - Exception that always applies first: if changed_knowledge or context
+                    indicates the driver is running late for a meeting, this is always a
+                    useful action needed now, regardless of the general silence rule below.
+                    Never output urgency=none for this case. Set urgency=high,
+                    action.action_type=ask_attend_meeting, action.parameters={{}}, and
+                    spoken_message asking, in these words or close to them, "Would you like
+                    me to attend the meeting on your behalf and brief you once it is over?".
+                    Do not claim the meeting has already been joined; only ask.
+                    Example Alert output for this exact case:
+                    {{"urgency": "high", "reason": "driver is late for a meeting",
+                    "spoken_message": "Would you like me to attend the meeting on your
+                    behalf and brief you once it is over?",
+                    "action": {{"action_type": "ask_attend_meeting", "parameters": {{}}}}}}
+                - Outside of that exception, remain silent (urgency=none) unless the data
+                    shows a concrete current safety risk, abnormal condition, or useful
+                    action needed now.
                 - Do not speak about normal, stable, low, unchanged, or merely changing
                     values. Do not summarize telemetry or say that no action is needed.
                 - A trend, fluctuation, or sensor value is not a risk without an explicit
@@ -101,6 +122,10 @@ class LLMAgent:
                     null, not a sentence). Never say things like "no action is needed",
                     "notifications remain silent" or describe the telemetry out loud
                     instead of setting the fields.
+                - Never close spoken_message with a generic filler question such as "is
+                    there anything else I can help with?" or "let me know if you need
+                    anything else". Only ask a question when the driver's answer is
+                    actually needed to proceed (like ask_attend_meeting above).
 
                 Output:
                 - Silent: urgency=none, spoken_message=null, action=null.
@@ -226,6 +251,8 @@ class LLMAgent:
         )
         self.logger.info(">>> generating...")
         if event.user_input:
+            if await self.agent.maybe_handle_meeting_confirmation(event.user_input):
+                return
             self.agent.cancel_voice_response()
             response_task = asyncio.create_task(self.agent.stream_user_response(event))
             self.agent._voice_response_task = response_task
@@ -263,9 +290,17 @@ class LLMAgent:
             "available_actions": available_actions,
             "user_input": event.user_input,
         }
-        result = await self.crew.kickoff_async(
-            inputs=inputs,
-        )
+        # This decision is a classification (urgency/action), not creative writing: lower the
+        # shared LLM's temperature just for this call, so it stays consistent across otherwise
+        # identical knowledge updates, then restore it for other uses (conversation, meeting sim).
+        default_temperature = self.llm.temperature
+        self.llm.temperature = 0.1
+        try:
+            result = await self.crew.kickoff_async(
+                inputs=inputs,
+            )
+        finally:
+            self.llm.temperature = default_temperature
         llm_elapsed = time.time() - llm_start
         self.logger.info(f">>> LLM generation took {llm_elapsed:.2f}s")
         response = result.raw if hasattr(result, "raw") else str(result)
@@ -291,20 +326,7 @@ class LLMAgent:
                 self.logger.info(f">>> [suppressed duplicate] {reason}")
             else:
                 self.logger.info(f">>> [speak] {decision.spoken_message}")
-                if self.agent.on_response is not None:
-                    response = decision.spoken_message + "\n"
-                    response += (
-                        f"Action: {decision.action.action_type}, Parameters: {decision.action.parameters}\n"
-                        if decision.action
-                        else "no action required\n"
-                    )
-                    self.agent.on_response(response)
-                if self.agent.tts_manager is not None:
-                    tts_start = time.time()
-                    await self.agent.tts_manager.speak(decision.spoken_message)
-                    self.logger.info(
-                        f">>> TTS synthesis+playback took {time.time() - tts_start:.2f}s"
-                    )
+                await self.agent.speak(decision.spoken_message)
                 self.recent_notifications.append(
                     {
                         "urgency": decision.urgency.value,
@@ -319,8 +341,6 @@ class LLMAgent:
                     self.recent_notifications.pop(0)
                 if decision.action:
                     self.logger.info(f">>> [action] {decision.action.action_type}")
-                    # handle the action accordingly
-                    if decision.action.action_type is not ActionType.NONE:
-                        self.logger.info(
-                            f">>> [action] executing {decision.action.action_type} with parameters: {decision.action.parameters}"
-                        )
+                    self.agent.action_manager.handle_decision(
+                        decision.action.action_type, decision.action.parameters
+                    )

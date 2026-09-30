@@ -66,6 +66,11 @@ class KnowledgeManager:
         ("VehicleState", "engine_on"): lambda value: (
             "The engine is on." if value else "The engine is off."
         ),
+        ("DriverAgenda", "late_for_meeting"): lambda value: (
+            "The driver is running late for an upcoming meeting."
+            if value
+            else "The driver is not late for any meeting."
+        ),
     }
     _COUNT_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[int], str]] = {
         ("DetectedObjects", "people_around"): lambda value: (

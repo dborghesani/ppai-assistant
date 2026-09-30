@@ -1,4 +1,5 @@
 import asyncio
+import json
 import re
 import time
 from typing import Callable
@@ -16,15 +17,14 @@ logger = structlog.get_logger()
 
 from agents.agents_dataclasses import UrgencyType
 from agents.laya_agent import LayaAgent
-
+from managers.action_manager import ActionManager
 
 
 class AutomotiveAgent:
     def __init__(
-        self, llm: LLM, opt: ConfigAssistant, tts_manager: TTSManager | None = None
+        self, opt: ConfigAssistant, tts_manager: TTSManager | None = None
     ):
         self.opt = opt
-        self.llm = llm
         self.is_active = True
         self.event_queue: asyncio.Queue[CarEvent] = asyncio.Queue()
         self.is_listening = False
@@ -37,14 +37,20 @@ class AutomotiveAgent:
         )
 
         self.skill_manager = SkillManager()
+        self.action_manager = ActionManager(self)
 
         if self.opt.use_laya:
             self.laya_agent = LayaAgent(self)
 
-        self.llm_agent = LLMAgent(llm, self)
+        self.llm_agent = LLMAgent(self)
 
         self.on_response: Callable[[str], None] | None = None
         self.on_response_update: Callable[[str], None] | None = None
+
+    @property
+    def llm(self) -> LLM:
+        """The shared crewai LLM, actually built and owned by LLMAgent."""
+        return self.llm_agent.llm
 
 
 
@@ -193,3 +199,59 @@ class AutomotiveAgent:
 
     async def _process_event_llm(self, event: CarEvent):
         await self.llm_agent.process_event(event)
+
+    async def speak(self, message: str, ui_suffix: str = "") -> None:
+        """Single place that keeps chat history, UI text and TTS in sync for a one-shot message."""
+        self._conversation_history.append({"role": "assistant", "content": message})
+        self._conversation_history = self._conversation_history[-8:]
+        if self.on_response is not None:
+            self.on_response(f"{message}\n{ui_suffix}" if ui_suffix else message + "\n")
+        if self.tts_manager is not None:
+            await self.tts_manager.speak(message)
+
+    async def maybe_handle_meeting_confirmation(self, user_input: str) -> bool:
+        """Conversational follow-up to a pending ask_attend_meeting. Returns True if this
+        reply was the confirmation itself, so the caller must skip the generic conversational
+        reply for this turn (otherwise that unrelated LLM call can answer off-topic, distracted
+        by the full vehicle context rather than the pending question)."""
+        if not self.action_manager.awaiting_confirmation:
+            return False
+        self._conversation_history.append({"role": "user", "content": user_input})
+        if await self._interpret_confirmation(user_input):
+            await self.speak("Sure, I will sit in and brief you as soon as it wraps up.")
+            self.action_manager.confirm_attend_meeting()
+        else:
+            await self.speak("No problem, I will leave the meeting to you.")
+            self.action_manager.decline_attend_meeting()
+        return True
+
+    async def _interpret_confirmation(self, user_input: str) -> bool:
+        """Ask the conversational LLM, using the chat history, whether the driver just confirmed."""
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "The assistant just asked the driver the question shown in the "
+                    "conversation. Classify only the driver's final message as a reply to "
+                    'that question. Respond with strict JSON only: {"confirmed": true} if '
+                    'the driver agreed, or {"confirmed": false} if they declined or replied '
+                    "with anything else."
+                ),
+            },
+            *self._conversation_history[-8:],
+            {"role": "user", "content": user_input},
+        ]
+        try:
+            response = await self._voice_llm.chat.completions.create(
+                model=self.opt.ollama_model.removeprefix("ollama/"),
+                messages=messages,
+                temperature=0,
+                max_tokens=20,
+                response_format={"type": "json_object"},
+            )
+            data = json.loads(response.choices[0].message.content or "{}")
+        except Exception as error:
+            logger.error(f"Confirmation interpretation failed: {error}")
+            return False
+        return bool(data.get("confirmed", False))
+

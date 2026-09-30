@@ -233,6 +233,12 @@ class LayaAgent:
             if urgency.rank < self.minimum_urgency.rank:
                 return
 
+        if "action" in decision:
+            try:
+                self.agent.action_manager.handle_decision(ActionType(decision["action"]))
+            except ValueError:
+                self.logger.warning("Unknown action decided by Laya", action=decision["action"])
+
         system_message = """
             You are an in-vehicle assistant.
 
@@ -250,8 +256,9 @@ class LayaAgent:
             - none: no response should be generated.
             - suggest: suggest an appropriate behavior or response based on the triggering
             event, current context, and suggestion_target.
-            - act: naturally inform the driver that the action has been carried out, based
-            on the triggering event, current context, and action.
+            - act: if the action name starts with "ask_", ask the driver that question
+            naturally. Otherwise, naturally inform the driver that the action has been
+            carried out, based on the triggering event, current context, and action.
 
             The suggestion_target field identifies the aspect that the suggestion should
             address. Use it to focus the response, but do not name the category itself.
@@ -262,6 +269,11 @@ class LayaAgent:
 
             Do not mention internal models, scores, probabilities, confidence values,
             or internal reasoning.
+
+            Never close with a generic filler question such as "is there anything else
+            I can help with?" or "let me know if you need anything else". Only ask a
+            question when the driver's answer is actually needed to proceed (e.g. when
+            the action starts with "ask_").
 
             Prefer concise and clear communication.
             Respond directly to the driver in one or two short sentences.

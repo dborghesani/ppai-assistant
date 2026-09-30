@@ -39,6 +39,11 @@ const CONTROL_GROUPS = {
       ["Vehicles around", "vehicles_around", 0, 20, 0, 1, "integer"],
       ["Dangers around", "dangerous_objects_around", 0, 20, 0, 1, "integer"]
     ]}
+  ],
+  scenario: [
+    { title: "Demo scenarios", type: "scenarios", hint: "Simulate a situation instead of tweaking raw values. Only one scenario can be active at a time.", controls: [
+      ["Driver late for a meeting", "late_for_meeting"]
+    ]}
   ]
 };
 
@@ -100,6 +105,7 @@ const welcomeState = document.querySelector("#welcome-state");
 const input = document.querySelector("#message-input");
 const conversationButton = document.querySelector("#conversation-toggle");
 let activeTab = "driver";
+let activeScenario = null;
 let conversationActive = false;
 let pendingAssistantMessage = null;
 let toastTimer;
@@ -145,6 +151,11 @@ function renderControls(tabName) {
       const controls = group.controls.map(([label, key, checked, on, off]) => `<label class="toggle-row"><span>${label}</span><span class="switch-control"><input type="checkbox" data-key="${key}" ${checked ? "checked" : ""}><span class="switch-track"></span><span data-state>${checked ? on : off}</span></span></label>`).join("");
       return `<section class="control-section" data-type="toggles" data-class="${group.cls}"><h3>${group.title}</h3>${controls}</section>`;
     }
+    if (group.type === "scenarios") {
+      const hint = group.hint ? `<p class="scenario-hint">${escapeHtml(group.hint)}</p>` : "";
+      const buttons = group.controls.map(([label, id]) => `<button type="button" class="scenario-button" data-scenario="${id}" aria-pressed="${activeScenario === id}">${escapeHtml(label)}</button>`).join("");
+      return `<section class="control-section" data-type="scenarios"><h3>${group.title}</h3>${hint}${buttons}</section>`;
+    }
     const controls = group.controls.map(([label, key, min, max, value, step, format, ownClass]) => `<div class="range-row"><label for="${tabName}-${key}">${label}</label><input id="${tabName}-${key}" type="range" min="${min}" max="${max}" value="${value}" step="${step}" data-key="${key}" data-class="${ownClass || group.cls}" data-format="${format}" data-integer="${group.integer || format === "integer"}"><output>${formatValue(value, format)}</output></div>`).join("");
     return `<section class="control-section" data-type="ranges"><h3>${group.title}</h3>${controls}</section>`;
   }).join("");
@@ -184,6 +195,24 @@ controlContent.addEventListener("change", event => {
   } else if (target.matches('input[type="range"]')) {
     sendProgressive(target, Number(target.dataset.start ?? target.defaultValue), Number(target.value));
   }
+});
+
+controlContent.addEventListener("click", event => {
+  const button = event.target.closest(".scenario-button");
+  if (!button) return;
+  const scenarioId = button.dataset.scenario;
+  const wasActive = activeScenario === scenarioId;
+  button.disabled = true;
+  bridge.call("setScenario", scenarioId, !wasActive)
+    .then(() => {
+      activeScenario = wasActive ? null : scenarioId;
+      controlContent.querySelectorAll(".scenario-button").forEach(btn => {
+        btn.setAttribute("aria-pressed", String(btn.dataset.scenario === activeScenario));
+      });
+      showToast(wasActive ? `Scenario stopped: ${button.textContent}` : `Scenario triggered: ${button.textContent}`);
+    })
+    .catch(() => {})
+    .finally(() => { button.disabled = false; });
 });
 
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {

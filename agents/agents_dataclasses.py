@@ -60,6 +60,7 @@ class ActionType(str, Enum):
     ENABLE_FOG_LIGHTS = "enable_fog_lights"
     DISABLE_FOG_LIGHTS = "disable_fog_lights"
     FIND_REST_AREA = "find_rest_area"
+    ASK_ATTEND_MEETING = "ask_attend_meeting"
 
     @property
     def description(self) -> str:
@@ -84,6 +85,10 @@ class ActionType(str, Enum):
             ActionType.ENABLE_FOG_LIGHTS: "enable fog lights",
             ActionType.DISABLE_FOG_LIGHTS: "disable fog lights",
             ActionType.FIND_REST_AREA: "Find the next rest area.",
+            ActionType.ASK_ATTEND_MEETING: (
+                "Ask the driver whether the assistant should attend their upcoming "
+                "meeting on their behalf because they are running late."
+            ),
         }[self]
 
 class SkillType(str, Enum):

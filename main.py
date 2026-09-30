@@ -13,7 +13,6 @@ from urllib.request import Request, urlopen
 import structlog
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
-from crewai import LLM
 from crewai_core.printer import set_suppress_console_output
 from data.database_manager import DatabaseManager
 from data.source_manager import SourceManager
@@ -42,6 +41,8 @@ logger = structlog.get_logger()
 
 
 def _load_ollama_model(opt: ConfigAssistant) -> str:
+    """Resolve the model name to use (creating a custom-context-window variant on Ollama
+    if needed) and warm it up so the first real request isn't slowed by a cold start."""
     raw_model = opt.ollama_model.removeprefix("ollama/")
     if "-ctx" in raw_model or opt.context_window_size <= 4096:
         model_to_use = raw_model
@@ -110,14 +111,9 @@ async def main(opt: ConfigAssistant):
 
     # initialize LLM (Ollama example)
     # ensure ollama is running: ollama serve
-    actual_model = await asyncio.to_thread(_load_ollama_model, opt)
-
-    llm = LLM(
-        model=actual_model,
-        base_url=f"http://{opt.ollama_host}:{opt.ollama_port}",
-        timeout=opt.ollama_timeout,
-        max_tokens=opt.max_tokens,
-    )
+    # Resolve the actual model name (possibly a custom-context-window variant) once here,
+    # and write it back so every LLM client built downstream (crewai and conversational) agrees.
+    opt.ollama_model = await asyncio.to_thread(_load_ollama_model, opt)
 
     data_event_queue: asyncio.Queue = asyncio.Queue()
     measurement_event_queue: asyncio.Queue = asyncio.Queue()
@@ -146,7 +142,6 @@ async def main(opt: ConfigAssistant):
 
     # initialize Agent (model loading is blocking, run off the event loop)
     agent = AutomotiveAgent(
-        llm=llm,
         tts_manager=tts_manager,
         opt=opt,
     )

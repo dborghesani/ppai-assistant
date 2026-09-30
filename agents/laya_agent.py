@@ -11,6 +11,7 @@ import structlog
 from agents.agents_dataclasses import (
     ActionType,
     InterventionType,
+    SimpleInterventionType,
     SkillType,
     SuggestionType,
     ToneType,
@@ -27,9 +28,9 @@ class LayaAgent:
     def __init__(self, agent: "AutomotiveAgent"):
         self.agent = agent
         self.logger = structlog.get_logger()
-        custom_model = getattr(agent.opt, "laya_custom_model", None)
-        if custom_model:
-            model_source = Path(custom_model).expanduser()
+        self.custom_model = getattr(agent.opt, "laya_custom_model", None)
+        if self.custom_model:
+            model_source = Path(self.custom_model).expanduser()
             if not model_source.is_dir():
                 raise FileNotFoundError(
                     f"Custom Laya model directory does not exist: {model_source}"
@@ -119,47 +120,80 @@ class LayaAgent:
         self.logger.info(f">>> [LAYA] Processing event: {event.event_value}")
         laya_start = time.time()
         # Keep the inference payload identical to the fine-tuning dataset schema.
-        state = {
-            "knowledge": list(event.context or []),
-            #"skill_scope": self._skill_scope_for_event(event),
-        }
-        laya_questions = {
-            "urgency": {
-                "instructions": "Define how urgent the situation is.",
-                "type": "choice",
-                "criteria": self._criteria(UrgencyType),
-            },
+        if self.custom_model == "":
+            state = {
+                "knowledge": list(event.context or []),
+                #"skill_scope": self._skill_scope_for_event(event),
+            }
+            laya_questions = {
+                "urgency": {
+                    "instructions": "Define how urgent the situation is.",
+                    "type": "choice",
+                    "criteria": self._criteria(UrgencyType),
+                },
 
-            "tone": {
-                "instructions": "Define the communication tone appropriate for the situation.",
-                "type": "choice",
-                "criteria": self._criteria(ToneType),
-            },
+                "tone": {
+                    "instructions": "Define the communication tone appropriate for the situation.",
+                    "type": "choice",
+                    "criteria": self._criteria(ToneType),
+                },
 
-            "intervention_type": {
-                "instructions": "Decide what the assistant should do.",
-                "type": "choice",
-                "criteria": self._criteria(InterventionType),
-            },
+                "intervention_type": {
+                    "instructions": "Decide what the assistant should do.",
+                    "type": "choice",
+                    "criteria": self._criteria(InterventionType),
+                },
 
-            "skill": {
-                "instructions": "Define a scope for the potential skills the assistant should have to face the situation.",
-                "type": "choice",
-                "criteria": self._criteria(SkillType),
-            },
+                "skill": {
+                    "instructions": "Define a scope for the potential skills the assistant should have to face the situation.",
+                    "type": "choice",
+                    "criteria": self._criteria(SkillType),
+                },
 
-            "action": {
-                "instructions": "Define what the assistant should actuate if an action is required.",
-                "type": "choice",
-                "criteria": self._criteria(ActionType),
-            },
+                "action": {
+                    "instructions": "Define what the assistant should actuate if an action is required.",
+                    "type": "choice",
+                    "criteria": self._criteria(ActionType),
+                },
 
-            "suggestion_type": {
-                "instructions": "Define what the assistant should suggest vocally to the driver if a suggestion is required.",
-                "type": "choice",
-                "criteria": self._criteria(SuggestionType),
-            },
-        }
+                "suggestion_type": {
+                    "instructions": "Define what the assistant should suggest vocally to the driver if a suggestion is required.",
+                    "type": "choice",
+                    "criteria": self._criteria(SuggestionType),
+                },
+            }
+        else:
+            state = {
+                "event": event.event_value,
+                "state": event.context,
+            }
+            laya_questions = {
+                "urgency": {
+                    "type": "choice",
+                    "instructions": (
+                        "Considering the triggering event, the driver state, and the overall context, "
+                        "how urgent is an assistant intervention?"
+                    ),
+                    "criteria": {k.name.lower(): k.value for k in UrgencyType},
+                },
+                "intervention_type": {
+                    "type": "choice",
+                    "instructions": (
+                        "Considering the triggering event and the overall driving context, "
+                        "including the driver's emotional, physical, attentional, and driving state, "
+                        "would it be useful to provide the driver with a suggestion?"
+                    ),
+                    "criteria": {k.name.lower(): k.value for k in SimpleInterventionType},
+                },
+                "suggestion_type": {
+                    "type": "choice",
+                    "instructions": (
+                        "If a suggestion is useful, which aspect should it primarily address? "
+                        "Choose the most relevant target from the available criteria."
+                    ),
+                    "criteria": {k.name.lower(): k.value for k in SuggestionType},
+                },
+            }
 
         result = self.laya_td.predict(state, laya_questions)
         laya_elapsed = time.time() - laya_start
@@ -172,23 +206,32 @@ class LayaAgent:
         )
 
         # LLM output will be generated based on this decision.
-        decision = {
-            "urgency": answers["urgency"]["choice"],
-            "tone": answers["tone"]["choice"],
-            "intervention": answers["intervention_type"]["choice"],
-            "action": answers["action"]["choice"],
-            "suggestion": answers["suggestion_type"]["choice"],
-            "skill": answers["skill"]["choice"],
-        }
-
-        intervention = InterventionType[decision["intervention"].upper()]
+        decision = {}
+        if "urgency" in answers:
+            decision["urgency"] = answers["urgency"]["choice"]
+        if "intervention_type" in answers:
+            decision["intervention_type"] = answers["intervention_type"]["choice"]
+        if "suggestion_type" in answers:
+            decision["suggestion_type"] = answers["suggestion_type"]["choice"]
+        if "action" in answers:
+            decision["action"] = answers["action"]["choice"]
+        if "tone" in answers:
+            decision["tone"] = answers["tone"]["choice"]
+        if "skill" in answers:
+            decision["skill"] = answers["skill"]["choice"]
+    
         urgency = UrgencyType[decision["urgency"].upper()]
         # Skip decisions below the urgency selected in the UI.
-        if (
-            intervention == InterventionType.NONE
-            or urgency.rank < self.minimum_urgency.rank
-        ):
-            return
+        if not self.custom_model:
+            if decision["suggestion_type"].upper() == SuggestionType.NONE.name:
+                return
+            if urgency.rank < self.minimum_urgency.rank:
+                return
+        else:
+            if decision["intervention_type"].upper() == InterventionType.NONE.name:
+                return
+            if urgency.rank < self.minimum_urgency.rank:
+                return
 
         system_message = """
             You are an in-vehicle assistant.
@@ -198,18 +241,24 @@ class LayaAgent:
             specified, prefer English as the default language.
 
             The decision has already been made. Do not override or reinterpret it.
-            Treat the intervention and suggestion_target values as internal instructions. Never
-            mention, repeat, or prefix the response with decision labels or values
-            such as "intervention", "suggestion_target", "suggest", "driving", or
-            "wellbeing".
+            Treat the intervention, suggestion_target and action values as internal
+            instructions. Never mention, repeat, or prefix the response with decision
+            labels or values such as "intervention", "suggestion_target", "action",
+            "suggest", "act", "driving", or "wellbeing".
 
             Interpret the intervention as follows:
             - none: no response should be generated.
             - suggest: suggest an appropriate behavior or response based on the triggering
             event, current context, and suggestion_target.
+            - act: naturally inform the driver that the action has been carried out, based
+            on the triggering event, current context, and action.
 
             The suggestion_target field identifies the aspect that the suggestion should
             address. Use it to focus the response, but do not name the category itself.
+
+            The action field, when present, identifies the vehicle or comfort function
+            that was executed. Use it to describe what was done, but do not name the
+            internal field itself.
 
             Do not mention internal models, scores, probabilities, confidence values,
             or internal reasoning.

@@ -78,6 +78,9 @@ target/
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# Model weights and artifacts (kept out of git for now, too large to push)
+models/
+
 # IPython
 profile_default/
 ipython_config.py

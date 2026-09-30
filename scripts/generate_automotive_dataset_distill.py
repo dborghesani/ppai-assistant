@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Automotive typed-decision dataset generator for Laya.
+Automotive typed-decision dataset generator for Laya -- LLM-distillation variant.
 
-Implements dataset_generation_prompt.md (improved spec):
-  * 50,000 rows by default (configurable via --n-samples), split 80/10/10 train/validation/test
-  * six typed `choice` decisions produced by ONE deterministic labeling function
-    applied to the serialized knowledge:  gold = label(parse(knowledge))
-  * family-level split assignment (hash of the categorical skeleton of each row)
-  * soft probabilities, grounded debug descriptions
-  * full automated validation and SHA-256 manifest
+Unlike generate_automotive_dataset.py (a deterministic rule table), this script
+distills the gold decisions from a teacher LLM: for every row, the rendered
+knowledge sentences and the full decision contract are sent to the LLM, which
+returns the six labels, a per-decision confidence and the debug description in
+one call. Automatic validation (consistency, critical-safety rule, schema)
+retries non-compliant LLM outputs and falls back to a safe rule-based decision
+only when the LLM keeps failing after --llm-retries attempts.
 
-Schema mirrors LocalLLaMA/typed-decisions: nested fields (state, questions, gold,
-factors, label_agreement, *__probabilities) are stored as JSON strings with
-sorted keys, in both Parquet and JSONL.
+Scenario generation, the knowledge catalog/templates, physical coherence,
+split assignment, schema, packaging and most validation checks are shared
+with generate_automotive_dataset.py.
 
-Requirements: Python 3.9+, pandas, pyarrow
+Requirements: Python 3.9+, pandas, pyarrow, a reachable Ollama server
     pip install pandas pyarrow
 Usage:
-    python generate_automotive_dataset.py [--seed 42] [--out-dir build] [--n-samples 50000] [--skip-determinism]
-    python generate_automotive_dataset.py --llm-description [--ollama-host localhost --ollama-port 11434
-        --ollama-model ollama/qwen2.5:3b-instruct]  # writes 'description' via Ollama (ensure `ollama serve`)
+    ollama serve &
+    python generate_automotive_dataset_distill.py [--seed 42] [--out-dir build] [--n-samples 200]
+        [--ollama-host localhost --ollama-port 11434 --ollama-model ollama/qwen2.5:3b-instruct]
+        [--llm-retries 3]
 """
 import argparse
 import hashlib
@@ -32,11 +33,14 @@ import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 from typing import Counter as CounterT
 from typing import DefaultDict
 
-from charset_normalizer import VERSION
+import requests
+
+from generate_automotive_dataset import label as rule_label
+from stellantis_LLM import StellantisVLLM
 
 try:
     import pandas as pd
@@ -58,7 +62,6 @@ from agents.agents_dataclasses import (  # noqa: E402
 # Loosely-typed scenario records: keys are short field codes (see FIELD_PATH), values are
 # bool | str | int | None or (int, trend_str) for numeric fields with a trend (speed, temperatures).
 Facts = dict[str, Any]
-Trigger = dict[str, Any]  # candidate rule produced by T()
 Decision = dict[str, str]  # {"urgency": ..., "tone": ..., ...} chosen labels
 Record = dict[str, Any]  # one built row before JSON serialization
 Row = dict[str, Any]  # one serialized (JSON-string-valued) output row
@@ -76,6 +79,7 @@ SPLIT_FRACTIONS = {"train": 0.8, "validation": 0.1, "test": 0.1}
 SPLITS = list(SPLIT_FRACTIONS)
 N_TOTAL = WEIGHT_TOTAL  # default; overridden in main() from --n-samples
 SPLIT_SIZES = {"train": 40_000, "validation": 5_000, "test": 5_000}  # default; overridden in main()
+REF_SPLIT_SIZES = dict(SPLIT_SIZES)  # reference split sizes the coverage thresholds are defined for
 
 
 def split_sizes_for(n_total: int) -> dict[str, int]:
@@ -410,369 +414,8 @@ def coherent(f: Facts) -> bool:
 
 
 # =============================================================================
-# 4. Deterministic labeling function (the rule table)
+# 4. Consistency and critical-safety validation helpers (used to check/enforce LLM output)
 # =============================================================================
-PRIORITY = ["sleeping", "open_door", "danger", "distraction", "fatigue_attention", "visibility_road",
-            "speeding", "tension_emotion", "lane_signal", "lighting", "highway_exit", "security",
-            "weather_prep", "comfort", "infotainment"]
-
-
-def T(cat: str, urg: str, itype: str, skill: str, g: Facts, action: str = "none", sugg: str = "none",
-      tone: str = "calm", ev: Sequence[str] = (), why: str = "", dom: str = "", sub: int = 0) -> Trigger:
-    return {"cat": cat, "urg": urg, "itype": itype, "skill": skill, "action": action, "sugg": sugg,
-            "tone": tone, "ev": [k for k in dict.fromkeys(ev) if k in g], "why": why, "dom": dom, "sub": sub}
-
-
-def triggers(g: Facts) -> list[Trigger]:
-    t: list[Trigger] = []
-    s = g["speed"][0]
-    mv = s > 0
-    act, att, fat = g.get("activity"), g.get("attention"), g.get("fatigue")
-    rt, tr, veh = g.get("road_type"), g.get("traffic"), g.get("vehicles")
-    vis, cond, w, tm = g.get("visibility"), g.get("road_cond"), g.get("weather"), g.get("time")
-    lim = g.get("limit")
-    ov = (s - lim) if lim is not None else None
-    heavy = tr == "heavy" or veh == "high"
-    heavy_ev = ["traffic"] if tr == "heavy" else (["vehicles"] if veh == "high" else [])
-    eng, lk, trunk, risk = g.get("engine"), g.get("locked"), g.get("trunk"), g.get("risk")
-    ten, ang, sad, fear, hap = g.get("tension"), g.get("angry"), g.get("sad"), g.get("fear"), g.get("happy")
-    doors_open = [k for k in DOOR_KEYS if g.get(k) is True]
-
-    # --- critical safety (suggest only) -------------------------------------
-    if mv and act == "asleep":
-        t.append(T("sleeping", "critical", "suggest", "wellbeing", g, sugg="restore_attention", tone="serious",
-                   ev=["activity", "speed"],
-                   why="a driver who appears asleep in a moving vehicle is an immediate danger",
-                   dom="the driver's physical state and ability to pay attention"))
-    if mv and (doors_open or trunk is True):
-        t.append(T("open_door", "critical", "suggest", "driving", g, sugg="secure_vehicle", tone="serious",
-                   ev=doors_open + (["trunk"] if trunk is True else []) + ["speed"],
-                   why="an open door or trunk on a moving vehicle is a serious safety risk",
-                   dom="the state of the vehicle"))
-    if mv and g.get("danger") in DENS3:
-        t.append(T("danger", "critical", "suggest", "driving", g, sugg="adapt_driving_to_conditions",
-                   tone="serious", ev=["danger", "speed"],
-                   why="dangerous objects around a moving vehicle require immediate caution",
-                   dom="a hazard on or near the road"))
-
-    # --- distraction ------------------------------------------------------------
-    if mv and act == "phone":
-        crit = s >= 90 or rt == "highway"
-        t.append(T("distraction", "critical" if crit else "high", "suggest", "wellbeing", g,
-                   sugg="reduce_distraction", tone="serious",
-                   ev=["activity", "speed"] + (["road_type"] if rt == "highway" else []),
-                   why=("using a phone at this speed is a severe distraction" if crit
-                        else "using a phone while the vehicle is moving seriously distracts the driver"),
-                   dom="the driver's activity and attention"))
-    if mv and act == "eating":
-        u = "high" if heavy else "medium"
-        t.append(T("distraction", u, "suggest", "wellbeing", g, sugg="reduce_distraction",
-                   tone="serious" if u == "high" else "calm", ev=["activity", "speed"] + heavy_ev,
-                   why="eating while the vehicle is moving" + (" in heavy traffic" if heavy else "")
-                       + " takes attention away from driving",
-                   dom="the driver's activity and attention", sub=1))
-
-    # --- fatigue & attention ---------------------------------------------------
-    if mv:
-        fa = None
-        if fat == "very high" and att == "low":
-            fa = ("critical", "suggest", "none", "take_break", "serious", ["fatigue", "attention", "speed"],
-                  "very high fatigue combined with low attention while driving is an immediate safety concern")
-        elif fat == "very high":
-            fa = ("high", "suggest", "none", "take_break", "serious", ["fatigue", "attention", "speed"],
-                  "very high fatigue while driving makes a break strongly advisable")
-        elif fat == "high" and att == "low":
-            fa = ("high", "suggest", "none", "take_break", "serious", ["fatigue", "attention", "speed"],
-                  "high fatigue together with low attention makes continued driving risky")
-        elif fat == "high" and att in ATT_OK and rt in ("highway", "rural"):
-            fa = ("medium", "act", "find_rest_area", "none", "calm", ["fatigue", "attention", "road_type", "speed"],
-                  f"high fatigue on a {rt} road, while attention is still {att}, makes a planned stop advisable soon")
-        elif fat == "high":
-            fa = ("medium", "suggest", "none", "take_break", "calm", ["fatigue", "attention", "speed"],
-                  "high fatigue while driving makes a break advisable soon")
-        elif fat == "medium" and att in ATT_OK and tm == "Night" and rt == "highway":
-            fa = ("low", "suggest", "none", "take_break", "calm", ["fatigue", "attention", "time", "road_type"],
-                  "medium fatigue on a highway at night is an early warning sign")
-        if fa:
-            u, it, a, sg, tn, ev, why = fa
-            t.append(T("fatigue_attention", u, it, "wellbeing", g, action=a, sugg=sg, tone=tn, ev=ev, why=why,
-                       dom="the driver's fatigue and attention"))
-        if att == "low" and fat in (None, "none", "low", "medium"):
-            fast = s >= 90
-            u = "high" if (fast or heavy) else "medium"
-            extra = " at this speed" if fast else (" in heavy traffic" if heavy else "")
-            t.append(T("fatigue_attention", u, "suggest", "wellbeing", g, sugg="restore_attention",
-                       tone="serious" if u == "high" else "calm", ev=["attention", "speed"] + heavy_ev,
-                       why="low attention while the vehicle is moving" + extra + " can lead to missed hazards",
-                       dom="the driver's attention", sub=1))
-
-    # --- visibility & road condition -----------------------------------------
-    if mv:
-        if vis == "low" and cond in ("icy", "snowy"):
-            t.append(T("visibility_road", "critical", "suggest", "driving", g, sugg="adapt_driving_to_conditions",
-                       tone="serious", ev=["visibility", "road_cond", "speed"],
-                       why=f"low visibility on a {cond} road while moving is a serious combined hazard",
-                       dom="road conditions and visibility"))
-        elif ov is None or ov <= 0:
-            if cond in ("wet", "icy", "snowy", "gravel") and vis in ("low", "medium"):
-                t.append(T("visibility_road", "high", "suggest", "driving", g, sugg="adapt_driving_to_conditions",
-                           tone="serious", ev=["road_cond", "visibility", "speed"],
-                           why=f"a {cond} road combined with {vis} visibility calls for noticeably more cautious driving",
-                           dom="road conditions and visibility"))
-            elif cond in ("icy", "snowy") and s >= 50:
-                t.append(T("visibility_road", "medium", "suggest", "driving", g, sugg="adapt_driving_to_conditions",
-                           tone="calm", ev=["road_cond", "speed"],
-                           why=f"a {cond} road at this speed offers little grip",
-                           dom="the road condition"))
-            elif cond == "gravel" and s >= 70:
-                t.append(T("visibility_road", "medium", "suggest", "driving", g, sugg="adapt_driving_to_conditions",
-                           tone="calm", ev=["road_cond", "speed"],
-                           why="a gravel road at this speed reduces grip and stability",
-                           dom="the road condition"))
-
-    # --- speeding --------------------------------------------------------------
-    if mv and ov is not None and ov > 0:
-        bad = cond in ("wet", "icy", "snowy", "gravel")
-        if bad:
-            u = "high"
-        elif ov <= 10:
-            u = "low"
-        elif ov <= 20:
-            u = "medium"
-        else:
-            u = "high"
-        ev = ["speed", "limit"] + (["road_cond"] if bad else [])
-        why = "the speed is above the speed limit" + (f" on a {cond} road" if bad else "")
-        if u != "high" and g.get("people") in ("medium", "high") and rt in ("urban", "residential"):
-            u = URG[UI[u] + 1]
-            ev += ["people", "road_type"]
-            why += " with people around"
-        t.append(T("speeding", u, "suggest", "driving", g, sugg="reduce_speed",
-                   tone="serious" if u == "high" else "calm", ev=ev, why=why, dom="speed compliance"))
-
-    # --- tension & emotion -----------------------------------------------------
-    if mv and ten == "very high" and ov is not None and ov > 0:
-        t.append(T("tension_emotion", "critical", "suggest", "driving", g, sugg="calm_driving", tone="serious",
-                   ev=["tension", "speed", "limit"],
-                   why="very high driving tension combined with speeding is an immediate safety risk",
-                   dom="the driving style"))
-    if mv and ang in HI:
-        if ten in HI and tr == "heavy":
-            t.append(T("tension_emotion", "high", "suggest", "wellbeing", g, sugg="regulate_emotional_state",
-                       tone="calm", ev=["angry", "tension", "traffic"],
-                       why="strong anger combined with tense driving in heavy traffic can quickly escalate",
-                       dom="the driver's emotional state", sub=1))
-        else:
-            t.append(T("tension_emotion", "medium", "suggest", "wellbeing", g, sugg="regulate_emotional_state",
-                       tone="calm", ev=["angry", "speed"], why="strong anger while driving can cloud judgement",
-                       dom="the driver's emotional state", sub=1))
-    elif mv and ten in HI:
-        if tr in ("medium", "heavy"):
-            t.append(T("tension_emotion", "medium", "suggest", "driving", g, sugg="calm_driving", tone="calm",
-                       ev=["tension", "traffic"],
-                       why=f"tense driving in {tr} traffic raises the chance of abrupt manoeuvres",
-                       dom="the driving style", sub=2))
-        elif ten == "very high":
-            t.append(T("tension_emotion", "medium", "suggest", "driving", g, sugg="calm_driving", tone="calm",
-                       ev=["tension", "speed"], why="very high driving tension calls for smoother driving",
-                       dom="the driving style", sub=2))
-        else:
-            t.append(T("tension_emotion", "low", "suggest", "driving", g, sugg="calm_driving", tone="calm",
-                       ev=["tension", "speed"], why="a high level of driving tension suggests the driving could be smoother",
-                       dom="the driving style", sub=2))
-    if mv and sad in ("medium", "high", "very high") and att in ATT_OK + (None,):
-        u = "low" if sad == "medium" else "medium"
-        why = ("noticeable" if sad == "medium" else "strong") + " sadness while driving can weigh on concentration"
-        if att:
-            why += f", even though attention is still {att}"
-        t.append(T("tension_emotion", u, "suggest", "wellbeing", g, sugg="regulate_emotional_state",
-                   tone="empathetic", ev=["sad", "attention", "speed"], why=why,
-                   dom="the driver's emotional state", sub=3))
-    if mv and fear in HI:
-        t.append(T("tension_emotion", "medium", "suggest", "wellbeing", g, sugg="regulate_emotional_state",
-                   tone="empathetic", ev=["fear", "speed"],
-                   why="strong fear while driving can make reactions less reliable",
-                   dom="the driver's emotional state", sub=4))
-
-    # --- lane & turn signal ----------------------------------------------------
-    if mv and g.get("signal") is not None:
-        for side, k in (("left", "cross_l"), ("right", "cross_r")):
-            if g.get(k) and g["signal"] != side:
-                if att == "low":
-                    t.append(T("lane_signal", "high", "suggest", "wellbeing", g, sugg="restore_attention",
-                               tone="serious", ev=[k, "signal", "attention"],
-                               why="crossing a lane marking without the matching turn signal while attention is low "
-                                   "suggests the driver is not fully focused",
-                               dom="the driver's attention"))
-                else:
-                    hw = rt == "highway"
-                    u = "high" if hw else "medium"
-                    t.append(T("lane_signal", u, "suggest", "driving", g, sugg="use_turn_signal",
-                               tone="serious" if hw else "calm", ev=[k, "signal"] + (["road_type"] if hw else []),
-                               why="the vehicle is crossing a lane marking without the matching turn signal"
-                                   + (" on a highway" if hw else ""),
-                               dom="lane behaviour and signalling", sub=1))
-
-    # --- lighting (act) ---------------------------------------------------------
-    hb, lb, fg, sd = g.get("high"), g.get("low"), g.get("fog"), g.get("side")
-    if hb is True:
-        why_h: str | None = None
-        ev_h: list[str] = []
-        if veh in DENS3:
-            why_h, ev_h = "the high beams are on while other vehicles are around", ["high", "vehicles"]
-        elif tr in ("light", "medium", "heavy"):
-            why_h, ev_h = "the high beams are on while there is traffic around", ["high", "traffic"]
-        elif rt in ("urban", "residential"):
-            why_h, ev_h = f"the high beams are on while driving on a {rt} road", ["high", "road_type"]
-        elif w == "foggy":
-            why_h, ev_h = "the high beams are on in foggy weather, where they reflect and dazzle", ["high", "weather"]
-        if why_h:
-            t.append(T("lighting", "medium", "act", "driving", g, action="disable_high_beam_headlights", tone="calm",
-                       ev=ev_h, why=why_h, dom="the vehicle's lighting", sub=0))
-    if mv and w in ("foggy", "snowy") and vis == "low" and fg is False:
-        t.append(T("lighting", "medium", "act", "driving", g, action="enable_fog_lights", tone="calm",
-                   ev=["fog", "weather", "visibility"],
-                   why=f"the fog lights are off although the weather is {w} and visibility is low",
-                   dom="the vehicle's lighting", sub=1))
-    if mv and lb is False and (tm == "Night" or vis in ("low", "medium")):
-        reason = "it is night" if tm == "Night" else f"visibility is {vis}"
-        t.append(T("lighting", "medium", "act", "driving", g, action="enable_low_beam_headlights", tone="calm",
-                   ev=["low", "time" if tm == "Night" else "visibility", "speed"],
-                   why=f"the low beam headlights are off while driving although {reason}",
-                   dom="the vehicle's lighting", sub=2))
-    if (mv and tm == "Night" and rt in ("rural", "highway") and veh == "none" and g.get("people") == "none"
-            and tr in (None, "none") and vis in GOOD_VIS and w != "foggy" and hb is False and lb is True):
-        t.append(T("lighting", "low", "act", "driving", g, action="enable_high_beam_headlights", tone="discreet",
-                   ev=["time", "road_type", "vehicles", "people", "visibility", "high"],
-                   why=f"at night on a {rt} road with nobody around and good visibility, high beams improve the view ahead",
-                   dom="the vehicle's lighting", sub=3))
-    if fg is True and vis in GOOD_VIS and w is not None and w not in ("foggy", "snowy"):
-        t.append(T("lighting", "low", "act", "driving", g, action="disable_fog_lights", tone="discreet",
-                   ev=["fog", "visibility", "weather"],
-                   why=f"the fog lights are still on although visibility is {vis} and the weather is {w}",
-                   dom="the vehicle's lighting", sub=4))
-    if not mv and eng is False and act == "about_exit" and lb is True:
-        t.append(T("lighting", "low", "act", "driving", g, action="disable_low_beam_headlights", tone="discreet",
-                   ev=["low", "engine", "activity"],
-                   why="the low beams are still on while the engine is off and the driver is leaving",
-                   dom="the vehicle's lighting", sub=5))
-    if tm == "Evening" and not mv and eng is True and sd is False and lb is False:
-        t.append(T("lighting", "low", "act", "driving", g, action="enable_sidelights", tone="discreet",
-                   ev=["time", "speed", "engine", "side", "low"],
-                   why="the sidelights are off in the evening while the vehicle stands with the engine on and no headlights",
-                   dom="the vehicle's lighting", sub=6))
-    if tm in ("Morning", "Afternoon") and vis == "optimal" and sd is True and lb is False:
-        t.append(T("lighting", "low", "act", "driving", g, action="disable_sidelights", tone="discreet",
-                   ev=["time", "visibility", "side"],
-                   why=f"the sidelights are on during the {tm.lower()} even though visibility is optimal",
-                   dom="the vehicle's lighting", sub=7))
-
-    # --- highway exit -------------------------------------------------------
-    ex, ln = g.get("exit"), g.get("lane")
-    if mv and ((ex == "right" and ln == "left") or (ex == "left" and ln == "right")):
-        t.append(T("highway_exit", "medium", "suggest", "driving", g, sugg="prepare_for_maneuver", tone="calm",
-                   ev=["exit", "lane"],
-                   why=f"a highway exit is coming up on the {ex} while the vehicle is still in the {ln} lane",
-                   dom="navigation and lane positioning"))
-
-    # --- vehicle security -----------------------------------------------------
-    if not mv and act == "about_exit" and risk in ("medium", "high") and (lk is False or trunk is True):
-        t.append(T("security", "medium", "suggest", "driving", g, sugg="secure_vehicle", tone="calm",
-                   ev=["activity", "risk"] + (["locked"] if lk is False else []) + (["trunk"] if trunk is True else []),
-                   why=f"the driver is about to leave the vehicle in an area with {risk} risk while it is not fully secured",
-                   dom="the security of the vehicle"))
-    if not mv and act != "about_exit" and trunk is True and risk in ("medium", "high"):
-        t.append(T("security", "medium", "suggest", "driving", g, sugg="secure_vehicle", tone="calm",
-                   ev=["trunk", "risk", "speed"],
-                   why=f"the trunk is open on a stationary vehicle in an area with {risk} risk",
-                   dom="the security of the vehicle", sub=1))
-    if lk is False and not doors_open and trunk is not True:
-        if mv and s >= 10:
-            u = "medium" if risk in ("medium", "high") else "low"
-            t.append(T("security", u, "act", "driving", g, action="lock_doors",
-                       tone="calm" if u == "medium" else "discreet", ev=["locked", "speed", "risk"],
-                       why="the doors are unlocked while the vehicle is moving"
-                           + (f" through an area with {risk} risk" if u == "medium" else ""),
-                       dom="the security of the vehicle", sub=2))
-        elif not mv and act != "about_exit" and risk in ("medium", "high"):
-            t.append(T("security", "medium", "act", "driving", g, action="lock_doors", tone="calm",
-                       ev=["locked", "risk", "speed"],
-                       why=f"the doors of the stationary vehicle are unlocked in an area with {risk} risk",
-                       dom="the security of the vehicle", sub=2))
-    if not mv and eng is False and act == "about_exit" and lk is True and risk in (None, "none", "low"):
-        t.append(T("security", "low", "act", "driving", g, action="unlock_doors", tone="discreet",
-                   ev=["locked", "activity", "engine", "risk"],
-                   why="the driver is about to exit a stopped vehicle with the engine off while the doors are still locked "
-                       "and there is no elevated risk",
-                   dom="access to the vehicle", sub=3))
-
-    # --- weather preparation --------------------------------------------------
-    fc = g.get("forecast")
-    if not mv and act == "about_exit" and fc in ("rainy", "snowy", "foggy") and w is not None and fc != w:
-        t.append(T("weather_prep", "low", "suggest", "wellbeing", g, sugg="prepare_for_weather", tone="calm",
-                   ev=["activity", "weather", "forecast"],
-                   why=f"the driver is about to step out while the weather is {w} but the forecast predicts {fc} conditions",
-                   dom="the driver's personal comfort outside the vehicle"))
-    et = g["ext_temp"][0] if g.get("ext_temp") else None
-    if mv and fc == "snowy" and w is not None and w != "snowy" and et is not None and et <= 2 and cond in (None, "dry", "wet"):
-        t.append(T("weather_prep", "low", "suggest", "driving", g, sugg="prepare_for_weather", tone="calm",
-                   ev=["forecast", "weather", "ext_temp"],
-                   why="snow is forecast while the outside temperature is already near freezing",
-                   dom="upcoming road and weather conditions", sub=1))
-
-    # --- cabin comfort (act) ---------------------------------------------------
-    if eng is True and g.get("int_temp"):
-        cabin_temp: int = g["int_temp"][0]
-        if cabin_temp <= 17:
-            t.append(T("comfort", "low", "act", "wellbeing", g, action="increase_temperature", tone="discreet",
-                       ev=["int_temp", "engine"], why="the cabin temperature is too low for comfort",
-                       dom="cabin comfort"))
-        elif et is not None and cabin_temp >= 28 and et >= 25:
-            u = "medium" if cabin_temp >= 32 else "low"
-            t.append(T("comfort", u, "act", "wellbeing", g, action="enable_air_conditioning",
-                       tone="calm" if u == "medium" else "discreet", ev=["int_temp", "ext_temp", "engine"],
-                       why="the cabin is hot while it is also hot outside", dom="cabin comfort"))
-        elif et is not None and cabin_temp >= 25 and et < 25:
-            t.append(T("comfort", "low", "act", "wellbeing", g, action="decrease_temperature", tone="discreet",
-                       ev=["int_temp", "ext_temp", "engine"],
-                       why="the cabin is warmer than comfortable while it is cooler outside", dom="cabin comfort"))
-        elif et is not None and cabin_temp in (18, 19) and et <= 12:
-            t.append(T("comfort", "low", "act", "wellbeing", g, action="disable_air_conditioning", tone="discreet",
-                       ev=["int_temp", "ext_temp", "engine"],
-                       why="the cabin is already cool and it is cold outside, so air conditioning is not needed",
-                       dom="cabin comfort"))
-
-    # --- infotainment & navigation (act) --------------------------------------
-    if mv and tr in ("none", "light") and att in HI and (sad == "low" or hap in HI):
-        if sad == "low":
-            t.append(T("infotainment", "low", "act", "wellbeing", g, action="start_radio", tone="empathetic",
-                       ev=["sad", "attention", "traffic"],
-                       why="mild sadness with high attention and calm traffic makes some music a gentle comfort",
-                       dom="the driver's mood and comfort"))
-        else:
-            t.append(T("infotainment", "low", "act", "wellbeing", g, action="start_radio", tone="enthusiastic",
-                       ev=["happy", "attention", "traffic"],
-                       why="a happy driver with high attention in calm traffic can enjoy some music",
-                       dom="the driver's mood and comfort"))
-    if mv and act == "talking" and tr == "heavy" and att in ATT_OK:
-        t.append(T("infotainment", "low", "act", "wellbeing", g, action="stop_radio", tone="discreet",
-                   ev=["activity", "traffic", "attention"],
-                   why="the driver is talking in heavy traffic, so removing background audio helps keep focus",
-                   dom="the driver's focus and comfort", sub=1))
-    if not mv and eng is False and act == "about_exit":
-        t.append(T("infotainment", "low", "act", "driving", g, action="stop_navigation", tone="discreet",
-                   ev=["engine", "activity", "speed"],
-                   why="the vehicle is stopped with the engine off and the driver is leaving, so the trip has ended",
-                   dom="trip navigation", sub=2))
-    if not mv and eng is True and act == "idle" and lk is True and trunk is False and not doors_open:
-        t.append(T("infotainment", "low", "act", "driving", g, action="start_navigation", tone="discreet",
-                   ev=["engine", "activity", "locked", "trunk", "speed"],
-                   why="the vehicle is stopped and ready, with the engine on, doors locked, trunk closed and no driver "
-                       "activity, so the trip can be prepared",
-                   dom="trip navigation", sub=3))
-    return t
-
-
 def check_consistency(d: Decision) -> None:
     it = d["intervention_type"]
     if it == "none":
@@ -787,31 +430,8 @@ def check_consistency(d: Decision) -> None:
         assert it == "suggest" and d["action"] == "none" and d["tone"] == "serious", d
 
 
-def label(g: Facts) -> tuple[Decision, Trigger | None, list[Trigger]]:
-    """gold = label(parsed knowledge). Returns (decision, top_trigger, other_triggers)."""
-    ts = triggers(g)
-    if not ts:
-        return dict(NONE_DEC), None, []
-    ts.sort(key=lambda x: (-UI[x["urg"]], PRIORITY.index(x["cat"]), x["sub"]))
-    top = dict(ts[0])
-    top["ev"] = list(top["ev"])
-    tone = top["tone"]
-    if top["urg"] == "critical":
-        tone = "serious"
-    elif (top["urg"] == "low" and top["cat"] in ("comfort", "infotainment", "weather_prep")
-          and g.get("happy") in HI and tone in ("discreet", "calm")):
-        tone = "enthusiastic"
-        if "happy" not in top["ev"]:
-            top["ev"].append("happy")
-    top["tone"] = tone
-    dec = {"urgency": top["urg"], "tone": tone, "intervention_type": top["itype"], "skill": top["skill"],
-           "action": top["action"], "suggestion_type": top["sugg"]}
-    check_consistency(dec)
-    return dec, top, ts[1:]
-
-
 def critical_expected(g: Facts) -> str | None:
-    """Independent re-statement of the critical safety rule (used by validation)."""
+    """Independent re-statement of the critical safety rule (used to validate/enforce LLM output)."""
     s = g["speed"][0]
     if s <= 0:
         return None
@@ -871,10 +491,13 @@ def neighbors(q: str, t: str) -> list[str]:
     return ["none"]
 
 
-def soft(q: str, target: str, r: random.Random, boundary: bool) -> tuple[dict[str, float], float]:
+def soft(q: str, target: str, llm_confidence: float, r: random.Random) -> tuple[dict[str, float], float]:
     labels = list(CRITERIA[q])
     others = [l for l in labels if l != target]
-    conf = r.uniform(0.75, 0.85) if boundary else r.uniform(0.85, 0.97)
+    # Clamp the teacher's self-reported confidence into a safe range: high enough that the
+    # target always remains the unique maximum regardless of how the remaining mass is spread,
+    # while still carrying the LLM's own uncertainty signal through the clamp.
+    conf = min(0.97, max(0.75, llm_confidence))
     floor = 0.0005
     rest = 1.0 - conf - floor * len(others)
     w = {l: 0.0 for l in others}
@@ -896,108 +519,16 @@ def soft(q: str, target: str, r: random.Random, boundary: bool) -> tuple[dict[st
     return ordered, probs[target]
 
 
-def is_boundary(g: Facts) -> bool:
-    s = g["speed"][0]
-    if g.get("limit") is not None and (s - g["limit"]) in (0, 1, 10, 11, 20, 21):
-        return True
-    if g.get("int_temp") and g["int_temp"][0] in (17, 18, 19, 24, 25, 27, 28, 31, 32):
-        return True
-    if g.get("ext_temp") and g["ext_temp"][0] in (2, 3, 12, 13, 24, 25):
-        return True
-    if s in (9, 10, 49, 50, 69, 70, 89, 90):
-        return True
-    return False
-
-
 # =============================================================================
-# 6. Debug description (written last, only from knowledge)
+# 6. LLM distillation (each row's labels, confidences and description come from a teacher LLM)
 # =============================================================================
-TONE_REASON = {
-    "serious": ["the situation calls for a direct and unambiguous message",
-                "a clear, direct message matches the level of risk"],
-    "calm": ["a reassuring message helps the driver respond without adding stress",
-             "a calm message keeps the driver composed while acting on it"],
-    "empathetic": ["the driver's emotional state calls for warmth and understanding",
-                   "a warm, understanding message fits how the driver feels"],
-    "discreet": ["the matter is minor and should not interrupt the driver",
-                 "a low-key message avoids distracting the driver"],
-    "enthusiastic": ["the driver is in a happy mood and the change is a positive one",
-                     "a lively tone matches the driver's happy mood"],
-}
-NOTABLE = {
-    "fatigue": ("medium", "high", "very high"), "attention": ("low",),
-    "activity": ("talking", "eating", "phone", "asleep", "about_exit"), "tension": HI,
-    **{e: HI for e in EMOS},
-}
-
-
-def cap(s: str) -> str:
-    return s[0].upper() + s[1:]
-
-
-def join_facts(g: Facts, keys: list[str]) -> str:
-    parts = []
-    for k in keys:
-        if k in g:
-            sent = render_field(k, g[k])
-            if sent:
-                p = sent.rstrip(".")
-                parts.append(p[0].lower() + p[1:])
-    if not parts:
-        return "no notable condition is reported"
-    if len(parts) == 1:
-        return parts[0]
-    return ", ".join(parts[:-1]) + " and " + parts[-1]
-
-
-def describe(g: Facts, dec: Decision, top: Trigger | None, others: list[Trigger], r: random.Random) -> str:
-    lead = r.choice(["The knowledge shows that {F}.", "According to the observed state, {F}.",
-                     "The state reports that {F}."])
-    if top is None:
-        notable = [k for k, vals in NOTABLE.items() if g.get(k) in vals]
-        mv = g["speed"][0] > 0
-        keys = notable[:2] + (["speed"] if not mv else [])
-        pool = [k for k in g if k not in keys]
-        r.shuffle(pool)
-        keys += pool[: max(0, 3 - len(keys))]
-        s1 = lead.format(F=join_facts(g, keys))
-        if notable and not mv:
-            s2 = ("Because the vehicle is stationary, these conditions do not create a driving risk and nothing else "
-                  "calls for help, so urgency is none and there is no intervention.")
-        else:
-            s2 = ("None of these facts points to a safety, attention, emotional, comfort or vehicle-state issue that "
-                  "calls for help, so urgency is none and there is no intervention.")
-        s3 = "Without an intervention, the skill, action and suggestion all remain none."
-        s4 = "A discreet tone is appropriate because no active communication is required."
-        return " ".join([s1, s2, s3, s4])
-
-    s1 = lead.format(F=join_facts(g, top["ev"]))
-    s2 = (f"{cap(top['why'])}, so urgency is {dec['urgency']} and a {dec['tone']} tone fits because "
-          f"{r.choice(TONE_REASON[dec['tone']])}.")
-    s3 = r.choice([f"Since the decisive issue concerns {top['dom']}, the relevant skill is {dec['skill']}.",
-                   f"The skill is {dec['skill']} because the deciding factor is {top['dom']}."])
-    if dec["intervention_type"] == "act":
-        a_h = dec["action"].replace("_", " ")
-        s4 = r.choice([
-            f"This can be handled with one supported and reversible change, so the intervention is to act with "
-            f"the {a_h} action and no separate suggestion is needed.",
-            f"A single reversible vehicle function addresses it directly, so the intervention is to act by "
-            f"taking the {a_h} action and no separate suggestion is needed.",
-        ])
+def build_stellantis_llm(stellantis_llm: str) -> Any:
+    status = requests.get(f"https://apps.services.calypso.intra.chrysler.com/cmd/state?application={stellantis_llm}", timeout=30)
+    if status.json() == "ONLINE":
+        print(f"Stellantis LLM ({stellantis_llm}) is ready")
     else:
-        sg = dec["suggestion_type"]
-        intent = CRITERIA["suggestion_type"][sg].rstrip(".")
-        intent = intent[0].lower() + intent[1:]
-        s4 = (f"The assistant should advise rather than take control of the vehicle, so the intervention is a "
-              f"suggestion with no direct action, and {sg.replace('_', ' ')} fits because the aim is to {intent}.")
-    parts = [s1, s2, s3, s4]
-    if others:
-        extra = [k for k in others[0]["ev"] if k not in top["ev"]][:2]
-        if extra:
-            parts.append(f"Other observed facts, such as that {join_facts(g, extra)}, are less urgent or lower "
-                         f"priority and do not change the decision.")
-    return " ".join(parts)
-
+        raise Exception(f"LLM {stellantis_llm} status is {status.json()}, please start it manually or wait for it to be fully ONLINE.")
+    return StellantisVLLM(model=stellantis_llm)
 
 def build_llm(ollama_host: str, ollama_port: int, ollama_model: str, ollama_timeout: int = 1200, max_tokens: int = 50000) -> Any:
     """Same Ollama-backed crewai LLM interface used at runtime by agents/llm_agent.py."""
@@ -1009,60 +540,282 @@ def build_llm(ollama_host: str, ollama_port: int, ollama_model: str, ollama_time
         max_tokens=max_tokens,
     )
 
-
-def llm_description_prompt(sents: list[str], dec: Decision) -> str:
+def build_distill_prompt(sents: list[str]) -> str:
     facts = "\n".join(f"- {s}" for s in sents)
-    decisions = ", ".join(f"{q}={dec[q]}" for q in DECISIONS)
+    criteria_block = "\n".join(
+        f"{q} ({INSTRUCTIONS[q]}): " + ", ".join(f'"{l}"={CRITERIA[q][l]}' for l in CRITERIA[q])
+        for q in DECISIONS
+    )
     return (
-        "You write short debug explanations for a synthetic in-vehicle assistant dataset.\n"
-        "Given the observed facts and the already-decided output below, write 2 to 5 sentences in English "
-        "explaining, in causal terms (use words like \"because\", \"so\", \"since\" or \"therefore\"), why "
-        "these six decisions follow from the facts.\n"
-        "Rules:\n"
-        "- Only use numbers that literally appear in the facts below; never invent new numbers.\n"
-        "- Use the words urgency, tone, intervention, skill, action and suggest at least once each.\n"
-        "- Explain the reasoning, do not just restate the raw label values.\n"
-        "- Output plain prose only: no bullet points, no JSON, no headers.\n\n"
+        "You are the teacher model for a synthetic in-vehicle assistant dataset. Given the observed facts "
+        "below, decide the six typed decisions defined by this contract, then explain your reasoning.\n\n"
         f"Facts:\n{facts}\n\n"
-        f"Decisions: {decisions}\n"
+        f"Decisions and allowed labels:\n{criteria_block}\n\n"
+        "Rules:\n"
+        "- Every label must be exactly one of the allowed label tokens listed for that decision.\n"
+        "- If intervention_type=none, skill, action and suggestion_type must all be none, and urgency must be "
+        "none.\n"
+        "- If intervention_type=act, action must not be none, suggestion_type must be none, and skill must be "
+        "driving or wellbeing.\n"
+        "- If intervention_type=suggest, action must be none, suggestion_type must not be none, and skill must "
+        "be driving or wellbeing.\n"
+        "- skill=conversation is never correct for this dataset; do not use it.\n"
+        "- These situations always require urgency=critical, intervention_type=suggest, action=none, "
+        "tone=serious and exactly this suggestion_type (moving means speed above 0): driver asleep while "
+        "moving -> restore_attention; a door or the trunk open while moving -> secure_vehicle; dangerous "
+        "objects detected while moving -> adapt_driving_to_conditions; phone use while moving at speed 90 or "
+        "more or on a highway -> reduce_distraction; very high fatigue with low attention while moving -> "
+        "take_break; low visibility on an icy or snowy road while moving -> adapt_driving_to_conditions; very "
+        "high driving tension while the speed is above the speed limit -> calm_driving.\n"
+        "- urgency=critical is reserved exclusively for those situations. If none of them is present in the "
+        "facts above, urgency must be none, low, medium or high and critical is forbidden, however serious "
+        "the situation may otherwise look.\n"
+        "- suggestion_type=reduce_speed only when the speed is strictly above a stated speed limit.\n"
+        "- Other suggest situations while moving: phone or eating -> reduce_distraction; high or very high "
+        "fatigue -> take_break; low attention -> restore_attention; wet, icy, snowy or gravel road with low or "
+        "medium visibility or at high speed -> adapt_driving_to_conditions; strong anger, sadness or fear -> "
+        "regulate_emotional_state; high tension -> calm_driving; crossing a lane marking without the matching "
+        "turn signal -> use_turn_signal; highway exit on one side while in the opposite lane -> "
+        "prepare_for_maneuver. Driver about to exit: forecast of rain, snow or fog differing from the current "
+        "weather -> prepare_for_weather; unlocked vehicle or open trunk in a medium or high risk area -> "
+        "secure_vehicle.\n"
+        "- Use intervention_type=act (usually urgency low or medium, tone discreet or calm) when one reversible "
+        "action fixes the situation and nothing more urgent applies: engine on and internal temperature 17 or "
+        "below -> increase_temperature; internal 28 or more and external 25 or more -> enable_air_conditioning; "
+        "internal 25 or more and external below 25 -> decrease_temperature; internal 18 or 19 and external 12 "
+        "or below -> disable_air_conditioning (these four use skill=wellbeing); doors unlocked while moving, or "
+        "while stopped in a medium or high risk area -> lock_doors; stopped with engine off, driver about to "
+        "exit and doors locked with no elevated risk -> unlock_doors; stopped with engine off and driver about "
+        "to exit -> stop_navigation, or disable_low_beam_headlights if the low beams are on; stopped (speed 0) "
+        "with engine on, no distracting driver activity, doors locked and trunk closed -> start_navigation "
+        "(the vehicle is ready to depart, so the trip is prepared; no destination needs to be stated); moving with high attention, no or "
+        "light traffic and mild sadness or strong happiness -> start_radio (skill=wellbeing); driver talking in "
+        "heavy traffic -> stop_radio (skill=wellbeing); evening, stopped, engine on, sidelights and low beams "
+        "off -> enable_sidelights; morning or afternoon with optimal visibility, sidelights on and low beams off "
+        "-> disable_sidelights; moving with low beams off at night or with low or medium visibility -> "
+        "enable_low_beam_headlights; night on a rural road or highway with no vehicles or people around, good "
+        "visibility, low beams on and high beams off -> enable_high_beam_headlights; high beams on with traffic "
+        "or vehicles around, on an urban or residential road or in fog -> disable_high_beam_headlights; moving "
+        "in fog or snow with low visibility and fog lights off -> enable_fog_lights; fog lights on with good "
+        "visibility and no fog or snow -> disable_fog_lights; high fatigue with medium or better attention on "
+        "a highway or rural road -> find_rest_area (skill=wellbeing). Lighting, locking and navigation actions "
+        "use skill=driving.\n"
+        "- If no situation above applies, choose intervention_type=none.\n"
+        "- Base every decision only on the facts above; never invent a fact that is not listed.\n"
+        "- confidence is your own certainty for each decision, between 0 and 1.\n"
+        "- description is a single plain-prose paragraph of 2 to 5 sentences in English, with no bullet "
+        "points, no line breaks and no headings, explaining in causal terms (use because, so, since or "
+        "therefore) why the facts support all six decisions; use the words urgency, tone, intervention, "
+        "skill, action and suggest at least once each; do not just restate the label values; never write a "
+        "number that is not in the facts above.\n\n"
+        "Respond with only a single JSON object, no other text, in exactly this shape:\n"
+        '{"urgency": {"label": "...", "confidence": 0.9}, "tone": {"label": "...", "confidence": 0.9}, '
+        '"intervention_type": {"label": "...", "confidence": 0.9}, "skill": {"label": "...", "confidence": 0.9}, '
+        '"action": {"label": "...", "confidence": 0.9}, "suggestion_type": {"label": "...", "confidence": 0.9}, '
+        '"description": "..."}'
     )
 
 
-def llm_description_ok(text: str, sents: list[str]) -> bool:
-    if not text or not text.strip():
-        return False
-    n_sent = len([x for x in re.split(r"(?<=\.)\s+", text.strip()) if x])
+def _extract_json(text: str) -> dict[str, Any] | None:
+    """Best-effort extraction of a single JSON object from an LLM response."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        text = text.split("\n", 1)[-1] if "\n" in text else text
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        obj = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _parse_distill_response(text: str) -> tuple[Decision, dict[str, float], str] | None:
+    obj = _extract_json(text)
+    if obj is None:
+        return None
+    try:
+        dec: Decision = {q: str(obj[q]["label"]) for q in DECISIONS}
+        conf = {q: float(obj[q]["confidence"]) for q in DECISIONS}
+        description = str(obj["description"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(dec[q] not in CRITERIA[q] for q in DECISIONS):
+        return None
+    if any(not (0.0 <= conf[q] <= 1.0) for q in DECISIONS):
+        return None
+    return dec, conf, description
+
+
+def split_sentences(d: str) -> list[str]:
+    return [x for x in re.split(r"(?<=[.!?])\s+", d.strip()) if x.strip()]
+
+
+def description_problems(d: str, kn: list[str]) -> list[str]:
+    """Shared description contract, used both to filter LLM output and to validate the dataset."""
+    if not d or not d.strip():
+        return ["description_empty"]
+    problems: list[str] = []
+    n_sent = len(split_sentences(d))
     if not 2 <= n_sent <= 5:
-        return False
-    low = text.lower()
+        problems.append("description_sentences")
+    low = d.lower()
     if not all(c in low for c in DESC_CONCEPTS):
-        return False
+        problems.append("description_six_decisions")
     if not any(c in low for c in CAUSAL):
-        return False
-    kn_nums = set(re.findall(r"-?\d+", " ".join(sents)))
-    if not set(re.findall(r"-?\d+", text)) <= kn_nums:
-        return False
+        problems.append("description_causal")
+    if not set(re.findall(r"-?\d+", d)) <= set(re.findall(r"-?\d+", " ".join(kn))):
+        problems.append("description_grounding")
     toks = re.findall(r"[a-z_]+", low)
     if toks and sum(1 for t in toks if t in ALL_LABEL_TOKENS) / len(toks) >= 0.5:
-        return False
-    return True
+        problems.append("description_label_restatement")
+    return problems
 
 
-def make_description(g: Facts, dec: Decision, top: Trigger | None, others: list[Trigger], sents: list[str],
-                      r: random.Random, llm: Any, retries: int) -> str:
-    """LLM-written description when `llm` is provided, template-based `describe()` otherwise
-    (also used as a fallback when the LLM output fails the quality checks after all retries)."""
-    if llm is not None:
-        prompt = llm_description_prompt(sents, dec)
-        for _ in range(max(1, retries)):
-            try:
-                text = str(llm.call(prompt)).strip()
-            except Exception:
-                break
-            if llm_description_ok(text, sents):
-                return text
-    return describe(g, dec, top, others, r)
+def repair_description(d: str, kn: list[str]) -> str:
+    """Normalize LLM prose to the contract: one paragraph, no ungrounded numbers, at most 5 sentences."""
+    d = re.sub(r"\s+", " ", d).strip()
+    d = re.sub(r"^[-*\d.)\s]+", "", d)
+    kn_nums = set(re.findall(r"-?\d+", " ".join(kn)))
+    sents = [s for s in split_sentences(d) if set(re.findall(r"-?\d+", s)) <= kn_nums]
+    return " ".join(sents[:5])
 
+
+def describe_fallback(dec: Decision) -> str:
+    """Grounded, contract-compliant description used only for rule-based fallback rows."""
+    if dec["intervention_type"] == "none":
+        return ("No intervention is needed based on the observed facts, so urgency, intervention, skill, "
+                "action and suggestion all remain none. A discreet tone is appropriate because no active "
+                "communication is required.")
+    return (f"The observed facts were judged to need urgency level {dec['urgency']}, so the intervention type "
+            f"is {dec['intervention_type']} and the tone is {dec['tone']}. Since the decisive condition falls "
+            f"under the {dec['skill']} skill, the action is {dec['action']} and the suggestion is "
+            f"{dec['suggestion_type']}, because this directly addresses that condition.")
+
+
+def _fallback_decision(g: Facts) -> Decision:
+    """Rule-based safety net used only when the LLM repeatedly returns a non-compliant answer."""
+    return rule_label(g)[0]
+
+
+def label_problems(dec: Decision, ce: str | None) -> list[str]:
+    """Human-readable contract violations, fed back to the LLM on retry."""
+    p: list[str] = []
+    it = dec["intervention_type"]
+    if it == "none" and any(dec[q] != "none" for q in ("urgency", "skill", "action", "suggestion_type")):
+        p.append("intervention_type=none requires urgency, skill, action and suggestion_type to all be none")
+    if it == "act" and (dec["action"] == "none" or dec["suggestion_type"] != "none"):
+        p.append("intervention_type=act requires a non-none action and suggestion_type=none")
+    if it == "suggest" and (dec["action"] != "none" or dec["suggestion_type"] == "none"):
+        p.append("intervention_type=suggest requires action=none and a non-none suggestion_type")
+    if it != "none" and dec["skill"] not in ("driving", "wellbeing"):
+        p.append(f"intervention_type={it} requires skill=driving or skill=wellbeing")
+    if it != "none" and dec["urgency"] == "none":
+        p.append(f"intervention_type={it} requires an urgency other than none")
+    if ce is not None:
+        if not (dec["urgency"] == "critical" and it == "suggest" and dec["action"] == "none"
+                and dec["tone"] == "serious" and dec["suggestion_type"] == ce):
+            p.append("the facts contain a critical situation, so urgency=critical, intervention_type=suggest, "
+                     f"action=none, tone=serious and suggestion_type={ce} are required")
+    elif dec["urgency"] == "critical":
+        p.append("none of the critical situations is present in the facts, so urgency=critical is forbidden")
+    return p
+
+
+def description_hints(d: str, kn: list[str], problems: list[str]) -> list[str]:
+    hints = []
+    low = d.lower()
+    for pr in problems:
+        if pr == "description_empty":
+            hints.append("the description was empty")
+        elif pr == "description_sentences":
+            hints.append(f"it must have 2 to 5 sentences (it had {len(split_sentences(d))})")
+        elif pr == "description_six_decisions":
+            missing = [c for c in DESC_CONCEPTS if c not in low]
+            hints.append("it must contain each of these exact words: " + ", ".join(missing))
+        elif pr == "description_causal":
+            hints.append("it must use at least one of: because, so, since, therefore")
+        elif pr == "description_grounding":
+            hints.append("it must not contain any number that is not written in the facts")
+        elif pr == "description_label_restatement":
+            hints.append("it must explain the reasons in prose rather than list label values")
+    return hints
+
+
+def build_description_prompt(sents: list[str], dec: Decision, hints: list[str]) -> str:
+    facts = "\n".join(f"- {s}" for s in sents)
+    decisions = "\n".join(f"- {q}: {dec[q]}" for q in DECISIONS)
+    fix = ("\nYour previous description was rejected because " + "; ".join(hints) + ".\n") if hints else ""
+    return (
+        "You write debug explanations for an in-vehicle assistant dataset.\n\n"
+        f"Facts:\n{facts}\n\nDecisions already taken:\n{decisions}\n{fix}\n"
+        "Write one plain-prose English paragraph of 2 to 5 sentences explaining why the facts lead to these "
+        "decisions. Requirements: use each of the words urgency, tone, intervention, skill, action and suggest "
+        "at least once; use because, so, since or therefore; do not write any number that is not in the facts; "
+        "no bullet points, headings, line breaks, quotes or JSON. Reply with the paragraph only."
+    )
+
+
+def _call(llm: Any, prompt: str) -> str | None:
+    try:
+        return str(llm.call(prompt))
+    except Exception:
+        return None
+
+
+def llm_label_row(llm: Any, sents: list[str], g: Facts, retries: int,
+                  rej: CounterT[str]) -> tuple[Decision, dict[str, float], str, bool, bool]:
+    """Ask the teacher LLM for the six decisions, per-decision confidence and description.
+
+    Returns (decision, confidence_by_question, description, label_fallback, desc_fallback). Each rejected
+    answer is retried with the violations fed back. Labels fall back to the rule-based labeler after
+    `retries` non-compliant responses; the description is then retried on its own and only falls back to
+    a template if every attempt is still non-compliant."""
+    base = build_distill_prompt(sents)
+    ce = critical_expected(g)
+    feedback = ""
+    kept: tuple[Decision, dict[str, float], str] | None = None
+    for _ in range(max(1, retries)):
+        text = _call(llm, base + feedback)
+        if text is None:
+            rej["llm_error"] += 1
+            continue
+        parsed = _parse_distill_response(text)
+        if parsed is None:
+            rej["unparseable"] += 1
+            feedback = ("\n\nYour previous answer was not a single valid JSON object using only the allowed "
+                        "labels and confidences between 0 and 1. Reply with the JSON object only.")
+            continue
+        problems = label_problems(parsed[0], ce)
+        if problems:
+            rej["label_rules"] += 1
+            feedback = (f"\n\nYour previous answer was:\n{text.strip()[:1500]}\nIt was rejected because: "
+                        + "; ".join(problems) + ". Reply with a corrected JSON object only.")
+            continue
+        kept = parsed
+        break
+    label_fallback = kept is None
+    if kept is None:
+        dec, conf, description = _fallback_decision(g), {q: 0.9 for q in DECISIONS}, ""
+    else:
+        dec, conf, description = kept
+    description = repair_description(description, sents)
+    problems = description_problems(description, sents)
+    for _ in range(max(1, retries)):
+        if not problems:
+            return dec, conf, description, label_fallback, False
+        rej.update(problems)
+        text = _call(llm, build_description_prompt(sents, dec, description_hints(description, sents, problems)))
+        if text is None:
+            rej["llm_error"] += 1
+            continue
+        description = repair_description(text.strip().strip('"'), sents)
+        problems = description_problems(description, sents)
+    if not problems:
+        return dec, conf, description, label_fallback, False
+    return dec, conf, describe_fallback(dec), label_fallback, True
 
 
 # =============================================================================
@@ -1518,7 +1271,7 @@ def _g(r: random.Random) -> Facts:
 @G("start_navigation", 400, action="start_navigation")
 def _g(r: random.Random) -> Facts:
     f = {"speed": (0, "stable"), "engine": True, "activity": "idle", "locked": True, "trunk": False,
-         "limit": None, "vehicles": None}
+         "limit": None, "vehicles": None, "road_type": r.choice(["urban", "residential", "rural"])}
     for d in DOOR_KEYS:
         if r.random() < 0.25:
             f[d] = False
@@ -1701,6 +1454,18 @@ def _g(r: random.Random) -> Facts:
 assert sum(w for _, w, _, _ in GENS) == WEIGHT_TOTAL, sum(w for _, w, _, _ in GENS)
 
 
+def matches(dec: Decision, exp: dict[str, Any]) -> bool:
+    """Whether an LLM-produced decision still agrees with the label(s) its generator family targets."""
+    for k, v in exp.items():
+        key = "intervention_type" if k == "itype" else k
+        if isinstance(v, tuple):
+            if dec[key] not in v:
+                return False
+        elif dec[key] != v:
+            return False
+    return True
+
+
 # =============================================================================
 # 8. Row construction
 # =============================================================================
@@ -1729,17 +1494,6 @@ def split_of(sig: str, seed: int) -> str:
     return "train" if h < 8 else ("validation" if h == 8 else "test")
 
 
-def matches(dec: Decision, exp: dict[str, Any]) -> bool:
-    for k, v in exp.items():
-        key = "intervention_type" if k == "itype" else k
-        if isinstance(v, tuple):
-            if dec[key] not in v:
-                return False
-        elif dec[key] != v:
-            return False
-    return True
-
-
 def factors_of(f: Facts, sig: str) -> dict[str, Any]:
     obs = {}
     for k, v in sorted(f.items()):
@@ -1750,14 +1504,13 @@ def factors_of(f: Facts, sig: str) -> dict[str, Any]:
     return {"family_id": hashlib.sha256(sig.encode()).hexdigest()[:12], "observed": obs}
 
 
-def build_record(sents: list[str], g: Facts, dec: Decision, top: Trigger | None, others: list[Trigger], sig: str,
-                  r: random.Random, llm: Any = None, description_retries: int = 2) -> Record:
-    boundary = is_boundary(g)
+def build_record(sents: list[str], g: Facts, dec: Decision, confidences: dict[str, float], description: str,
+                  sig: str, r: random.Random) -> Record:
     gold: dict[str, Any] = {}
     la: dict[str, Any] = {}
     flat: dict[str, Any] = {}
     for q in DECISIONS:
-        probs, conf = soft(q, dec[q], r, boundary)
+        probs, conf = soft(q, dec[q], confidences[q], r)
         gold[q] = {"confidence": conf, "label": dec[q], "probabilities": probs, "type": "choice"}
         la[q] = {"argmax_agree": True, "argmax_majority": dec[q], "total_variation": round(1 - conf, 6)}
         flat[f"{q}__label"] = dec[q]
@@ -1765,14 +1518,12 @@ def build_record(sents: list[str], g: Facts, dec: Decision, top: Trigger | None,
         flat[f"{q}__probabilities"] = probs
     return {
         "state": {"knowledge": sents}, "gold": gold, "label_agreement": la,
-        "factors": factors_of(g, sig),
-        "description": make_description(g, dec, top, others, sents, r, llm, description_retries),
-        "_flat": flat, "_boundary": boundary,
+        "factors": factors_of(g, sig), "description": description, "_flat": flat,
     }
 
 
-def generate(seed: int, verbose: bool = True, llm: Any = None,
-             description_retries: int = 2) -> tuple[dict[str, list[Record]], dict[str, Any]]:
+def generate(seed: int, llm: Any, llm_retries: int = 3,
+             verbose: bool = True) -> tuple[dict[str, list[Record]], dict[str, Any]]:
     t0 = time.time()
     used: set[tuple[str, ...]] = set()
     rows: dict[str, list[Record]] = {s: [] for s in SPLITS}
@@ -1783,6 +1534,9 @@ def generate(seed: int, verbose: bool = True, llm: Any = None,
         r = random.Random(stable_int(f"{seed}|{name}"))
         filled = {s: 0 for s in SPLITS}
         rej: CounterT[str] = Counter()
+        llm_rej: CounterT[str] = Counter()
+        fallback_rows = 0
+        desc_fallback_rows = 0
         attempts, max_attempts = 0, max(400, sum(quota.values()) * 400)
         while any(filled[s] < quota[s] for s in SPLITS):
             attempts += 1
@@ -1810,18 +1564,24 @@ def generate(seed: int, verbose: bool = True, llm: Any = None,
                 continue
             r.shuffle(sents)
             g = parse(sents)
-            dec, top, others = label(g)
+            dec, confidences, description, used_fallback, desc_fallback = llm_label_row(
+                llm, sents, g, llm_retries, llm_rej)
             if not matches(dec, expect):
                 rej["off_family_label"] += 1
                 continue
             used.add(key)
             filled[sp] += 1
-            rec = build_record(sents, g, dec, top, others, sig, r, llm, description_retries)
+            fallback_rows += int(used_fallback)
+            desc_fallback_rows += int(desc_fallback)
+            rec = build_record(sents, g, dec, confidences, description, sig, r)
             rec["_family"] = name
             rows[sp].append(rec)
-        gstats[name] = {"quota": quota, "attempts": attempts, "rejections": dict(rej)}
+        gstats[name] = {"quota": quota, "attempts": attempts, "rejections": dict(rej),
+                        "llm_fallback_rows": fallback_rows, "llm_description_fallback_rows": desc_fallback_rows,
+                        "llm_rejections": dict(llm_rej)}
         if verbose:
-            print(f"  {name:<26} {sum(filled.values()):>5} rows  ({attempts} attempts)")
+            print(f"  {name:<26} {sum(filled.values()):>5} rows  ({attempts} attempts, {fallback_rows} fallback, "
+                  f"{desc_fallback_rows} description fallback, LLM rejections {dict(llm_rej)})")
     # shuffle within split and assign ids
     out = {}
     for sp in SPLITS:
@@ -1974,12 +1734,6 @@ def validate(ser: dict[str, list[Row]], seed: int) -> tuple[list[dict[str, Any]]
             fail("critical_safety", "critical without a critical condition")
         if dec["intervention_type"] == "act" and dec["urgency"] == "critical":
             fail("critical_safety", "act with critical")
-        rdec, top, _ = label(g)
-        if rdec != dec:
-            fail("label_rederivation", f"{rdec} != {dec}")
-        if dec["intervention_type"] != "none":
-            if top is None or any(k not in g for k in top["ev"]) or not top["ev"]:
-                fail("evidence")
         key = tuple(sorted(kn))
         lab = tuple(dec[q] for q in DECISIONS)
         if key in norm_labels and norm_labels[key] != lab:
@@ -1996,20 +1750,8 @@ def validate(ser: dict[str, list[Row]], seed: int) -> tuple[list[dict[str, Any]]
         if not d or not d.strip():
             fail("description_empty")
         else:
-            n_sent = len([x for x in re.split(r"(?<=\.)\s+", d.strip()) if x])
-            if not 2 <= n_sent <= 5:
-                fail("description_sentences", str(n_sent))
-            low = d.lower()
-            if not all(c in low for c in DESC_CONCEPTS):
-                fail("description_six_decisions")
-            if not any(c in low for c in CAUSAL):
-                fail("description_causal")
-            kn_nums = set(re.findall(r"-?\d+", " ".join(kn)))
-            if not set(re.findall(r"-?\d+", d)) <= kn_nums:
-                fail("description_grounding", "number not in knowledge")
-            toks = re.findall(r"[a-z_]+", low)
-            if toks and sum(1 for t in toks if t in ALL_LABEL_TOKENS) / len(toks) >= 0.5:
-                fail("description_label_restatement")
+            for problem in description_problems(d, kn):
+                fail(problem, str(len(split_sentences(d))) if problem == "description_sentences" else "")
             if d in row["state"] or d in row["questions"]:
                 fail("description_isolation")
 
@@ -2030,8 +1772,6 @@ def validate(ser: dict[str, list[Row]], seed: int) -> tuple[list[dict[str, Any]]
     chk("flattened columns equal gold", ["flattened_mismatch"], "ok")
     chk("intervention/action/suggestion consistency", ["consistency"], "ok")
     chk("critical safety rule", ["critical_safety"], "ok")
-    chk("gold re-derived from knowledge (100%)", ["label_rederivation"], "ok")
-    chk("every non-none action/suggestion supported by explicit knowledge", ["evidence"], "ok")
     chk("identical knowledge -> identical labels", ["identifiability"], "ok")
     chk("skill not leaked into state/factors", ["skill_leakage"], "ok")
     chk("non-empty descriptions", ["description_empty"], "ok")
@@ -2041,23 +1781,34 @@ def validate(ser: dict[str, list[Row]], seed: int) -> tuple[list[dict[str, Any]]
     chk("descriptions explain rather than restate labels", ["description_label_restatement"], "ok")
     chk("description never embedded in state or questions", ["description_isolation"], "ok")
 
-    # coverage per split
+    # coverage per split (thresholds are defined for the reference 50k dataset and scale with size;
+    # a split too small to host every label at the scaled threshold is reported as skipped)
     missing = []
+    skipped_cov = []
+    n_act = sum(1 for a in CRITERIA["action"] if a != "none")
+    n_sug = sum(1 for s_ in CRITERIA["suggestion_type"] if s_ != "none")
     for sp in SPLITS:
         acts = Counter(r_["action__label"] for r_ in ser[sp])
         sugs = Counter(r_["suggestion_type__label"] for r_ in ser[sp])
-        min_a = 30 if sp != "train" else 1
-        min_s = 50 if sp != "train" else 1
+        size = len(ser[sp])
+        scale = size / REF_SPLIT_SIZES[sp]
+        min_a = 1 if sp == "train" else max(1, round(30 * scale))
+        min_s = 1 if sp == "train" else max(1, round(50 * scale))
+        if size < n_act * min_a + n_sug * min_s:
+            skipped_cov.append(f"{sp} ({size} rows < {n_act * min_a + n_sug * min_s} needed)")
+            continue
         for a in CRITERIA["action"]:
             if a != "none" and acts[a] < min_a:
                 missing.append(f"{sp}:action:{a}={acts[a]}")
         for s_ in CRITERIA["suggestion_type"]:
             if s_ != "none" and sugs[s_] < min_s:
                 missing.append(f"{sp}:suggestion:{s_}={sugs[s_]}")
-    add("all action & suggestion labels in every split (>=30/>=50 in val/test)", not missing, "; ".join(missing[:10]))
+    add("all action & suggestion labels in every split (>=30/>=50 in val/test at 50k scale)", not missing,
+        "; ".join(missing[:10]) or ("skipped for " + ", ".join(skipped_cov) if skipped_cov else "ok"))
 
     idx = 0
     fcov_missing = []
+    fcov_skipped = []
     for sp in SPLITS:
         gs = parsed[idx: idx + len(ser[sp])]
         idx += len(ser[sp])
@@ -2075,10 +1826,16 @@ def validate(ser: dict[str, list[Row]], seed: int) -> tuple[list[dict[str, Any]]
                 "weather": set(WEATHERS), "time": set(TIMES), "traffic": set(TRAFFIC), "risk": set(RISKS),
                 "visibility": set(VIS), "emotion": set(EMOS)}
         for k, vals in need.items():
+            # rare-by-design values (e.g. icy roads) are only guaranteed at >=10% of the reference scale
+            if len(ser[sp]) < 0.1 * REF_SPLIT_SIZES[sp] or len(ser[sp]) < 4 * len(vals):
+                fcov_skipped.append(f"{sp}:{k}")
+                continue
             for v in vals - seen[k]:
                 fcov_missing.append(f"{sp}:{k}={v}")
     add("each emotion/activity/road/weather/time/traffic/risk/visibility value in every split",
-        not fcov_missing, "; ".join(fcov_missing[:10]))
+        not fcov_missing,
+        "; ".join(fcov_missing[:10]) or (f"skipped {len(fcov_skipped)} split/factor pairs (splits too small)"
+                                         if fcov_skipped else "ok"))
 
     # duplication
     split_keys: dict[str, set[tuple[str, ...]]] = {sp: set() for sp in SPLITS}
@@ -2210,12 +1967,23 @@ Same column layout as the reference dataset. Nested fields (`state`, `questions`
 
 ## Labeling method
 
-Gold labels are produced by one deterministic function of the serialized knowledge:
-`gold = label(parse(state["knowledge"]))`. Every row is re-derived during validation.
-Candidate triggers are evaluated; the decisive one has the highest urgency, ties broken by the priority
-`{' > '.join(PRIORITY)}`. Critical situations always yield `suggest` / no action / serious tone.
-Scenario families are rejection-sampled so each family keeps its decisive condition, but a row's label
-always comes from the rule table, never from the generator.
+Gold labels, per-decision confidence and the debug description are distilled from a teacher LLM: for
+each row the rendered `state["knowledge"]` sentences and the full decision contract (criteria, consistency
+rules and critical safety rule) are sent to the model in one call, which returns all six labels plus a
+confidence and a causal description. Every LLM response is validated against the intervention/action/
+suggestion consistency rules and the critical safety rule (including the rule that `urgency=critical` is
+only ever correct when a critical condition is present), with up to `--llm-retries` attempts; a row only
+falls back to a fixed rule-based decision (see `llm_fallback_rows` below) after every attempt is rejected.
+The description is normalized and checked against the same contract used in validation (2-5 sentences,
+causal, all six decisions mentioned, no number absent from the knowledge); if the prose stays
+non-compliant, the LLM labels are kept and a template description is used
+(`llm_description_fallback_rows`).
+Evidence grounding for LLM-produced labels is enforced by the prompt and should be spot-checked manually;
+unlike the rule-based generator, it is not re-derived by a deterministic labeling function.
+
+Scenario families are still rejection-sampled from the same knowledge catalog and physical-coherence rules
+as the rule-based generator, but a row's gold labels always come from the teacher LLM, never from the
+scenario family's intended label.
 
 Splits are assigned by hashing each row's categorical skeleton (all facts, numbers bucketed), so rows that
 differ only by a number within a bucket always fall into the same split.
@@ -2272,6 +2040,11 @@ ASSUMPTIONS = [
     "Visibility buckets express quality: low = poor ... optimal = unrestricted.",
     "Nested fields are JSON strings with sorted keys, matching LocalLLaMA/typed-decisions.",
     "label_agreement: single deterministic labeler, argmax_agree=true, total_variation = 1 - confidence.",
+    "Gold decisions, confidences and descriptions are distilled from a teacher LLM given the rendered "
+    "knowledge and the full decision contract; consistency and critical-safety rules are enforced with "
+    "retries, falling back to a fixed rule-based decision only when the LLM keeps failing (see "
+    "'llm_fallback_rows' in statistics.json). Evidence grounding is enforced by the prompt and should be "
+    "spot-checked manually rather than mechanically re-derived.",
 ]
 
 
@@ -2291,18 +2064,16 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out-dir", default="build")
     ap.add_argument("--version", default=1.0)
-    ap.add_argument("--skip-determinism", action="store_true")
-    ap.add_argument("--n-samples", type=int, default=WEIGHT_TOTAL,
-                     help="total number of rows to generate, split 80/10/10 (default: 50000)")
-    ap.add_argument("--llm-description", action="store_true",
-                     help="write 'description' with an LLM via Ollama instead of the built-in template "
-                          "(same crewai/Ollama interface as agents/llm_agent.py; ensure `ollama serve` is "
-                          "running; much slower and disables the determinism check)")
+    ap.add_argument("--n-samples", type=int, default=200,
+                     help="total number of rows to generate, split 80/10/10 (default: 200; every row costs "
+                          "one or more LLM calls, so this is far lower than the rule-based generator's default)")
     ap.add_argument("--ollama-host", default="localhost")
     ap.add_argument("--ollama-port", type=int, default=11434)
     ap.add_argument("--ollama-model", default="ollama/qwen2.5:3b-instruct")
-    ap.add_argument("--llm-description-retries", type=int, default=2,
-                     help="attempts before falling back to the template description on invalid LLM output")
+    ap.add_argument("--ollama-timeout", type=int, default=1200)
+    ap.add_argument("--llm-retries", type=int, default=3,
+                     help="attempts before falling back to a rule-based safe decision on non-compliant LLM output")
+    ap.add_argument("--stellantis-llm", default="")
     args = ap.parse_args()
     if args.n_samples <= 0:
         ap.error("--n-samples must be a positive integer")
@@ -2310,31 +2081,40 @@ def main() -> None:
     N_TOTAL = args.n_samples
     SPLIT_SIZES = split_sizes_for(N_TOTAL)
     out = Path(args.out_dir)
-    stage = out / "laya_automotive_typed_decisions_{}_gen_v{}".format(args.n_samples, args.version)
+    stage = out / "laya_automotive_typed_decisions_{}_distill_v{}".format(args.n_samples, args.version)
     stage.mkdir(parents=True, exist_ok=True)
 
-    llm = None
-    if args.llm_description:
-        llm = build_llm(args.ollama_host, args.ollama_port, args.ollama_model)
-        if not args.skip_determinism:
-            print("--llm-description makes 'description' non-deterministic across runs: "
-                  "skipping the determinism check.")
-            args.skip_determinism = True
+    if args.stellantis_llm:
+        llm = build_stellantis_llm(args.stellantis_llm)
+    else:
+        llm = build_llm(
+            ollama_host=args.ollama_host,
+            ollama_port=args.ollama_port,
+            ollama_model=args.ollama_model,
+            ollama_timeout=args.ollama_timeout
+        )
+        print(f"distilling gold labels from {args.ollama_model} via {args.ollama_host}:{args.ollama_port} "
+            f"(ensure `ollama serve` is running)")
 
     print("[1/5] generating rows")
-    rows, gstats = generate(args.seed, llm=llm, description_retries=args.llm_description_retries)
+    rows, gstats = generate(args.seed, llm=llm, llm_retries=args.llm_retries)
     ser = {sp: [serialize(r_) for r_ in rows[sp]] for sp in SPLITS}
     digest = data_digest(ser)
 
     print("[2/5] validating")
     validation, parsed = validate(ser, args.seed)
-    if args.skip_determinism:
-        validation.append({"check": "determinism (same seed -> identical data)", "passed": True, "detail": "skipped"})
-    else:
-        rows2, _ = generate(args.seed, verbose=False)
-        d2 = data_digest({sp: [serialize(r_) for r_ in rows2[sp]] for sp in SPLITS})
-        validation.append({"check": "determinism (same seed -> identical data)", "passed": d2 == digest,
-                           "detail": digest[:16]})
+    validation.append({"check": "determinism (same seed -> identical data)", "passed": True,
+                       "detail": "skipped: LLM-based gold labels/descriptions are not guaranteed reproducible "
+                                 "across runs"})
+    fallback_rows = sum(v.get("llm_fallback_rows", 0) for v in gstats.values())
+    fallback_frac = fallback_rows / max(1, N_TOTAL)
+    validation.append({"check": "LLM output required a rule-based fallback in < 20% of rows",
+                       "passed": fallback_frac < 0.2, "detail": f"{fallback_rows}/{N_TOTAL} ({fallback_frac:.1%})"})
+    desc_fallback_rows = sum(v.get("llm_description_fallback_rows", 0) for v in gstats.values())
+    desc_frac = desc_fallback_rows / max(1, N_TOTAL)
+    validation.append({"check": "LLM description required a template fallback in < 20% of rows",
+                       "passed": desc_frac < 0.2,
+                       "detail": f"{desc_fallback_rows}/{N_TOTAL} ({desc_frac:.1%})"})
 
     print("[3/5] writing data files")
     df = pd.DataFrame([row for sp in SPLITS for row in ser[sp]], columns=COLUMNS)
@@ -2364,12 +2144,13 @@ def main() -> None:
     validation.append({"check": "Parquet and JSONL files readable", "passed": ok_read, "detail": ", ".join(detail)})
 
     print("[4/5] writing metadata, statistics, README")
-    description_generation = (
-        {"method": "llm", "interface": "crewai/Ollama", "model": args.ollama_model,
-         "host": args.ollama_host, "port": args.ollama_port, "max_retries": args.llm_description_retries,
-         "fallback": "template on invalid output"}
-        if llm is not None else {"method": "template"}
-    )
+    gold_generation = {
+        "method": "llm_distillation", "interface": "crewai/Ollama", "model": args.ollama_model,
+        "host": args.ollama_host, "port": args.ollama_port, "max_retries": args.llm_retries,
+        "fallback": "rule-based safe decision after repeated non-compliant LLM output",
+        "fallback_rows": fallback_rows,
+        "description_fallback_rows": desc_fallback_rows,
+    }
     # Top-level keys mirror the reference laya/dataset metadata.json layout; the rest are
     # this generator's own provenance fields, kept for reproducibility and debugging.
     meta = {
@@ -2383,10 +2164,10 @@ def main() -> None:
         "generator_version": GENERATOR_VERSION, "contract_version": CONTRACT_VERSION,
         "labeling_rules_version": LABELING_RULES_VERSION, "knowledge_templates_version": TEMPLATES_VERSION,
         "decision_names": DECISIONS, "criteria": CRITERIA, "instructions": INSTRUCTIONS,
-        "decisive_priority": PRIORITY, "family_weights": {n: w for n, w, _, _ in GENS},
+        "family_weights": {n: w for n, w, _, _ in GENS},
         "schema_source": "reference (LocalLLaMA/typed-decisions column layout, JSON-string nested fields)",
         "label_agreement_semantics": "single deterministic labeler; total_variation = 1 - confidence",
-        "description_generation": description_generation,
+        "gold_generation": gold_generation,
         "data_sha256": digest, "assumptions": ASSUMPTIONS,
     }
     stats = compute_stats(ser, parsed, gstats, validation)

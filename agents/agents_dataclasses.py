@@ -101,6 +101,20 @@ class SkillType(str, Enum):
             SkillType.WELLBEING: "Fatigue, attention, emotion or comfort.",
         }[self]
 
+class SimpleInterventionType(str, Enum):
+    NONE = "none"
+    SUGGEST = "suggest"
+
+    @property
+    def description(self) -> str:
+        return {
+            SimpleInterventionType.NONE: "No assistant intervention is useful or appropriate.",
+            SimpleInterventionType.SUGGEST: (
+                "Communicate with the driver because a suggestion, recommendation, "
+                "or other helpful guidance would be appropriate."
+            ),
+        }[self]
+
 class InterventionType(str, Enum):
     NONE = "none"
     SUGGEST = "suggest"

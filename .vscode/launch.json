@@ -23,7 +23,7 @@
                 "stt_enabled=True",
                 "is_socket_enabled=False",
                 "use_laya=True",
-                "laya_custom_model=models/laya_automotive_typed_decisions_50k_v2"
+                //"laya_custom_model=models/laya_automotive_typed_decisions_50k_v3_gpt6"
             ],
         },
         {
@@ -49,14 +49,29 @@
             ],
         },
         {
-            "name": "generate_dataset",
+            "name": "generate_dataset_rules",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/scripts/generate_automotive_dataset.py",
             "console": "integratedTerminal",
             "args": [
                 "--out-dir", "${workspaceFolder}/../laya/dataset",
-                "--version", "1.0"
+                "--version", "1.0",
+            ],
+        },
+        {
+            "name": "generate_dataset_distill",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/generate_automotive_dataset_distill.py",
+            "console": "integratedTerminal",
+            "env": {
+                "REQUESTS_CA_BUNDLE": "/etc/ssl/certs/ca-certificates.crt",
+            },
+            "args": [
+                "--out-dir", "${workspaceFolder}/../laya/dataset",
+                "--version", "1.0",
+                "--stellantis-llm", "vllm-qwen36-35b-a3b",
             ],
         },
         {

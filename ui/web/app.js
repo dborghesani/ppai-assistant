@@ -28,18 +28,54 @@ const CONTROL_GROUPS = {
   ],
   vehicle: [
     { title: "Vehicle state", type: "toggles", cls: "VehicleState", controls: [
-      ["Engine", "engine_on", false, "On", "Off"], ["Doors", "doors_locked", false, "Locked", "Unlocked"], ["Trunk", "trunk_open", false, "Open", "Closed"]
+      ["Engine", "engine_on", false, "On", "Off"], ["Doors", "doors_locked", false, "Locked", "Unlocked"],
+      ["Front left door", "door_open_front_left", false, "Open", "Closed"], ["Front right door", "door_open_front_right", false, "Open", "Closed"],
+      ["Rear left door", "door_open_rear_left", false, "Open", "Closed"], ["Rear right door", "door_open_rear_right", false, "Open", "Closed"],
+      ["Trunk", "trunk_open", false, "Open", "Closed"], ["Navigation", "navigation_active", false, "Active", "Inactive"]
     ]},
-    { title: "Motion & comfort", type: "ranges", controls: [
-      ["Cabin temp.", "internal_temperature", 10, 40, 22, .5, "temp", "VehicleState"],
-      ["Speed", "speed", 0, 200, 0, 1, "speed", "VehicleMotion"]
+    { title: "Windows & roof", type: "toggles", cls: "VehicleState", controls: [
+      ["Front left window", "window_open_front_left", false, "Open", "Closed"], ["Front right window", "window_open_front_right", false, "Open", "Closed"],
+      ["Rear left window", "window_open_rear_left", false, "Open", "Closed"], ["Rear right window", "window_open_rear_right", false, "Open", "Closed"],
+      ["Sunroof", "sunroof_open", false, "Open", "Closed"]
+    ]},
+    { title: "Climate", type: "ranges", cls: "VehicleState", integer: true, controls: [
+      ["Cabin temp.", "internal_temperature", 10, 40, 22, .5, "temp"],
+      ["Fan speed", "fan_speed", 0, 7, 3, 1, "integer"]
+    ]},
+    { title: "Climate controls", type: "toggles", cls: "VehicleState", controls: [
+      ["Air conditioning", "air_conditioning_on", false, "On", "Off"],
+      ["Air recirculation", "air_recirculation_on", false, "On", "Off"],
+      ["Seat heating", "seat_heating_on", false, "On", "Off"]
+    ]},
+    { title: "Audio", type: "toggles", cls: "VehicleState", controls: [
+      ["Radio", "radio_on", false, "On", "Off"]
+    ]},
+    { title: "Audio volume", type: "ranges", cls: "VehicleState", integer: true, controls: [
+      ["Volume", "audio_volume", 0, 100, 20, 5, "integer"]
+    ]},
+    { title: "Lighting", type: "toggles", cls: "VehicleState", controls: [
+      ["Sidelights", "lights_on_sidelights", false, "On", "Off"], ["Low beams", "lights_on_low_beams", false, "On", "Off"],
+      ["High beams", "lights_on_high_beams", false, "On", "Off"], ["Fog lights", "lights_on_fog_lights", false, "On", "Off"]
+    ]},
+    { title: "Turn signal", type: "options", cls: "VehicleState", key: "turn_signal", value: "Off", options: ["Off", "Right", "Left", "Both"] },
+    { title: "Motion", type: "ranges", cls: "VehicleMotion", controls: [
+      ["Speed", "speed", 0, 200, 0, 1, "speed"]
+    ]},
+    { title: "ADAS assistance", type: "toggles", cls: "VehicleState", controls: [
+      ["Adaptive cruise control", "adaptive_cruise_control_on", false, "On", "Off"],
+      ["Lane keeping assist", "lane_keep_assist_enabled", false, "On", "Off"],
+      ["Blind spot monitor", "blind_spot_monitor", false, "On", "Off"]
+    ]},
+    { title: "ADAS settings", type: "ranges", cls: "VehicleState", integer: true, controls: [
+      ["Target speed", "adas_target_speed", 0, 160, 90, 10, "speed"],
+      ["Following distance", "following_distance_level", 1, 5, 3, 1, "integer"]
     ]},
     { title: "Detected objects", type: "ranges", cls: "DetectedObjects", integer: true, controls: [
       ["People around", "people_around", 0, 20, 0, 1, "integer"],
       ["Vehicles around", "vehicles_around", 0, 20, 0, 1, "integer"]
     ]},
-    { title: "Object detection", type: "toggles", cls: "DetectedObjects", controls: [
-      ["Dangerous objects", "dangerous_objects_around", false, "Detected", "Not detected"]
+    { title: "Object detection", type: "ranges", cls: "DetectedObjects", integer: true, controls: [
+      ["Dangerous objects", "dangerous_objects_around", 0, 10, 0, 1, "integer"]
     ]},
     { title: "Interior object detection", type: "ranges", cls: "DetectedObjects", integer: true, controls: [
       ["Children inside", "children_inside", 0, 4, 0, 1, "integer"]
@@ -119,11 +155,26 @@ let connectionState = "connecting";
 let socketWasOpen = false;
 let connectionTimer = null;
 let assistantStatus = "idle";
+let controlState = {};
 let speakingTone = null;
 let actPulseTimer = null;
 let showActPulse = false;
 let pendingAssistantMessage = null;
 let toastTimer;
+
+function controlStateKey(className, key) {
+  return `${className}.${key}`;
+}
+
+function rememberControlState(className, values) {
+  let changed = false;
+  Object.entries(values || {}).forEach(([key, value]) => {
+    const stateKey = controlStateKey(className, key);
+    if (!Object.is(controlState[stateKey], value)) changed = true;
+    controlState[stateKey] = value;
+  });
+  return changed;
+}
 
 function escapeHtml(value) {
   const element = document.createElement("div");
@@ -229,11 +280,15 @@ function renderControls(tabName) {
   controlContent.innerHTML = CONTROL_GROUPS[tabName].map((group, groupIndex) => {
     if (group.type === "options") {
       const name = `${tabName}-${groupIndex}-${group.key}`;
-      const options = group.options.map(option => `<label><input type="radio" name="${name}" value="${escapeHtml(option)}" ${option === group.value ? "checked" : ""}><span>${escapeHtml(option)}</span></label>`).join("");
+      const selectedValue = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
+      const options = group.options.map(option => `<label><input type="radio" name="${name}" value="${escapeHtml(option)}" ${option === selectedValue ? "checked" : ""}><span>${escapeHtml(option)}</span></label>`).join("");
       return `<section class="control-section" data-type="options" data-class="${group.cls}" data-key="${group.key}"><h3>${group.title}</h3><div class="segmented">${options}</div></section>`;
     }
     if (group.type === "toggles") {
-      const controls = group.controls.map(([label, key, checked, on, off]) => `<label class="toggle-row"><span>${label}</span><span class="switch-control"><input type="checkbox" data-key="${key}" ${checked ? "checked" : ""}><span class="switch-track"></span><span data-state>${checked ? on : off}</span></span></label>`).join("");
+      const controls = group.controls.map(([label, key, checked, on, off]) => {
+        const current = controlState[controlStateKey(group.cls, key)] ?? checked;
+        return `<label class="toggle-row"><span>${label}</span><span class="switch-control"><input type="checkbox" data-key="${key}" ${current ? "checked" : ""}><span class="switch-track"></span><span data-state>${current ? on : off}</span></span></label>`;
+      }).join("");
       return `<section class="control-section" data-type="toggles" data-class="${group.cls}"><h3>${group.title}</h3>${controls}</section>`;
     }
     if (group.type === "scenarios") {
@@ -241,9 +296,47 @@ function renderControls(tabName) {
       const buttons = group.controls.map(([label, id]) => `<button type="button" class="scenario-button" data-scenario="${id}" aria-pressed="${activeScenario === id}">${escapeHtml(label)}</button>`).join("");
       return `<section class="control-section" data-type="scenarios"><h3>${group.title}</h3>${hint}${buttons}</section>`;
     }
-    const controls = group.controls.map(([label, key, min, max, value, step, format, ownClass]) => `<div class="range-row"><label for="${tabName}-${key}">${label}</label><input id="${tabName}-${key}" type="range" min="${min}" max="${max}" value="${value}" step="${step}" data-key="${key}" data-class="${ownClass || group.cls}" data-format="${format}" data-integer="${group.integer || format === "integer"}"><output>${formatValue(value, format)}</output></div>`).join("");
+    const controls = group.controls.map(([label, key, min, max, value, step, format, ownClass]) => {
+      const controlClass = ownClass || group.cls;
+      const current = controlState[controlStateKey(controlClass, key)] ?? value;
+      return `<div class="range-row"><label for="${tabName}-${key}">${label}</label><input id="${tabName}-${key}" type="range" min="${min}" max="${max}" value="${current}" step="${step}" data-key="${key}" data-class="${controlClass}" data-format="${format}" data-integer="${group.integer || format === "integer"}"><output>${formatValue(current, format)}</output></div>`;
+    }).join("");
     return `<section class="control-section" data-type="ranges"><h3>${group.title}</h3>${controls}</section>`;
   }).join("");
+}
+
+function updateControlsInPlace(className, values) {
+  const sections = [...controlContent.querySelectorAll(".control-section[data-class]")]
+    .filter(section => section.dataset.class === className);
+
+  Object.entries(values || {}).forEach(([key, value]) => {
+    sections.forEach(section => {
+      if (section.dataset.type === "ranges") {
+        const inputElement = [...section.querySelectorAll('input[type="range"]')]
+          .find(input => input.dataset.key === key);
+        if (!inputElement) return;
+        inputElement.value = value;
+        inputElement.nextElementSibling.value = formatValue(value, inputElement.dataset.format);
+      } else if (section.dataset.type === "toggles") {
+        const inputElement = [...section.querySelectorAll('input[type="checkbox"]')]
+          .find(input => input.dataset.key === key);
+        if (!inputElement) return;
+        inputElement.checked = Boolean(value);
+        const control = CONTROL_GROUPS.vehicle
+          .filter(group => group.type === "toggles" && group.cls === className)
+          .flatMap(group => group.controls)
+          .find(item => item[1] === key);
+        if (control) {
+          inputElement.closest(".switch-control").querySelector("[data-state]").textContent =
+            value ? control[3] : control[4];
+        }
+      } else if (section.dataset.type === "options" && section.dataset.key === key) {
+        section.querySelectorAll('input[type="radio"]').forEach(input => {
+          input.checked = input.value === value;
+        });
+      }
+    });
+  });
 }
 
 function sendProgressive(inputElement, fromValue, toValue) {
@@ -264,12 +357,17 @@ controlContent.addEventListener("pointerdown", event => {
   if (event.target.matches('input[type="range"]')) event.target.dataset.start = event.target.value;
 });
 controlContent.addEventListener("input", event => {
-  if (event.target.matches('input[type="range"]')) event.target.nextElementSibling.value = formatValue(event.target.value, event.target.dataset.format);
+  if (event.target.matches('input[type="range"]')) {
+    const value = Number(event.target.value);
+    event.target.nextElementSibling.value = formatValue(value, event.target.dataset.format);
+    controlState[controlStateKey(event.target.dataset.class, event.target.dataset.key)] = value;
+  }
 });
 controlContent.addEventListener("change", event => {
   const target = event.target;
   if (target.matches('input[type="radio"]')) {
     const section = target.closest(".control-section");
+    controlState[controlStateKey(section.dataset.class, section.dataset.key)] = target.value;
     bridge.call("stringChanged", section.dataset.class, section.dataset.key, target.value).catch(() => {});
   } else if (target.matches('input[type="checkbox"]')) {
     const section = target.closest(".control-section");
@@ -277,6 +375,7 @@ controlContent.addEventListener("change", event => {
       .filter(item => item.type === "toggles" && item.cls === section.dataset.class)
       .flatMap(item => item.controls)
       .find(item => item[1] === target.dataset.key);
+    controlState[controlStateKey(section.dataset.class, target.dataset.key)] = target.checked;
     target.closest(".switch-control").querySelector("[data-state]").textContent = target.checked ? control[3] : control[4];
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
   } else if (target.matches('input[type="range"]')) {
@@ -312,6 +411,7 @@ document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", (
 }));
 
 document.querySelector("#reset-controls").addEventListener("click", () => {
+  controlState = {};
   renderControls(activeTab);
   controlContent.querySelectorAll('input[type="radio"]:checked').forEach(target => {
     const section = target.closest(".control-section");
@@ -438,6 +538,9 @@ function renderKnowledge(rawKnowledge) {
 
 bridge.on("ready", data => {
   renderKnowledge(data.knowledge);
+  rememberControlState("VehicleState", data.vehicleState);
+  rememberControlState("DetectedObjects", data.detectedObjectsState);
+  if (activeTab === "vehicle") renderControls(activeTab);
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
   bridge.call("minimumUrgencyChanged", document.querySelector("#urgency-select").value).catch(() => {});
@@ -451,6 +554,14 @@ bridge.on("speakingToneChanged", data => setSpeakingTone(data[0]));
 bridge.on("assistantStatusChanged", data => setAssistantStatus(data[0]));
 bridge.on("userSpeechReceived", data => addMessage("user", data[0]));
 bridge.on("knowledgeUpdated", data => renderKnowledge(data[0]));
+bridge.on("vehicleStateChanged", data => {
+  const changed = rememberControlState("VehicleState", data[0]);
+  if (changed) updateControlsInPlace("VehicleState", data[0]);
+});
+bridge.on("detectedObjectsStateChanged", data => {
+  const changed = rememberControlState("DetectedObjects", data[0]);
+  if (changed) updateControlsInPlace("DetectedObjects", data[0]);
+});
 bridge.on("conversationModeChanged", data => {
   setConversation(Boolean(data[0]));
   if (!data[0]) showToast("Conversation stopped");

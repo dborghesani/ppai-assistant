@@ -68,7 +68,8 @@ class VehicleMotion:
     speed: float | None = knowledge_field(
         default=0.0,
         change_threshold=10.0,
-        notify_on_change=False
+        notify_on_change=False,
+        skills=(SkillType.DRIVING, SkillType.WELLBEING),
     )  # km/h, aggregated
     wheel_speed_front_left: float | None = None  # km/h
     wheel_speed_front_right: float | None = None  # km/h
@@ -100,6 +101,11 @@ class VehicleState:
     door_open_front_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     door_open_rear_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     door_open_rear_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    window_open_front_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    window_open_front_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    window_open_rear_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    window_open_rear_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    sunroof_open: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     doors_locked: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     lights_on_sidelights: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     lights_on_low_beams: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
@@ -108,8 +114,39 @@ class VehicleState:
     turn_signal: str | None = knowledge_field(default="Off", skills=(SkillType.DRIVING,))  # ["Off", "Right", "Left", "Both"]
     trunk_open: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     lane_keep_assist: str | None = None  # ["Unavailable", "Unselected", "Selected", "Authorized", "Active", "Defect", "Collision_Risk_not_used_during_LPA"]
-    blind_spot_monitor: bool | None = None
+    lane_keep_assist_enabled: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    adaptive_cruise_control_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    blind_spot_monitor: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    adas_target_speed: int | None = knowledge_field(
+        default=90,
+        change_threshold=5.0,
+        value_kind="count",
+        skills=(SkillType.DRIVING,),
+    )  # km/h; ADAS setpoint, not measured vehicle speed
+    following_distance_level: int | None = knowledge_field(
+        default=3,
+        change_threshold=1.0,
+        value_kind="count",
+        skills=(SkillType.DRIVING,),
+    )  # simulated setting from 1 (short) to 5 (long)
     engine_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    air_conditioning_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
+    air_recirculation_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
+    fan_speed: int | None = knowledge_field(
+        default=3,
+        change_threshold=1.0,
+        value_kind="count",
+        skills=(SkillType.WELLBEING,),
+    )
+    seat_heating_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
+    radio_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    audio_volume: int | None = knowledge_field(
+        default=20,
+        change_threshold=5.0,
+        value_kind="count",
+        skills=(SkillType.DRIVING,),
+    )
+    navigation_active: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     internal_temperature: float | None = knowledge_field(
         default=22.0,
         change_threshold=1.0,
@@ -246,9 +283,10 @@ class DetectedObjects:
         value_kind="density",
         skills=(SkillType.WELLBEING,),
     )
-    dangerous_objects_around: bool | None = knowledge_field(
-        default=False,
-        skills=(SkillType.WELLBEING,),
+    dangerous_objects_around: int | None = knowledge_field(
+        default=0,
+        value_kind="presence",
+        skills=(SkillType.DRIVING,),
     )
 
 @dataclass

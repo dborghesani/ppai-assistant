@@ -22,6 +22,12 @@ Consider the following situations:
   hypothetical, not a concrete condition, and must remain silent.
 - Warn the driver when an explicitly detected activity compromises attention,
   such as using a phone, eating, looking away from the road or falling asleep.
+- If phone use or sleep is explicitly detected while the vehicle is moving, warn
+  the driver and select `APPLY_RESTRICTIVE_ADAS_PROFILE` as the action. This
+  simulated profile lowers the ADAS target speed by 10 km/h, increases following
+  distance by one level, and enables adaptive cruise control, lane keeping assist
+  and blind spot monitoring. Do not alter measured vehicle speed or claim that
+  physical ADAS hardware was actuated.
 - When the reported activity is "Children out of place," treat it as a concrete
   child-safety concern, not routine telemetry. Give a concise, calm, high-priority
   warning that children are out of place near the vehicle; ask the driver to

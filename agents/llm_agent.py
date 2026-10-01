@@ -69,6 +69,7 @@ class LLMAgent:
             base_url=f"http://{opt.ollama_host}:{opt.ollama_port}",
             timeout=opt.ollama_timeout,
             max_tokens=opt.max_tokens,
+            additional_params={"reasoning_effort": "none"},
         )
         self.decision_options = {
             "urgency_options": _enum_options(UrgencyType),
@@ -78,12 +79,19 @@ class LLMAgent:
             "action_options": _enum_options(ActionType),
             "suggestion_options": _enum_options(SuggestionType),
         }
-        self.meeting_decision_guidance = (
-            f"urgency={UrgencyType.HIGH.value}, tone={ToneType.DISCREET.value}, "
-            f"intervention_type={InterventionType.ACT.value}, "
-            f"skill={SkillType.CONVERSATION.value}, "
-            f"action={ActionType.ASK_ATTEND_MEETING.value}, "
-            f"suggestion_type={SuggestionType.NONE.value}"
+        self.direct_vehicle_actions = tuple(
+            action
+            for action in ActionType
+            if action
+            not in {
+                ActionType.NONE,
+                ActionType.FIND_REST_AREA,
+                ActionType.ASK_ATTEND_MEETING,
+            }
+        )
+        self.direct_action_options = "\n".join(
+            f"- {action.value}: {action.description}"
+            for action in self.direct_vehicle_actions
         )
         self.silent_decision_guidance = (
             f"urgency={UrgencyType.NONE.value}, tone={ToneType.DISCREET.value}, "
@@ -116,8 +124,11 @@ class LLMAgent:
 
                 Inputs:
                 skill_instructions={skill_instructions}
-                changed_knowledge={changed_knowledge}
-                context={context}
+                vehicle_action_guidance={vehicle_action_guidance}
+                Changed vehicle facts (trigger for this decision):
+                {changed_facts}
+                Supporting current vehicle context (not a new trigger):
+                {context}
                 user_input={user_input}
                 urgency_options={urgency_options}
                 tone_options={tone_options}
@@ -125,24 +136,39 @@ class LLMAgent:
                 skill_options={skill_options}
                 action_options={action_options}
                 suggestion_options={suggestion_options}
-                meeting_decision_guidance={meeting_decision_guidance}
                 silent_decision_guidance={silent_decision_guidance}
 
                 Rules:
-                - Exception that always applies first: if changed_knowledge or context
-                    indicates the driver is running late for a meeting, this is always a
-                    useful action needed now, regardless of the general silence rule below.
-                    Never use the silent decision for this case. Use
-                    meeting_decision_guidance, and
-                    spoken_message asking, in these words or close to them, "Would you like
-                    me to attend the meeting on your behalf and brief you once it is over?".
-                    Do not claim the meeting has already been joined; only ask.
+                - For a knowledge_updated event, an empty user_input is expected: there was
+                    no direct utterance. Do not call it unintelligible; decide from the
+                    changed vehicle facts and skill instructions.
+                - Base the intervention on changed vehicle facts. Supporting context may
+                    clarify or constrain that response, but must not introduce an unrelated
+                    action on its own.
+                - Facts prefixed "Changed just now:" are the trigger for this event; evaluate
+                    them first. Use remaining vehicle facts only as supporting context and do
+                    not choose an unrelated action because of them.
+                - Classify a direct user request before context-driven interventions; unrelated
+                    facts must not replace the user's explicit intent.
+                - Choose ask_attend_meeting only when the current vehicle facts explicitly state
+                    that the driver is late for an upcoming meeting. Ask permission; never claim
+                    the meeting has already been joined.
                 - Choose every structured field only from its matching options list above;
                     do not invent or rename enum values.
                 - Choose tone using tone_options and make spoken_message consistent with its
                     description. Tone describes delivery, not the driver's emotional state.
                 - Keep intervention_type, skill, action and suggestion_type mutually
                     consistent. Use the corresponding none option when a field does not apply.
+                - When skill_instructions prescribe a supported safety action for an
+                    explicitly reported current condition, include that action in the
+                    structured decision as well as the spoken warning.
+                - For a direct request that matches vehicle_action_guidance, this is the
+                    action decision, not a conversational fallback: choose the matching
+                    ActionType, intervention_type=act, urgency=low, suggestion_type=none,
+                    and its driving or wellbeing skill. Use the catalog's defaults and
+                    limits; don't ask for optional parameters. Use action=none only for an
+                    unsupported operation or a capability question that doesn't request it.
+                    Acknowledge briefly without claiming physical vehicle confirmation.
                 - Outside of that exception, remain silent (urgency=none) unless the data
                     shows a concrete current safety risk, abnormal condition, or useful
                     action needed now.
@@ -151,19 +177,19 @@ class LLMAgent:
                 - A trend, fluctuation, or sensor value is not a risk without an explicit
                     threshold or safety consequence. Do not infer one.
                 - For proactive alerts, require all of the following: a concrete current
-                    hazard or action, direct evidence for it in changed_knowledge or
-                    context, and a timely benefit from interrupting the driver. Otherwise
+                    hazard or action, direct evidence in the changed vehicle facts, and a
+                    timely benefit from interrupting the driver. Otherwise
                     urgency=none.
                 - Never turn missing information into a warning: a trend or state change is
-                    only a risk when skill_instructions or context ties it to an explicit
+                    only a risk when skill_instructions or the changed vehicle facts tie it to an explicit
                     threshold or consequence.
                 - You may use lookup_speed_limit only when explicit latitude and longitude
-                    are available in the supplied context or user request. Treat unavailable
+                    are available in the changed vehicle facts or user request. Treat unavailable
                     tool results as no speed-limit information; do not estimate a limit.
                 - skill_instructions may list example values to illustrate a rule; they are
                     not the current data. Only state a specific value (e.g. a turn-signal
                     direction, a light or door state) if that exact value appears verbatim
-                    in changed_knowledge or context. Never substitute an example value from
+                    in the changed vehicle facts. Never substitute an example value from
                     skill_instructions for the actual reported one.
                 - If you cannot name a concrete current risk or useful action, that is
                     the Silent case: use silent_decision_guidance and set spoken_message=null
@@ -196,6 +222,46 @@ class LLMAgent:
         self.crew = Crew(
             agents=[agent],
             tasks=[task],
+            verbose=False,
+            tracing=False,
+            process=Process.sequential,
+            memory=None,
+        )
+        direct_action_task = Task(
+            description="""
+                Classify this direct user request as one simulated vehicle action or no action.
+
+                User request: {user_input}
+                Vehicle action reference: {vehicle_action_guidance}
+                Supported vehicle actions: {action_options}
+                Skills: {skill_options}
+                Tones: {tone_options}
+
+                Rules:
+                - Consider only the user's requested operation and the action reference.
+                    Do not use telemetry, meeting guidance, or proactive notification rules.
+                - If the user requests a supported operation, select its exact action,
+                    intervention_type=act, urgency=low, suggestion_type=none, and its
+                    driving or wellbeing skill. This includes polite forms such as "Can you..."
+                    and "Could you...".
+                - Use the catalog's default step and limits. Do not ask for optional values.
+                - If the request is not a supported operation, use action=none,
+                    intervention_type=none, urgency=none, skill=none,
+                    suggestion_type=none, and spoken_message=null.
+                - Keep the spoken acknowledgement short and do not claim physical vehicle
+                    confirmation; this app updates simulated UI state only.
+                - Fill every structured field using only the allowed enums.
+                """,
+            expected_output=(
+                "A structured direct-action decision with urgency, tone, intervention_type, "
+                "skill, action, suggestion_type, reason and spoken_message."
+            ),
+            output_pydantic=NotificationDecision,
+            agent=agent,
+        )
+        self.direct_action_crew = Crew(
+            agents=[agent],
+            tasks=[direct_action_task],
             verbose=False,
             tracing=False,
             process=Process.sequential,
@@ -301,20 +367,7 @@ class LLMAgent:
             if await self.agent.maybe_handle_meeting_confirmation(event.user_input):
                 return
             self.agent.cancel_voice_response()
-            response_task = asyncio.create_task(self.agent.stream_user_response(event))
-            self.agent._voice_response_task = response_task
-
-            def _voice_response_done(task: asyncio.Task) -> None:
-                if self.agent._voice_response_task is task:
-                    self.agent._voice_response_task = None
-                if task.cancelled():
-                    self.logger.info(">>> voice response interrupted")
-                    return
-                error = task.exception()
-                if error is not None:
-                    self.logger.error(">>> voice response failed", error=str(error))
-
-            response_task.add_done_callback(_voice_response_done)
+            await self._process_direct_user_input(event)
             return
 
         llm_start = time.time()
@@ -328,11 +381,21 @@ class LLMAgent:
 
         inputs = {
             "skill_instructions": skill_instructions,
-            "changed_knowledge": event.event_value,
-            "context": event.context,
+            "vehicle_action_guidance": getattr(
+                self.agent.skill_manager, "vehicle_action_guidance", ""
+            ),
+            "changed_facts": "\n".join(
+                f"- {fact.removeprefix('Changed just now: ')}"
+                for fact in event.context
+                if fact.startswith("Changed just now:")
+            ) or "No specific vehicle fact changed.",
+            "context": "\n".join(
+                f"- {fact}"
+                for fact in event.context
+                if not fact.startswith("Changed just now:")
+            ) or "No additional vehicle context is available.",
             "user_input": event.user_input,
             **self.decision_options,
-            "meeting_decision_guidance": self.meeting_decision_guidance,
             "silent_decision_guidance": self.silent_decision_guidance,
         }
         # This decision is a classification (urgency/action), not creative writing: lower the
@@ -350,19 +413,15 @@ class LLMAgent:
 
         decision: NotificationDecision = result.pydantic
         if decision.notify and decision.spoken_message:
-            if not event.user_input and self._is_non_actionable_decision(decision):
+            if self._is_non_actionable_decision(decision):
                 self.logger.info(">>> [suppressed non-actionable model decision]")
                 return
 
-            # Check deterministic cooldown / deduplication unless user explicitly asked a question
-            if not event.user_input:
-                suppressed, reason = self._is_duplicate_or_cooling_down(
-                    message=decision.spoken_message,
-                    urgency=decision.urgency,
-                    measures=measures,
-                )
-            else:
-                suppressed, reason = False, ""
+            suppressed, reason = self._is_duplicate_or_cooling_down(
+                message=decision.spoken_message,
+                urgency=decision.urgency,
+                measures=measures,
+            )
 
             if suppressed:
                 self.logger.info(f">>> [suppressed duplicate] {reason}")
@@ -390,3 +449,74 @@ class LLMAgent:
                     self.agent.action_manager.handle_decision(
                         decision.action, {}
                     )
+
+    async def _process_direct_user_input(self, event: CarEvent) -> None:
+        inputs = {
+            "user_input": event.user_input,
+            "vehicle_action_guidance": getattr(
+                self.agent.skill_manager, "vehicle_action_guidance", ""
+            ),
+            "action_options": self.direct_action_options,
+            "skill_options": self.decision_options["skill_options"],
+            "tone_options": self.decision_options["tone_options"],
+        }
+        default_temperature = self.llm.temperature
+        self.llm.temperature = 0.1
+        try:
+            result = await self.direct_action_crew.kickoff_async(inputs=inputs)
+        finally:
+            self.llm.temperature = default_temperature
+
+        decision: NotificationDecision = result.pydantic
+        action_selected = (
+            decision.intervention_type is InterventionType.ACT
+            and decision.action in self.direct_vehicle_actions
+        )
+        if action_selected:
+            self.logger.info(
+                "Direct user request classified as vehicle action",
+                user_input=event.user_input,
+                action=decision.action.value,
+                skill=decision.skill.value,
+                reason=decision.reason,
+            )
+            self.agent.action_manager.handle_decision(decision.action, {})
+            await self.agent.speak(
+                decision.spoken_message or "I received the action request.",
+                tone=decision.tone,
+            )
+            return
+
+        fallback_reason = (
+            f"action={decision.action.value} is not a supported simulated vehicle action"
+            if decision.action is not ActionType.NONE
+            else "model selected action=none"
+        )
+        self.logger.warning(
+            "Direct user request was not classified as a vehicle action; falling back to conversation",
+            user_input=event.user_input,
+            fallback_reason=fallback_reason,
+            intervention_type=decision.intervention_type.value,
+            action=decision.action.value,
+            skill=decision.skill.value,
+            suggestion_type=decision.suggestion_type.value,
+            decision_reason=decision.reason,
+            spoken_message=decision.spoken_message,
+        )
+        self._start_conversation_response(event)
+
+    def _start_conversation_response(self, event: CarEvent) -> None:
+        response_task = asyncio.create_task(self.agent.stream_user_response(event))
+        self.agent._voice_response_task = response_task
+
+        def _voice_response_done(task: asyncio.Task) -> None:
+            if self.agent._voice_response_task is task:
+                self.agent._voice_response_task = None
+            if task.cancelled():
+                self.logger.info(">>> voice response interrupted")
+                return
+            error = task.exception()
+            if error is not None:
+                self.logger.error(">>> voice response failed", error=str(error))
+
+        response_task.add_done_callback(_voice_response_done)

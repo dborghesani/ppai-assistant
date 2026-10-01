@@ -6,8 +6,10 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Callable, DefaultDict, Tuple
 
 import structlog
+from agents.agents_dataclasses import ActionType
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
+from data.assistant_dataclasses import DetectedObjects, VehicleState
 from data.database_manager import DatabaseManager
 from data.mqtt_thread import MqttThreadClient
 from data.events import CarEvent
@@ -45,6 +47,7 @@ class VehicleBridge:
         self.agent.on_assistant_status_changed = lambda status: self._emit(
             "assistantStatusChanged", status.value
         )
+        self.agent.action_manager.on_action = self.apply_vehicle_action
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:
@@ -66,6 +69,142 @@ class VehicleBridge:
             "sttEnabledChanged",
             bool(stt_manager is not None and stt_manager.enabled),
         )
+
+    def apply_vehicle_action(
+        self, action_type: ActionType, parameters: dict[str, Any]
+    ) -> None:
+        window_fields = (
+            "window_open_front_left",
+            "window_open_front_right",
+            "window_open_rear_left",
+            "window_open_rear_right",
+        )
+        state_updates: dict[str, Any] = {
+            ActionType.OPEN_WINDOWS: dict.fromkeys(window_fields, True),
+            ActionType.CLOSE_WINDOWS: dict.fromkeys(window_fields, False),
+            ActionType.OPEN_SUNROOF: {"sunroof_open": True},
+            ActionType.CLOSE_SUNROOF: {"sunroof_open": False},
+            ActionType.ENABLE_AIR_CONDITIONING: {"air_conditioning_on": True},
+            ActionType.DISABLE_AIR_CONDITIONING: {"air_conditioning_on": False},
+            ActionType.ENABLE_AIR_RECIRCULATION: {"air_recirculation_on": True},
+            ActionType.DISABLE_AIR_RECIRCULATION: {"air_recirculation_on": False},
+            ActionType.ENABLE_SEAT_HEATING: {"seat_heating_on": True},
+            ActionType.DISABLE_SEAT_HEATING: {"seat_heating_on": False},
+            ActionType.LOCK_DOORS: {"doors_locked": True},
+            ActionType.UNLOCK_DOORS: {"doors_locked": False},
+            ActionType.START_RADIO: {"radio_on": True},
+            ActionType.STOP_RADIO: {"radio_on": False},
+            ActionType.START_NAVIGATION: {"navigation_active": True},
+            ActionType.STOP_NAVIGATION: {"navigation_active": False},
+            ActionType.ENABLE_ADAPTIVE_CRUISE_CONTROL: {"adaptive_cruise_control_on": True},
+            ActionType.DISABLE_ADAPTIVE_CRUISE_CONTROL: {"adaptive_cruise_control_on": False},
+            ActionType.ENABLE_LANE_KEEP_ASSIST: {"lane_keep_assist_enabled": True},
+            ActionType.DISABLE_LANE_KEEP_ASSIST: {"lane_keep_assist_enabled": False},
+            ActionType.ENABLE_BLIND_SPOT_MONITOR: {"blind_spot_monitor": True},
+            ActionType.DISABLE_BLIND_SPOT_MONITOR: {"blind_spot_monitor": False},
+            ActionType.ENABLE_SIDELIGHTS: {"lights_on_sidelights": True},
+            ActionType.DISABLE_SIDELIGHTS: {"lights_on_sidelights": False},
+            ActionType.ENABLE_LOW_BEAM_HEADLIGHTS: {"lights_on_low_beams": True},
+            ActionType.DISABLE_LOW_BEAM_HEADLIGHTS: {"lights_on_low_beams": False},
+            ActionType.ENABLE_HIGH_BEAM_HEADLIGHTS: {"lights_on_high_beams": True},
+            ActionType.DISABLE_HIGH_BEAM_HEADLIGHTS: {"lights_on_high_beams": False},
+            ActionType.ENABLE_FOG_LIGHTS: {"lights_on_fog_lights": True},
+            ActionType.DISABLE_FOG_LIGHTS: {"lights_on_fog_lights": False},
+        }.get(action_type, {})
+
+        vehicle_state = self.database_manager.current_state.get("VehicleState")
+        if action_type is ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE:
+            current_target_speed = getattr(vehicle_state, "adas_target_speed", None)
+            current_following_distance = getattr(
+                vehicle_state, "following_distance_level", None
+            )
+            current_target_speed = 90 if current_target_speed is None else current_target_speed
+            current_following_distance = (
+                3 if current_following_distance is None else current_following_distance
+            )
+            state_updates = {
+                "adaptive_cruise_control_on": True,
+                "adas_target_speed": max(0, current_target_speed - 10),
+                "following_distance_level": min(5, current_following_distance + 1),
+                "lane_keep_assist_enabled": True,
+                "blind_spot_monitor": True,
+            }
+        elif action_type in {
+            ActionType.REDUCE_TARGET_SPEED,
+            ActionType.INCREASE_TARGET_SPEED,
+        }:
+            current_target_speed = getattr(vehicle_state, "adas_target_speed", None)
+            current_target_speed = 90 if current_target_speed is None else current_target_speed
+            target_speed_step = (
+                10 if action_type is ActionType.INCREASE_TARGET_SPEED else -10
+            )
+            state_updates = {
+                "adas_target_speed": min(160, max(0, current_target_speed + target_speed_step))
+            }
+        elif action_type in {
+            ActionType.INCREASE_FOLLOWING_DISTANCE,
+            ActionType.DECREASE_FOLLOWING_DISTANCE,
+        }:
+            current_following_distance = getattr(
+                vehicle_state, "following_distance_level", None
+            )
+            current_following_distance = (
+                3 if current_following_distance is None else current_following_distance
+            )
+            following_distance_step = (
+                1 if action_type is ActionType.INCREASE_FOLLOWING_DISTANCE else -1
+            )
+            state_updates = {
+                "following_distance_level": min(
+                    5, max(1, current_following_distance + following_distance_step)
+                )
+            }
+        elif action_type in {
+            ActionType.INCREASE_TEMPERATURE,
+            ActionType.DECREASE_TEMPERATURE,
+        }:
+            current_temperature = getattr(vehicle_state, "internal_temperature", None)
+            if current_temperature is None:
+                current_temperature = VehicleState().internal_temperature or 22.0
+            temperature_step = (
+                1.0 if action_type is ActionType.INCREASE_TEMPERATURE else -1.0
+            )
+            state_updates = {
+                "internal_temperature": min(
+                    40.0, max(10.0, current_temperature + temperature_step)
+                )
+            }
+        elif action_type in {
+            ActionType.INCREASE_FAN_SPEED,
+            ActionType.DECREASE_FAN_SPEED,
+        }:
+            current_fan_speed = getattr(vehicle_state, "fan_speed", None)
+            if current_fan_speed is None:
+                current_fan_speed = VehicleState().fan_speed or 3
+            fan_speed_step = (
+                1 if action_type is ActionType.INCREASE_FAN_SPEED else -1
+            )
+            state_updates = {
+                "fan_speed": min(7, max(0, current_fan_speed + fan_speed_step))
+            }
+        elif action_type in {
+            ActionType.INCREASE_AUDIO_VOLUME,
+            ActionType.DECREASE_AUDIO_VOLUME,
+        }:
+            current_audio_volume = getattr(vehicle_state, "audio_volume", None)
+            if current_audio_volume is None:
+                current_audio_volume = VehicleState().audio_volume or 20
+            audio_volume_step = (
+                5 if action_type is ActionType.INCREASE_AUDIO_VOLUME else -5
+            )
+            state_updates = {
+                "audio_volume": min(100, max(0, current_audio_volume + audio_volume_step))
+            }
+        if not state_updates:
+            return
+        for measure, value in state_updates.items():
+            self.database_manager.write_measure("VehicleState", measure, value)
+        self._emit("vehicleStateChanged", state_updates)
 
     def _emit(self, event_name: str, *args: Any) -> None:
         for callback in tuple(self._listeners[event_name]):
@@ -271,6 +410,12 @@ class VehicleBridge:
         self.send_event(f"{classname}.{varname}", value)
 
     def intChanged(self, classname, varname, value):
+        if classname == "DetectedObjects" and varname == "dangerous_objects_around":
+            count = max(0, min(10, int(value)))
+            self.database_manager.write_measure(
+                "DetectedObjects", "dangerous_objects_around", count
+            )
+            return
         self.send_event(f"{classname}.{varname}", value)
 
     def stringChanged(self, classname, varname, value):
@@ -282,6 +427,7 @@ class VehicleBridge:
     def _on_knowledge_updated(self) -> None:
         """Called synchronously by KnowledgeManager right after its context changes."""
         self._emit("knowledgeUpdated", self.dumpKnowledgeData())
+        self._emit("detectedObjectsStateChanged", self.dumpDetectedObjectsState())
 
     def dumpKnowledge(self) -> str:
         return self.knowledge_manager.dump_knowledge()
@@ -292,3 +438,29 @@ class VehicleBridge:
             for key, value in self.knowledge_manager.context.items()
         }
         return json.loads(json.dumps(knowledge, default=str))
+
+    def dumpVehicleState(self) -> dict[str, Any]:
+        state = self.database_manager.current_state.get("VehicleState")
+        values = asdict(VehicleState())
+        if isinstance(state, VehicleState):
+            values.update(
+                {
+                    key: value
+                    for key, value in asdict(state).items()
+                    if value is not None
+                }
+            )
+        return values
+
+    def dumpDetectedObjectsState(self) -> dict[str, Any]:
+        state = self.database_manager.current_state.get("DetectedObjects")
+        values = asdict(DetectedObjects())
+        if isinstance(state, DetectedObjects):
+            values.update(
+                {
+                    key: value
+                    for key, value in asdict(state).items()
+                    if value is not None
+                }
+            )
+        return values

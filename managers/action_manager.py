@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import structlog
 from agents.agents_dataclasses import ActionType, AssistantStatus
@@ -20,6 +20,7 @@ class ActionManager:
         self.logger = structlog.get_logger()
         self.awaiting_confirmation = False
         self._meeting_task: asyncio.Task | None = None
+        self.on_action: Callable[[ActionType, dict[str, Any]], None] | None = None
 
     def handle_decision(
         self, action_type: ActionType, parameters: dict[str, Any] | None = None
@@ -32,6 +33,8 @@ class ActionManager:
                 self.logger.info(
                     f">>> [action] executing {action_type} with parameters: {parameters}"
                 )
+                if self.on_action is not None:
+                    self.on_action(action_type, parameters or {})
             finally:
                 self.agent.set_assistant_status(AssistantStatus.IDLE)
 

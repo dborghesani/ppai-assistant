@@ -51,6 +51,42 @@ class KnowledgeManager:
         ("VehicleState", "door_open_rear_right"): lambda value: (
             "The rear right door is open." if value else "The rear right door is closed."
         ),
+        ("VehicleState", "window_open_front_left"): lambda value: (
+            "The front left window is open." if value else "The front left window is closed."
+        ),
+        ("VehicleState", "window_open_front_right"): lambda value: (
+            "The front right window is open." if value else "The front right window is closed."
+        ),
+        ("VehicleState", "window_open_rear_left"): lambda value: (
+            "The rear left window is open." if value else "The rear left window is closed."
+        ),
+        ("VehicleState", "window_open_rear_right"): lambda value: (
+            "The rear right window is open." if value else "The rear right window is closed."
+        ),
+        ("VehicleState", "sunroof_open"): lambda value: (
+            "The sunroof is open." if value else "The sunroof is closed."
+        ),
+        ("VehicleState", "air_conditioning_on"): lambda value: (
+            "The air conditioning is on." if value else "The air conditioning is off."
+        ),
+        ("VehicleState", "air_recirculation_on"): lambda value: (
+            "Cabin air recirculation is on." if value else "Cabin air recirculation is off."
+        ),
+        ("VehicleState", "seat_heating_on"): lambda value: (
+            "Seat heating is on." if value else "Seat heating is off."
+        ),
+        ("VehicleState", "radio_on"): lambda value: (
+            "The radio is on." if value else "The radio is off."
+        ),
+        ("VehicleState", "navigation_active"): lambda value: (
+            "Navigation is active." if value else "Navigation is inactive."
+        ),
+        ("VehicleState", "adaptive_cruise_control_on"): lambda value: (
+            "Adaptive cruise control is on." if value else "Adaptive cruise control is off."
+        ),
+        ("VehicleState", "lane_keep_assist_enabled"): lambda value: (
+            "Lane keeping assistance is on." if value else "Lane keeping assistance is off."
+        ),
         ("VehicleState", "lights_on_sidelights"): lambda value: (
             "The sidelights are on." if value else "The sidelights are off."
         ),
@@ -99,6 +135,18 @@ class KnowledgeManager:
             if value == 0
             else f"Traffic around the vehicle is "
             f"{KnowledgeManager._density_level(value)}."
+        ),
+        ("VehicleState", "fan_speed"): lambda value: (
+            f"Cabin fan speed is level {value}."
+        ),
+        ("VehicleState", "audio_volume"): lambda value: (
+            f"Audio volume is {value} percent."
+        ),
+        ("VehicleState", "adas_target_speed"): lambda value: (
+            f"ADAS target speed is {value} km/h."
+        ),
+        ("VehicleState", "following_distance_level"): lambda value: (
+            f"Following distance setting is level {value} of 5."
         ),
     }
     _CATEGORY_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[str], str]] = {
@@ -464,10 +512,15 @@ class KnowledgeManager:
                     ):
                         skill_context[context_key] = context_value
 
-            skill_context_all_values_as_list = [
-                f"{context_key}: {context_value}"
-                for context_key, context_value in skill_context.items()
+            changed_context = [
+                f"Changed just now: {skill_context[key]}"
+                for key in skill_changes
+                if key in skill_context
             ]
+            supporting_context = [
+                value for key, value in skill_context.items() if key not in skill_changes
+            ]
+            skill_context_all_values_as_list = changed_context + supporting_context
             await self.knowledge_event_queue.put(
                 CarEvent(
                     skill=skill,
@@ -607,6 +660,8 @@ class KnowledgeManager:
             key = f"{name}.{measure}"
             trend: str | None = None
             metadata = self._knowledge_metadata(name, measure) or {}
+            if metadata.get("value_kind") == "presence":
+                value = bool(value)
             self._raw_values[key] = value
             if (
                 isinstance(value, int)

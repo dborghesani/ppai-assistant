@@ -52,6 +52,8 @@ class WebUIServer:
             "speakingToneChanged",
             "assistantStatusChanged",
             "sttEnabledChanged",
+            "vehicleStateChanged",
+            "detectedObjectsStateChanged",
             "userSpeechReceived",
             "conversationModeChanged",
             "knowledgeUpdated",
@@ -108,6 +110,8 @@ class WebUIServer:
                 "event": "ready",
                 "data": {
                     "knowledge": self.bridge.dumpKnowledgeData(),
+                    "vehicleState": self.bridge.dumpVehicleState(),
+                    "detectedObjectsState": self.bridge.dumpDetectedObjectsState(),
                     "sttEnabled": bool(
                         self.bridge.stt_manager is not None
                         and self.bridge.stt_manager.enabled

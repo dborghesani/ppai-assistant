@@ -43,14 +43,37 @@ class ActionType(str, Enum):
     NONE = "none"
     INCREASE_TEMPERATURE = "increase_temperature"
     DECREASE_TEMPERATURE = "decrease_temperature"
+    OPEN_WINDOWS = "open_windows"
+    CLOSE_WINDOWS = "close_windows"
+    OPEN_SUNROOF = "open_sunroof"
+    CLOSE_SUNROOF = "close_sunroof"
     ENABLE_AIR_CONDITIONING = "enable_air_conditioning"
     DISABLE_AIR_CONDITIONING = "disable_air_conditioning"
+    INCREASE_FAN_SPEED = "increase_fan_speed"
+    DECREASE_FAN_SPEED = "decrease_fan_speed"
+    ENABLE_AIR_RECIRCULATION = "enable_air_recirculation"
+    DISABLE_AIR_RECIRCULATION = "disable_air_recirculation"
+    ENABLE_SEAT_HEATING = "enable_seat_heating"
+    DISABLE_SEAT_HEATING = "disable_seat_heating"
     LOCK_DOORS = "lock_doors"
     UNLOCK_DOORS = "unlock_doors"
     START_RADIO = "start_radio"
     STOP_RADIO = "stop_radio"
+    INCREASE_AUDIO_VOLUME = "increase_audio_volume"
+    DECREASE_AUDIO_VOLUME = "decrease_audio_volume"
     START_NAVIGATION = "start_navigation"
     STOP_NAVIGATION = "stop_navigation"
+    REDUCE_TARGET_SPEED = "reduce_target_speed"
+    INCREASE_TARGET_SPEED = "increase_target_speed"
+    INCREASE_FOLLOWING_DISTANCE = "increase_following_distance"
+    DECREASE_FOLLOWING_DISTANCE = "decrease_following_distance"
+    ENABLE_ADAPTIVE_CRUISE_CONTROL = "enable_adaptive_cruise_control"
+    DISABLE_ADAPTIVE_CRUISE_CONTROL = "disable_adaptive_cruise_control"
+    ENABLE_LANE_KEEP_ASSIST = "enable_lane_keep_assist"
+    DISABLE_LANE_KEEP_ASSIST = "disable_lane_keep_assist"
+    ENABLE_BLIND_SPOT_MONITOR = "enable_blind_spot_monitor"
+    DISABLE_BLIND_SPOT_MONITOR = "disable_blind_spot_monitor"
+    APPLY_RESTRICTIVE_ADAS_PROFILE = "apply_restrictive_adas_profile"
     ENABLE_SIDELIGHTS = "enable_sidelights"
     DISABLE_SIDELIGHTS = "disable_sidelights"
     ENABLE_LOW_BEAM_HEADLIGHTS = "enable_low_beam_headlights"
@@ -66,16 +89,42 @@ class ActionType(str, Enum):
     def description(self) -> str:
         return {
             ActionType.NONE: "No direct action.",
-            ActionType.INCREASE_TEMPERATURE: "increase temperature",
-            ActionType.DECREASE_TEMPERATURE: "decrease temperature",
+            ActionType.INCREASE_TEMPERATURE: "increase cabin temperature by one step",
+            ActionType.DECREASE_TEMPERATURE: "decrease cabin temperature by one step",
+            ActionType.OPEN_WINDOWS: "open the windows",
+            ActionType.CLOSE_WINDOWS: "close the windows",
+            ActionType.OPEN_SUNROOF: "open the sunroof",
+            ActionType.CLOSE_SUNROOF: "close the sunroof",
             ActionType.ENABLE_AIR_CONDITIONING: "enable air conditioning",
             ActionType.DISABLE_AIR_CONDITIONING: "disable air conditioning",
+            ActionType.INCREASE_FAN_SPEED: "increase fan speed by one step",
+            ActionType.DECREASE_FAN_SPEED: "decrease fan speed by one step",
+            ActionType.ENABLE_AIR_RECIRCULATION: "enable air recirculation",
+            ActionType.DISABLE_AIR_RECIRCULATION: "disable air recirculation",
+            ActionType.ENABLE_SEAT_HEATING: "enable seat heating",
+            ActionType.DISABLE_SEAT_HEATING: "disable seat heating",
             ActionType.LOCK_DOORS: "lock doors",
             ActionType.UNLOCK_DOORS: "unlock doors",
             ActionType.START_RADIO: "start radio",
             ActionType.STOP_RADIO: "stop radio",
+            ActionType.INCREASE_AUDIO_VOLUME: "increase audio volume by one step",
+            ActionType.DECREASE_AUDIO_VOLUME: "decrease audio volume by one step",
             ActionType.START_NAVIGATION: "start navigation",
             ActionType.STOP_NAVIGATION: "stop navigation",
+            ActionType.REDUCE_TARGET_SPEED: "reduce the ADAS target speed by one step",
+            ActionType.INCREASE_TARGET_SPEED: "increase the ADAS target speed by one step",
+            ActionType.INCREASE_FOLLOWING_DISTANCE: "increase the following distance by one step",
+            ActionType.DECREASE_FOLLOWING_DISTANCE: "decrease the following distance by one step",
+            ActionType.ENABLE_ADAPTIVE_CRUISE_CONTROL: "enable adaptive cruise control",
+            ActionType.DISABLE_ADAPTIVE_CRUISE_CONTROL: "disable adaptive cruise control",
+            ActionType.ENABLE_LANE_KEEP_ASSIST: "enable lane keeping assistance",
+            ActionType.DISABLE_LANE_KEEP_ASSIST: "disable lane keeping assistance",
+            ActionType.ENABLE_BLIND_SPOT_MONITOR: "enable blind spot monitoring",
+            ActionType.DISABLE_BLIND_SPOT_MONITOR: "disable blind spot monitoring",
+            ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE: (
+                "apply the restrictive ADAS safety profile: lower target speed, "
+                "increase following distance, and enable available assistance"
+            ),
             ActionType.ENABLE_SIDELIGHTS: "enable sidelights",
             ActionType.DISABLE_SIDELIGHTS: "disable sidelights",
             ActionType.ENABLE_LOW_BEAM_HEADLIGHTS: "enable low beam headlights",

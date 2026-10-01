@@ -294,7 +294,7 @@ class SourceManager:
                 vision_objects: list[VisionObject] = []
                 vehicles_around = 0
                 people_around = 0
-                dangerous_objects_around = False
+                dangerous_objects_around = 0
                 if "radar_objects" in payload:
                     for sensor_objects in payload["radar_objects"].values():
                         if not isinstance(sensor_objects, list):
@@ -313,7 +313,7 @@ class SourceManager:
                         elif category in {"pedestrian", "child", "children", "child pedestrian"}:
                             people_around += 1
                         if category == "gun":
-                            dangerous_objects_around = True
+                            dangerous_objects_around += 1
                 detected_values.update(
                     radar_objects=radar_objects,
                     vision_objects=vision_objects,

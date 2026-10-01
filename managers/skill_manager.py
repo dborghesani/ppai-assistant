@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from agents.agents_dataclasses import SkillType
 
 class SkillManager:
@@ -6,6 +8,10 @@ class SkillManager:
         self.skill_map: dict[SkillType, str] = {}
         for skill in SkillType:
             self.skill_map[skill] = self.load(skill)
+        action_guide_path = (
+            Path(__file__).resolve().parents[1] / "skills" / "vehicle_actions.md"
+        )
+        self.vehicle_action_guidance = action_guide_path.read_text(encoding="utf-8")
         
     def load(self, skill_name: SkillType) -> str:
         if skill_name is SkillType.NONE:

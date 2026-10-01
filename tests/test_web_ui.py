@@ -2,6 +2,7 @@ import sys
 import unittest
 from collections import defaultdict
 from types import SimpleNamespace
+from typing import Any, cast
 
 from aiohttp.test_utils import TestClient, TestServer
 from agents.automotive_agent import AutomotiveAgent
@@ -23,6 +24,12 @@ class FakeBridge:
 
     def dumpKnowledgeData(self) -> dict:
         return {"VehicleState": {"engine_on": False}}
+
+    def dumpVehicleState(self) -> dict:
+        return {"engine_on": False}
+
+    def dumpDetectedObjectsState(self) -> dict:
+        return {"dangerous_objects_around": 0, "children_inside": 0}
 
 
 class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
@@ -52,6 +59,11 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         ready = await socket.receive_json()
         self.assertEqual(ready["event"], "ready")
         self.assertFalse(ready["data"]["sttEnabled"])
+        self.assertEqual(ready["data"]["vehicleState"], {"engine_on": False})
+        self.assertEqual(
+            ready["data"]["detectedObjectsState"],
+            {"dangerous_objects_around": 0, "children_inside": 0},
+        )
         self.assertEqual(
             ready["data"]["knowledge"],
             {"VehicleState": {"engine_on": False}},
@@ -61,6 +73,39 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         response = await socket.receive_json()
         self.assertEqual(response["id"], 1)
         self.assertIn("VehicleState", response["result"])
+        await socket.close()
+
+    async def test_websocket_forwards_vehicle_state_changes(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+
+        cast(Any, self.web_ui.bridge).listeners["vehicleStateChanged"](
+            {"window_open_front_left": True}
+        )
+        message = await socket.receive_json()
+
+        self.assertEqual(
+            message,
+            {
+                "event": "vehicleStateChanged",
+                "data": [{"window_open_front_left": True}],
+            },
+        )
+        await socket.close()
+
+    async def test_websocket_forwards_detected_objects_state(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+
+        cast(Any, self.web_ui.bridge).listeners["detectedObjectsStateChanged"](
+            {"children_inside": 2}
+        )
+        message = await socket.receive_json()
+
+        self.assertEqual(
+            message,
+            {"event": "detectedObjectsStateChanged", "data": [{"children_inside": 2}]},
+        )
         await socket.close()
 
     async def test_websocket_forwards_stt_readiness_changes(self) -> None:

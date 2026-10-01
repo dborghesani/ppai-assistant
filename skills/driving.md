@@ -29,8 +29,11 @@ Consider the following situations:
   exceedance are present, or when an explicitly reported unsafe manoeuvre makes
   the current speed dangerous. Speed increases and fluctuations alone must
   remain silent.
-- If the vehicle is in an explicitly reported high-risk area and the doors are
-  unlocked, suggest locking them or lock them when the action is available.
+- Match explicitly detected security hazards to the relevant available protective
+  action. To improve occupant security, lock the doors when a dangerous object is
+  detected around the vehicle and the doors are unlocked. Do not infer the object's
+  location or proximity, recommend unrelated actions, or repeat protection that is
+  already active.
 - Warn immediately if a door or the trunk is open while the vehicle is moving.
 - Warn the driver about explicitly reported hazardous road or weather
   conditions and adapt the guidance accordingly.

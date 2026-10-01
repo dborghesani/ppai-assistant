@@ -102,6 +102,9 @@ class KnowledgeManager:
         ("VehicleState", "engine_on"): lambda value: (
             "The engine is on." if value else "The engine is off."
         ),
+        ("VehicleState", "privacy_mode"): lambda value: (
+            "Privacy mode is on." if value else "Privacy mode is off."
+        ),
         ("DriverAgenda", "late_for_meeting"): lambda value: (
             "The driver is running late for an upcoming meeting."
             if value
@@ -129,6 +132,11 @@ class KnowledgeManager:
             "No children are detected inside the vehicle."
             if value == 0
             else f"{value} {'child is' if value == 1 else 'children are'} detected inside the vehicle."
+        ),
+        ("DetectedObjects", "people_inside"): lambda value: (
+            "No people are detected inside the vehicle."
+            if value == 0
+            else f"{value} {'person is' if value == 1 else 'people are'} detected inside the vehicle."
         ),
         ("DetectedObjects", "vehicles_around"): lambda value: (
             "No vehicles are currently detected around the vehicle."
@@ -161,6 +169,14 @@ class KnowledgeManager:
             "Medium": "Current traffic is medium.",
             "Heavy": "Current traffic is heavy.",
         }.get(value, f"Current traffic is {value}."),
+        ("DriverPreferences", "preferred_cabin_temperature"): lambda value: (
+            f"The driver's preferred cabin temperature is {value} C."
+        ),
+        ("DriverPreferences", "preferred_music"): lambda value: (
+            f"The driver's music preference is {value}."
+            if value
+            else "The driver has not specified music preferences."
+        ),
         ("DriverPhysicalState", "activity"): lambda value: {
             "Idle": "No distracting driver activity is detected.",
             "About to exit": "The driver is about to exit the vehicle.",
@@ -633,6 +649,14 @@ class KnowledgeManager:
                 if data_field.default is None:
                     continue
                 pending[(attr_name, data_field.name)] = data_field.default
+
+        for name, data in self.database_manager.current_state.items():
+            if not is_dataclass(data):
+                continue
+            for data_field in fields(data):
+                value = getattr(data, data_field.name)
+                if data_field.metadata.get("knowledge", False) and value is not None:
+                    pending[(name, data_field.name)] = value
 
         if pending:
             await self.process_pending(pending)

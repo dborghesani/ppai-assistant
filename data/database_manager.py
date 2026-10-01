@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import time
 from dataclasses import asdict, fields, is_dataclass
 from typing import Any, cast, get_args, get_type_hints
@@ -50,6 +51,45 @@ class DatabaseManager:
 
         # create a storage of recent points to keep track of what has been written
         self.current_state: dict[str, Any] = {}
+        self._load_driver_preferences()
+
+    def _load_driver_preferences(self) -> None:
+        query = f'''from(bucket: "{self.opt.influxdb_bucket}")
+  |> range(start: 0)
+  |> filter(fn: (r) => r._measurement == "DriverPreferences")
+  |> filter(fn: (r) => r._field == "preferred_cabin_temperature" or r._field == "preferred_music")
+  |> last()'''
+        try:
+            records = self.run_records(query)
+        except Exception as error:
+            self.logger.warning(
+                "Could not restore driver preferences", error=str(error)
+            )
+            return
+
+        preferences = DriverPreferences()
+        restored = False
+        for record in records:
+            field_name = record.get("_field")
+            value = record.get("_value")
+            if field_name == "preferred_cabin_temperature":
+                if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                    continue
+                try:
+                    temperature = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(temperature):
+                    preferences.preferred_cabin_temperature = min(
+                        30.0, max(16.0, temperature)
+                    )
+                    restored = True
+            elif field_name == "preferred_music" and isinstance(value, str):
+                preferences.preferred_music = value.strip()[:500]
+                restored = True
+
+        if restored:
+            self.current_state["DriverPreferences"] = preferences
 
     def close(self):
         self.write_api.close()

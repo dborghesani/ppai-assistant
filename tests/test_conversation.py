@@ -182,3 +182,4 @@ def test_explicit_vehicle_command_dispatches_matching_action(
 	agent.speak.assert_awaited_once_with(
 		"I received your request.", tone=ToneType.CALM
 	)
+

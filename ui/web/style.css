@@ -144,6 +144,8 @@ h2 { font-size: 23px; }
 .range-row label { color: #c9d0d3; font-size: 12px; }
 .range-row output { min-width: 58px; padding: 4px 6px; border: 1px solid rgba(139,165,242,.28); border-radius: 4px; background: rgba(41,63,133,.24); color: #c7d4ff; font: 600 12px var(--font-body); text-align: center; }
 input[type="range"] { width: 100%; accent-color: var(--accent); }
+.preference-field { display: grid; gap: 8px; color: #c9d0d3; font-size: 12px; }
+.preference-field textarea { width: 100%; min-height: 96px; resize: vertical; border: 1px solid var(--line); border-radius: 4px; padding: 10px; background: var(--surface-2); color: var(--text); line-height: 1.5; }
 .toggle-row { min-height: 45px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line-soft); }
 .toggle-row:last-child { border: 0; }
 

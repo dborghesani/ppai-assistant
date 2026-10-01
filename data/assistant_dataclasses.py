@@ -130,6 +130,7 @@ class VehicleState:
         skills=(SkillType.DRIVING,),
     )  # simulated setting from 1 (short) to 5 (long)
     engine_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    privacy_mode: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     air_conditioning_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
     air_recirculation_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
     fan_speed: int | None = knowledge_field(
@@ -267,6 +268,12 @@ class DetectedObjects:
         value_kind="count",
         skills=(SkillType.WELLBEING,),
     )
+    people_inside: int | None = knowledge_field(
+        default=0,
+        change_threshold=1.0,
+        value_kind="count",
+        skills=(SkillType.WELLBEING,),
+    )
     animal_inside: bool | None = knowledge_field(
         default=False,
         skills=(SkillType.WELLBEING,),
@@ -294,6 +301,23 @@ class DriverPhysicalState:
     activity: str | None = knowledge_field(default="Idle", skills=(SkillType.WELLBEING,))  # Includes "Children out of place".
     attention_level: float | None = knowledge_field(default=1.0, value_kind="intensity", skills=(SkillType.WELLBEING,))  # [0.0, 1.0]
     fatigue_level: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))  # [0.0, 1.0]
+
+
+@dataclass
+class DriverPreferences:
+    preferred_cabin_temperature: float | None = knowledge_field(
+        default=None,
+        value_kind="category",
+        notify_on_change=False,
+        skills=(SkillType.CONVERSATION, SkillType.WELLBEING),
+    )
+    preferred_music: str | None = knowledge_field(
+        default=None,
+        value_kind="category",
+        notify_on_change=False,
+        skills=(SkillType.CONVERSATION, SkillType.WELLBEING),
+    )
+
 
 @dataclass
 class DriverEmotionState:

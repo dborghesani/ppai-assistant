@@ -15,6 +15,10 @@ class FakeBridge:
 
     def __init__(self) -> None:
         self.listeners = {}
+        self.driver_preferences = {
+            "preferred_cabin_temperature": None,
+            "preferred_music": "",
+        }
 
     def on(self, event_name, callback) -> None:
         self.listeners[event_name] = callback
@@ -26,10 +30,21 @@ class FakeBridge:
         return {"VehicleState": {"engine_on": False}}
 
     def dumpVehicleState(self) -> dict:
-        return {"engine_on": False}
+        return {"engine_on": False, "privacy_mode": False}
 
     def dumpDetectedObjectsState(self) -> dict:
-        return {"dangerous_objects_around": 0, "children_inside": 0}
+        return {
+            "dangerous_objects_around": 0,
+            "children_inside": 0,
+            "people_inside": 0,
+        }
+
+    def dumpDriverPreferences(self) -> dict:
+        return self.driver_preferences
+
+    def setDriverPreference(self, name: str, value) -> None:
+        self.driver_preferences[name] = value
+        self.listeners["driverPreferencesChanged"](self.driver_preferences)
 
 
 class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
@@ -59,10 +74,21 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         ready = await socket.receive_json()
         self.assertEqual(ready["event"], "ready")
         self.assertFalse(ready["data"]["sttEnabled"])
-        self.assertEqual(ready["data"]["vehicleState"], {"engine_on": False})
+        self.assertEqual(
+            ready["data"]["vehicleState"],
+            {"engine_on": False, "privacy_mode": False},
+        )
         self.assertEqual(
             ready["data"]["detectedObjectsState"],
-            {"dangerous_objects_around": 0, "children_inside": 0},
+            {
+                "dangerous_objects_around": 0,
+                "children_inside": 0,
+                "people_inside": 0,
+            },
+        )
+        self.assertEqual(
+            ready["data"]["driverPreferences"],
+            {"preferred_cabin_temperature": None, "preferred_music": ""},
         )
         self.assertEqual(
             ready["data"]["knowledge"],
@@ -105,6 +131,35 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             message,
             {"event": "detectedObjectsStateChanged", "data": [{"children_inside": 2}]},
+        )
+        await socket.close()
+
+    async def test_websocket_updates_driver_preferences(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+
+        await socket.send_json(
+            {
+                "id": 2,
+                "method": "setDriverPreference",
+                "params": ["preferred_music", "classic 1970s rock"],
+            }
+        )
+        response = await socket.receive_json()
+        update = await socket.receive_json()
+
+        self.assertEqual(response, {"id": 2, "result": None})
+        self.assertEqual(
+            update,
+            {
+                "event": "driverPreferencesChanged",
+                "data": [
+                    {
+                        "preferred_cabin_temperature": None,
+                        "preferred_music": "classic 1970s rock",
+                    }
+                ],
+            },
         )
         await socket.close()
 

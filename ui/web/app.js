@@ -11,7 +11,11 @@ const CONTROL_GROUPS = {
       ["Fatigue", "fatigue_level", 0, 1, 0, .01, "decimal", "DriverPhysicalState"],
       ["Attention", "attention_level", 0, 1, 1, .01, "decimal", "DriverPhysicalState"],
       ["Driving tension", "driving_tension", 0, 1, 0, .01, "decimal", "DriverDrivingStyle"]
-    ]}
+    ]},
+    { title: "Comfort preference", type: "ranges", cls: "DriverPreferences", controls: [
+      ["Preferred cabin temperature", "preferred_cabin_temperature", 16, 30, 22, .5, "temp"]
+    ]},
+    { title: "Music preference", type: "textarea", cls: "DriverPreferences", key: "preferred_music", value: "", placeholder: "e.g. classic 1970s rock, guitar-driven and upbeat" }
   ],
   road: [
     { title: "Weather", type: "options", cls: "EnvironmentState", key: "weather", value: "Sunny", options: ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"] },
@@ -31,7 +35,8 @@ const CONTROL_GROUPS = {
       ["Engine", "engine_on", false, "On", "Off"], ["Doors", "doors_locked", false, "Locked", "Unlocked"],
       ["Front left door", "door_open_front_left", false, "Open", "Closed"], ["Front right door", "door_open_front_right", false, "Open", "Closed"],
       ["Rear left door", "door_open_rear_left", false, "Open", "Closed"], ["Rear right door", "door_open_rear_right", false, "Open", "Closed"],
-      ["Trunk", "trunk_open", false, "Open", "Closed"], ["Navigation", "navigation_active", false, "Active", "Inactive"]
+      ["Trunk", "trunk_open", false, "Open", "Closed"], ["Navigation", "navigation_active", false, "Active", "Inactive"],
+      ["Privacy mode", "privacy_mode", false, "On", "Off"]
     ]},
     { title: "Windows & roof", type: "toggles", cls: "VehicleState", controls: [
       ["Front left window", "window_open_front_left", false, "Open", "Closed"], ["Front right window", "window_open_front_right", false, "Open", "Closed"],
@@ -78,6 +83,7 @@ const CONTROL_GROUPS = {
       ["Dangerous objects", "dangerous_objects_around", 0, 10, 0, 1, "integer"]
     ]},
     { title: "Interior object detection", type: "ranges", cls: "DetectedObjects", integer: true, controls: [
+      ["People inside", "people_inside", 0, 8, 0, 1, "integer"],
       ["Children inside", "children_inside", 0, 4, 0, 1, "integer"]
     ]},
     { title: "Interior animal detection", type: "toggles", cls: "DetectedObjects", controls: [
@@ -284,6 +290,10 @@ function renderControls(tabName) {
       const options = group.options.map(option => `<label><input type="radio" name="${name}" value="${escapeHtml(option)}" ${option === selectedValue ? "checked" : ""}><span>${escapeHtml(option)}</span></label>`).join("");
       return `<section class="control-section" data-type="options" data-class="${group.cls}" data-key="${group.key}"><h3>${group.title}</h3><div class="segmented">${options}</div></section>`;
     }
+    if (group.type === "textarea") {
+      const current = controlState[controlStateKey(group.cls, group.key)] ?? group.value ?? "";
+      return `<section class="control-section" data-type="textarea" data-class="${group.cls}"><h3>${group.title}</h3><label class="preference-field" for="${tabName}-${group.key}"><span>Describe the music you enjoy</span><textarea id="${tabName}-${group.key}" data-key="${group.key}" maxlength="500" rows="4" placeholder="${escapeHtml(group.placeholder)}">${escapeHtml(current)}</textarea></label></section>`;
+    }
     if (group.type === "toggles") {
       const controls = group.controls.map(([label, key, checked, on, off]) => {
         const current = controlState[controlStateKey(group.cls, key)] ?? checked;
@@ -301,7 +311,8 @@ function renderControls(tabName) {
       const current = controlState[controlStateKey(controlClass, key)] ?? value;
       return `<div class="range-row"><label for="${tabName}-${key}">${label}</label><input id="${tabName}-${key}" type="range" min="${min}" max="${max}" value="${current}" step="${step}" data-key="${key}" data-class="${controlClass}" data-format="${format}" data-integer="${group.integer || format === "integer"}"><output>${formatValue(current, format)}</output></div>`;
     }).join("");
-    return `<section class="control-section" data-type="ranges"><h3>${group.title}</h3>${controls}</section>`;
+    const sectionClass = group.cls ? ` data-class="${group.cls}"` : "";
+    return `<section class="control-section" data-type="ranges"${sectionClass}><h3>${group.title}</h3>${controls}</section>`;
   }).join("");
 }
 
@@ -334,6 +345,9 @@ function updateControlsInPlace(className, values) {
         section.querySelectorAll('input[type="radio"]').forEach(input => {
           input.checked = input.value === value;
         });
+      } else if (section.dataset.type === "textarea") {
+        const inputElement = section.querySelector("textarea");
+        if (inputElement) inputElement.value = value ?? "";
       }
     });
   });
@@ -348,7 +362,10 @@ function sendProgressive(inputElement, fromValue, toValue) {
       let value = fromValue + ((toValue - fromValue) * index / steps);
       value = isInteger ? Math.round(value) : value;
       const method = isInteger ? "intChanged" : "floatChanged";
-      bridge.call(method, inputElement.dataset.class, inputElement.dataset.key, value).catch(() => {});
+      const request = inputElement.dataset.class === "DriverPreferences"
+        ? bridge.call("setDriverPreference", inputElement.dataset.key, value)
+        : bridge.call(method, inputElement.dataset.class, inputElement.dataset.key, value);
+      request.catch(() => {});
     }, index * 150);
   }
 }
@@ -378,6 +395,10 @@ controlContent.addEventListener("change", event => {
     controlState[controlStateKey(section.dataset.class, target.dataset.key)] = target.checked;
     target.closest(".switch-control").querySelector("[data-state]").textContent = target.checked ? control[3] : control[4];
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
+  } else if (target.matches("textarea[data-key]")) {
+    const section = target.closest(".control-section");
+    controlState[controlStateKey(section.dataset.class, target.dataset.key)] = target.value;
+    bridge.call("setDriverPreference", target.dataset.key, target.value).catch(() => {});
   } else if (target.matches('input[type="range"]')) {
     sendProgressive(target, Number(target.dataset.start ?? target.defaultValue), Number(target.value));
   }
@@ -422,12 +443,19 @@ document.querySelector("#reset-controls").addEventListener("click", () => {
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
   });
   controlContent.querySelectorAll('input[type="range"]').forEach(target => {
-    bridge.call(
-      target.dataset.integer === "true" ? "intChanged" : "floatChanged",
-      target.dataset.class,
-      target.dataset.key,
-      Number(target.value)
-    ).catch(() => {});
+    const value = Number(target.value);
+    const request = target.dataset.class === "DriverPreferences"
+      ? bridge.call("setDriverPreference", target.dataset.key, value)
+      : bridge.call(
+        target.dataset.integer === "true" ? "intChanged" : "floatChanged",
+        target.dataset.class,
+        target.dataset.key,
+        value
+      );
+    request.catch(() => {});
+  });
+  controlContent.querySelectorAll("textarea[data-key]").forEach(target => {
+    bridge.call("setDriverPreference", target.dataset.key, target.value).catch(() => {});
   });
   showToast("Controls reset");
 });
@@ -538,9 +566,10 @@ function renderKnowledge(rawKnowledge) {
 
 bridge.on("ready", data => {
   renderKnowledge(data.knowledge);
+  rememberControlState("DriverPreferences", data.driverPreferences);
   rememberControlState("VehicleState", data.vehicleState);
   rememberControlState("DetectedObjects", data.detectedObjectsState);
-  if (activeTab === "vehicle") renderControls(activeTab);
+  if (activeTab === "driver" || activeTab === "vehicle") renderControls(activeTab);
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
   bridge.call("minimumUrgencyChanged", document.querySelector("#urgency-select").value).catch(() => {});
@@ -561,6 +590,10 @@ bridge.on("vehicleStateChanged", data => {
 bridge.on("detectedObjectsStateChanged", data => {
   const changed = rememberControlState("DetectedObjects", data[0]);
   if (changed) updateControlsInPlace("DetectedObjects", data[0]);
+});
+bridge.on("driverPreferencesChanged", data => {
+  const changed = rememberControlState("DriverPreferences", data[0]);
+  if (changed) updateControlsInPlace("DriverPreferences", data[0]);
 });
 bridge.on("conversationModeChanged", data => {
   setConversation(Boolean(data[0]));

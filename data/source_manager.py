@@ -287,6 +287,7 @@ class SourceManager:
                 detected_values.update(
                     internal_vision_objects=None,
                     children_inside=None,
+                    people_inside=None,
                     animal_inside=None,
                 )
             if has_external_objects:
@@ -341,17 +342,31 @@ class SourceManager:
                             internal_vision_objects.append(VisionObject(**obj_value))
 
                 children_inside = 0
+                people_inside = 0
                 animal_inside = False
                 for vision_object in internal_vision_objects:
                     category = (vision_object.category or "").strip().casefold()
                     if category in {"child", "children", "child pedestrian"}:
                         children_inside = min(children_inside + 1, 4)
+                    if category in {
+                        "person",
+                        "people",
+                        "adult",
+                        "driver",
+                        "passenger",
+                        "pedestrian",
+                        "child",
+                        "children",
+                        "child pedestrian",
+                    }:
+                        people_inside = min(people_inside + 1, 8)
                     elif category in {"dog", "cat"}:
                         animal_inside = True
 
                 detected_values.update(
                     internal_vision_objects=internal_vision_objects,
                     children_inside=children_inside,
+                    people_inside=people_inside,
                     animal_inside=animal_inside,
                 )
 

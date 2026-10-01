@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import time
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
@@ -9,7 +10,7 @@ import structlog
 from agents.agents_dataclasses import ActionType
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
-from data.assistant_dataclasses import DetectedObjects, VehicleState
+from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
 from data.database_manager import DatabaseManager
 from data.mqtt_thread import MqttThreadClient
 from data.events import CarEvent
@@ -33,6 +34,9 @@ class VehicleBridge:
         self.agent = agent
         self.loop = loop
         self.database_manager = database_manager
+        self.database_manager.current_state.setdefault(
+            "DriverPreferences", DriverPreferences()
+        )
         self.knowledge_manager = knowledge_manager
         self.knowledge_manager.on_context_updated = self._on_knowledge_updated
         self.stt_manager = stt_manager
@@ -262,15 +266,47 @@ class VehicleBridge:
             dataclass_class_name, dataclass_member, value
         )
 
+    def setDriverPreference(self, name: str, value: Any) -> None:
+        if name == "preferred_cabin_temperature":
+            try:
+                temperature = float(value)
+            except (TypeError, ValueError):
+                self.logger.warning("Ignoring invalid preferred temperature", value=value)
+                return
+            if not math.isfinite(temperature):
+                self.logger.warning("Ignoring invalid preferred temperature", value=value)
+                return
+            value = min(30.0, max(16.0, temperature))
+        elif name == "preferred_music":
+            if not isinstance(value, str):
+                self.logger.warning("Ignoring invalid music preference", value=value)
+                return
+            value = value.strip()[:500]
+        else:
+            self.logger.warning("Ignoring unknown driver preference", name=name)
+            return
+        self.database_manager.write_measure("DriverPreferences", name, value)
+        self._emit("driverPreferencesChanged", self.dumpDriverPreferences())
+
+    def dumpDriverPreferences(self) -> dict[str, Any]:
+        preferences = self.database_manager.current_state.get(
+            "DriverPreferences", DriverPreferences()
+        )
+        return {
+            "preferred_cabin_temperature": preferences.preferred_cabin_temperature,
+            "preferred_music": preferences.preferred_music,
+        }
+
     def userInput(self, text: str):
         text = text.strip()
         if not text:
             return
+        context = list(self.knowledge_manager.context.values())
         event = CarEvent(
             skill=SkillType.CONVERSATION,
             event_name="user_input",
             event_value=text,
-            context=list(self.knowledge_manager.context.values()),
+            context=context,
             user_input=text,
         )
         self.agent.event_queue.put_nowait(event)

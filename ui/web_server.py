@@ -17,6 +17,7 @@ class WebUIServer:
         "intChanged",
         "minimumUrgencyChanged",
         "setScenario",
+        "setDriverPreference",
         "startConversation",
         "startVoiceInput",
         "stopConversation",
@@ -54,6 +55,7 @@ class WebUIServer:
             "sttEnabledChanged",
             "vehicleStateChanged",
             "detectedObjectsStateChanged",
+            "driverPreferencesChanged",
             "userSpeechReceived",
             "conversationModeChanged",
             "knowledgeUpdated",
@@ -112,6 +114,7 @@ class WebUIServer:
                     "knowledge": self.bridge.dumpKnowledgeData(),
                     "vehicleState": self.bridge.dumpVehicleState(),
                     "detectedObjectsState": self.bridge.dumpDetectedObjectsState(),
+                    "driverPreferences": self.bridge.dumpDriverPreferences(),
                     "sttEnabled": bool(
                         self.bridge.stt_manager is not None
                         and self.bridge.stt_manager.enabled

@@ -264,52 +264,101 @@ class SourceManager:
             await self.data_event_queue.put(
                 {"type": "data_received", "data": gpsimu_state}
             )
-        if (
+        internal_objects = payload.get(
+            "internal_objects", payload.get("internal_vision_objects")
+        )
+        has_external_objects = (
             "radar_objects" in payload
             or "objects" in payload
             or "traffic_signs" in payload
-        ):
-            radar_objects: list[RadarObject] = []
-            vision_objects: list[VisionObject] = []
-            vehicles_around = 0
-            people_around = 0
-            dangerous_objects_around = 0
-            if "radar_objects" in payload:
-                for sensor_objects in payload["radar_objects"].values():
-                    if not isinstance(sensor_objects, list):
-                        continue
-                    for obj_value in sensor_objects:
+        )
+        if has_external_objects or internal_objects is not None:
+            detected_values: dict[str, Any] = {}
+            if not has_external_objects:
+                detected_values.update(
+                    vision_objects=None,
+                    radar_objects=None,
+                    traffic_signs=None,
+                    people_around=None,
+                    vehicles_around=None,
+                    dangerous_objects_around=None,
+                )
+            if internal_objects is None:
+                detected_values.update(
+                    internal_vision_objects=None,
+                    children_inside=None,
+                    animal_inside=None,
+                )
+            if has_external_objects:
+                radar_objects: list[RadarObject] = []
+                vision_objects: list[VisionObject] = []
+                vehicles_around = 0
+                people_around = 0
+                dangerous_objects_around = False
+                if "radar_objects" in payload:
+                    for sensor_objects in payload["radar_objects"].values():
+                        if not isinstance(sensor_objects, list):
+                            continue
+                        for obj_value in sensor_objects:
+                            if isinstance(obj_value, dict):
+                                radar_objects.append(RadarObject(**obj_value))
+                if "objects" in payload:
+                    for obj_value in payload["objects"]:
                         if isinstance(obj_value, dict):
-                            radar_objects.append(RadarObject(**obj_value))
-            if "objects" in payload:
-                for obj_value in payload["objects"]:
-                    if isinstance(obj_value, dict):
-                        vision_objects.append(VisionObject(**obj_value))
-                dangerous_objects_around = 0
-                for vision_object in vision_objects:
-                    if (
-                        vision_object.category == "Car"
-                        or vision_object.category == "Truck"
-                    ):
-                        vehicles_around += 1
-                    elif vision_object.category == "Pedestrian":
-                        people_around += 1
-                    elif vision_object.category == "Gun":
-                        dangerous_objects_around += 1
-            detected_objects = DetectedObjects(
-                radar_objects=radar_objects,
-                vision_objects=vision_objects,
-                vehicles_around=vehicles_around,
-                people_around=people_around,
-                dangerous_objects_around=dangerous_objects_around,
-            )
-            if "traffic_signs" in payload:
-                traffic_signs = TrafficSigns(**payload["traffic_signs"])  # type: ignore[name-defined]
-                detected_objects.traffic_signs = traffic_signs
-            # TODO: futher analyze detected objects if necessary
-            await self.data_event_queue.put(
-                {"type": "data_received", "data": detected_objects}
-            )
+                            vision_objects.append(VisionObject(**obj_value))
+                    for vision_object in vision_objects:
+                        category = (vision_object.category or "").strip().casefold()
+                        if category in {"car", "truck"}:
+                            vehicles_around += 1
+                        elif category in {"pedestrian", "child", "children", "child pedestrian"}:
+                            people_around += 1
+                        if category == "gun":
+                            dangerous_objects_around = True
+                detected_values.update(
+                    radar_objects=radar_objects,
+                    vision_objects=vision_objects,
+                    vehicles_around=vehicles_around,
+                    people_around=people_around,
+                    dangerous_objects_around=dangerous_objects_around,
+                )
+                if "traffic_signs" in payload:
+                    detected_values["traffic_signs"] = TrafficSigns(
+                        **payload["traffic_signs"]
+                    )  # type: ignore[name-defined]
+
+            if internal_objects is not None:
+                if isinstance(internal_objects, dict):
+                    internal_object_values = internal_objects.get(
+                        "vision_objects", internal_objects.get("objects", [])
+                    )
+                else:
+                    internal_object_values = internal_objects
+
+                internal_vision_objects: list[VisionObject] = []
+                if isinstance(internal_object_values, list):
+                    for obj_value in internal_object_values:
+                        if isinstance(obj_value, dict):
+                            internal_vision_objects.append(VisionObject(**obj_value))
+
+                children_inside = 0
+                animal_inside = False
+                for vision_object in internal_vision_objects:
+                    category = (vision_object.category or "").strip().casefold()
+                    if category in {"child", "children", "child pedestrian"}:
+                        children_inside = min(children_inside + 1, 4)
+                    elif category in {"dog", "cat"}:
+                        animal_inside = True
+
+                detected_values.update(
+                    internal_vision_objects=internal_vision_objects,
+                    children_inside=children_inside,
+                    animal_inside=animal_inside,
+                )
+
+            await self.data_event_queue.put({
+                "type": "data_received",
+                "data": DetectedObjects(**detected_values),
+            })
         if "lane_tracing" in payload:
             lane_tracing = self.deserialize_lane_tracing(payload["lane_tracing"])
             if lane_tracing is not None:

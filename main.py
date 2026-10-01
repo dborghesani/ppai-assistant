@@ -61,7 +61,7 @@ def _browser_already_running() -> bool:
 
 def _open_browser_tab(url: str) -> None:
     if _browser_already_running():
-        logger.info("Browser already running; reusing its existing window", url=url)
+        logger.info("Browser already running; reusing the existing UI tab", url=url)
         return
 
     browser = next(
@@ -80,7 +80,7 @@ def _open_browser_tab(url: str) -> None:
         None,
     )
     if browser is None:
-        webbrowser.open(url, new=0)
+        webbrowser.open(url, new=2)
         return
     subprocess.Popen(
         [browser, "--new-tab", url],
@@ -178,24 +178,7 @@ async def main(opt: ConfigAssistant):
     database_manager = DatabaseManager(data_event_queue, opt, measurement_event_queue)
     database_manager.app_start_timestamp = datetime.now(timezone.utc).isoformat()  # type: ignore[assignment]
 
-    # initialize tts
-    if opt.tts_enabled:
-        tts_manager = await asyncio.to_thread(
-            TTSManager,
-            enabled=opt.tts_enabled,
-            hf_repo=opt.tts_hf_repo,
-            device=opt.tts_device,
-            n_q=opt.tts_n_q,
-            cfg_coef=opt.tts_cfg_coef,
-        )
-    else:
-        tts_manager = None
-
-    # initialize Agent (model loading is blocking, run off the event loop)
-    agent = AutomotiveAgent(
-        tts_manager=tts_manager,
-        opt=opt,
-    )
+    agent = AutomotiveAgent(tts_manager=None, opt=opt)
 
     # initialize knowledge manager to extract knowledge from data
     knowledge_manager = KnowledgeManager(
@@ -211,21 +194,12 @@ async def main(opt: ConfigAssistant):
     # initialize source manager
     source_manager = SourceManager(data_event_queue=data_event_queue, opt=opt)
 
-    if opt.stt_enabled:
-        stt_manager = await asyncio.to_thread(
-            STTManager,
-            enabled=opt.stt_enabled,
-            hf_repo=opt.stt_hf_repo,
-            device=opt.stt_device,
-        )
-    else:
-        stt_manager = None
     bridge = VehicleBridge(
         agent=agent,
         loop=asyncio.get_running_loop(),
         database_manager=database_manager,
         knowledge_manager=knowledge_manager,
-        stt_manager=stt_manager,
+        stt_manager=None,
         opt=opt,
     )
     web_ui = WebUIServer(
@@ -237,7 +211,6 @@ async def main(opt: ConfigAssistant):
     if opt.web_ui_open_browser:
         await asyncio.to_thread(_open_browser_tab, web_ui.url)
 
-    # run everything concurrently
     tasks = [
         asyncio.create_task(agent.run()),
         asyncio.create_task(knowledge_manager.run()),
@@ -252,6 +225,23 @@ async def main(opt: ConfigAssistant):
     if opt.data_replay_folder:
         tasks.append(asyncio.create_task(source_manager.run_replay()))
     try:
+        if opt.tts_enabled:
+            agent.tts_manager = await asyncio.to_thread(
+                TTSManager,
+                enabled=opt.tts_enabled,
+                hf_repo=opt.tts_hf_repo,
+                device=opt.tts_device,
+                n_q=opt.tts_n_q,
+                cfg_coef=opt.tts_cfg_coef,
+            )
+        if opt.stt_enabled:
+            stt_manager = await asyncio.to_thread(
+                STTManager,
+                enabled=opt.stt_enabled,
+                hf_repo=opt.stt_hf_repo,
+                device=opt.stt_device,
+            )
+            bridge.set_stt_manager(stt_manager)
         await asyncio.gather(*tasks)
     finally:
         for task in tasks:

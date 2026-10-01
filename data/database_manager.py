@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 from dataclasses import asdict, fields, is_dataclass
-from typing import Any
+from typing import Any, cast, get_args, get_type_hints
 
 import structlog
 from config import ConfigAssistant
@@ -135,7 +135,30 @@ class DatabaseManager:
             except KeyError:
                 self.logger.error(f"Class {name} not found in assistant_dataclasses.py")
                 return
-        setattr(self.current_state[name], measure, value)
+        current_data = self.current_state[name]
+        path = measure.split(".")
+        for path_part in path[:-1]:
+            nested_data = getattr(current_data, path_part, None)
+            if nested_data is None:
+                type_hint = get_type_hints(type(current_data)).get(path_part)
+                nested_type = cast(
+                    type[Any] | None,
+                    next(
+                        (item for item in get_args(type_hint) if is_dataclass(item)),
+                        type_hint if is_dataclass(type_hint) else None,
+                    ),
+                )
+                if nested_type is None:
+                    self.logger.error(
+                        "Nested dataclass field not found",
+                        data_type=type(current_data).__name__,
+                        field=path_part,
+                    )
+                    return
+                nested_data = cast(Any, nested_type)()
+                setattr(current_data, path_part, nested_data)
+            current_data = nested_data
+        setattr(current_data, path[-1], value)
         point = Point(name).time(time.time_ns())
         point.field(measure, self._influx_field_value(value))
         self.logger.debug(f"Writing point for {name}.{measure} with value {value}")

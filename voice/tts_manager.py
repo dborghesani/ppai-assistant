@@ -9,14 +9,17 @@ import structlog
 from agents.agents_dataclasses import ToneType
 from voice import moshi_compat  # noqa: F401  # must run before importing Moshi
 from voice.gpu_lock import GPU_LOCK
+from voice.hf_cache import (
+    checkpoint_info_cache_first as _checkpoint_info_cache_first,
+    download_hf_file_cache_first as _download_hf_file_cache_first,
+    resolve_hf_reference as _resolve_hf_reference,
+)
 
 try:
     import torch
-    from moshi.models.loaders import CheckpointInfo
     from moshi.models.tts import DEFAULT_DSM_TTS_REPO, TTSModel
 except ImportError:
     torch = None  # type: ignore[assignment]
-    CheckpointInfo = None  # type: ignore[assignment]
     TTSModel = None  # type: ignore[assignment]
     DEFAULT_DSM_TTS_REPO = ""
 
@@ -26,7 +29,6 @@ except ImportError:
     sd = None  # type: ignore[assignment]
 
 logger = structlog.get_logger()
-
 # Smaller (0.75B, English-only) DSM TTS model; use "" for the library default (1.6B, en_fr)
 DEFAULT_TTS_REPO = "kyutai/tts-0.75b-en-public"
 DEFAULT_VOICE = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
@@ -87,13 +89,27 @@ class TTSManager:
             logger.info(
                 "Loading Kyutai TTS model", hf_repo=hf_repo
             )
-            checkpoint_info = CheckpointInfo.from_hf_repo(
-                hf_repo
+            checkpoint_started = time.perf_counter()
+            checkpoint_info = _checkpoint_info_cache_first(hf_repo)
+            logger.info(
+                "Kyutai TTS checkpoint files ready",
+                elapsed_seconds=round(time.perf_counter() - checkpoint_started, 2),
             )
+            model_started = time.perf_counter()
             self._model = TTSModel.from_checkpoint_info(
                 checkpoint_info, n_q=n_q, temp=0.6, device=device
             )
+            logger.info(
+                "Kyutai TTS weights loaded",
+                device=device,
+                elapsed_seconds=round(time.perf_counter() - model_started, 2),
+            )
+            voice_started = time.perf_counter()
             self.set_voice(ToneType.CALM)
+            logger.info(
+                "Kyutai TTS voice loaded",
+                elapsed_seconds=round(time.perf_counter() - voice_started, 2),
+            )
             logger.info("Kyutai TTS model loaded successfully")
         except Exception as e:
             logger.warning(
@@ -134,7 +150,16 @@ class TTSManager:
 
         try:
             resolved_voice = self.resolve_voice_name(voice) or DEFAULT_VOICE
-            voice_path = self._model.get_voice_path(resolved_voice)
+            voice_repo = getattr(self._model, "voice_repo", None)
+            voice_suffix = getattr(self._model, "voice_suffix", None)
+            if Path(resolved_voice).is_file():
+                voice_path = Path(resolved_voice)
+            elif isinstance(voice_repo, str) and isinstance(voice_suffix, str):
+                voice_path = _resolve_hf_reference(
+                    voice_repo, f"{resolved_voice}{voice_suffix}"
+                )
+            else:
+                voice_path = self._model.get_voice_path(resolved_voice)
             supports_cfg = bool(self._model.valid_cfg_conditionings)
             effective_cfg_coef = self._cfg_coef if supports_cfg else None
 

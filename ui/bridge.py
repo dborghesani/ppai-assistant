@@ -60,6 +60,13 @@ class VehicleBridge:
     def on(self, event_name: str, callback: Callable[..., None]) -> None:
         self._listeners[event_name].append(callback)
 
+    def set_stt_manager(self, stt_manager: STTManager | None) -> None:
+        self.stt_manager = stt_manager
+        self._emit(
+            "sttEnabledChanged",
+            bool(stt_manager is not None and stt_manager.enabled),
+        )
+
     def _emit(self, event_name: str, *args: Any) -> None:
         for callback in tuple(self._listeners[event_name]):
             callback(*args)
@@ -68,10 +75,9 @@ class VehicleBridge:
         self, ui_event_type: str
     ) -> Tuple[str, str] | None:
         # assume that the event_type corresponds to classname.classmember
-        parts = ui_event_type.split(".")
-        if len(parts) != 2:
+        class_name, separator, member_name = ui_event_type.partition(".")
+        if not separator or not member_name:
             return None
-        (class_name, member_name) = parts
         return (class_name, member_name)
 
     def _publish_mqtt(self, class_name: str, member_name: str, value: Any):

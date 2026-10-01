@@ -1,6 +1,6 @@
 const CONTROL_GROUPS = {
   driver: [
-    { title: "Activity", type: "options", cls: "DriverPhysicalState", key: "activity", value: "Idle", options: ["Idle", "Talking", "Driving", "Eating", "On the phone", "Sleeping", "About to exit"] },
+    { title: "Activity", type: "options", cls: "DriverPhysicalState", key: "activity", value: "Idle", options: ["Idle", "Talking", "Driving", "Eating", "On the phone", "Sleeping", "About to exit", "Children out of place"] },
     { title: "Emotion", type: "ranges", cls: "DriverEmotionState", controls: [
       ["Angry", "angry", 0, 1, 0, .01, "decimal"], ["Disgust", "disgust", 0, 1, 0, .01, "decimal"],
       ["Fear", "fear", 0, 1, 0, .01, "decimal"], ["Happy", "happy", 0, 1, 0, .01, "decimal"],
@@ -36,8 +36,16 @@ const CONTROL_GROUPS = {
     ]},
     { title: "Detected objects", type: "ranges", cls: "DetectedObjects", integer: true, controls: [
       ["People around", "people_around", 0, 20, 0, 1, "integer"],
-      ["Vehicles around", "vehicles_around", 0, 20, 0, 1, "integer"],
-      ["Dangers around", "dangerous_objects_around", 0, 20, 0, 1, "integer"]
+      ["Vehicles around", "vehicles_around", 0, 20, 0, 1, "integer"]
+    ]},
+    { title: "Object detection", type: "toggles", cls: "DetectedObjects", controls: [
+      ["Dangerous objects", "dangerous_objects_around", false, "Detected", "Not detected"]
+    ]},
+    { title: "Interior object detection", type: "ranges", cls: "DetectedObjects", integer: true, controls: [
+      ["Children inside", "children_inside", 0, 4, 0, 1, "integer"]
+    ]},
+    { title: "Interior animal detection", type: "toggles", cls: "DetectedObjects", controls: [
+      ["Dogs or cats inside", "animal_inside", false, "Detected", "Not detected"]
     ]}
   ],
   scenario: [
@@ -265,8 +273,10 @@ controlContent.addEventListener("change", event => {
     bridge.call("stringChanged", section.dataset.class, section.dataset.key, target.value).catch(() => {});
   } else if (target.matches('input[type="checkbox"]')) {
     const section = target.closest(".control-section");
-    const group = CONTROL_GROUPS.vehicle.find(item => item.type === "toggles");
-    const control = group.controls.find(item => item[1] === target.dataset.key);
+    const control = CONTROL_GROUPS.vehicle
+      .filter(item => item.type === "toggles" && item.cls === section.dataset.class)
+      .flatMap(item => item.controls)
+      .find(item => item[1] === target.dataset.key);
     target.closest(".switch-control").querySelector("[data-state]").textContent = target.checked ? control[3] : control[4];
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
   } else if (target.matches('input[type="range"]')) {
@@ -418,9 +428,9 @@ function renderKnowledge(rawKnowledge) {
   });
 
   container.innerHTML = [...groups.entries()].map(([groupName, items]) => {
-    const rows = items.map(([key, value]) => {
+    const rows = items.map(([, value]) => {
       const displayValue = typeof value === "object" ? JSON.stringify(value) : value;
-      return `<div class="knowledge-item"><span class="knowledge-key">${escapeHtml(key)}</span><span class="knowledge-value">${escapeHtml(displayValue)}</span></div>`;
+      return `<div class="knowledge-item"><span class="knowledge-value">${escapeHtml(displayValue)}</span></div>`;
     }).join("");
     return `<section class="knowledge-group"><h3>${escapeHtml(groupName)}</h3>${rows}</section>`;
   }).join("");
@@ -431,6 +441,9 @@ bridge.on("ready", data => {
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
   bridge.call("minimumUrgencyChanged", document.querySelector("#urgency-select").value).catch(() => {});
+});
+bridge.on("sttEnabledChanged", enabled => {
+  conversationButton.disabled = !enabled[0];
 });
 bridge.on("responseUpdated", data => updateAssistantMessage(data[0]));
 bridge.on("responseReceived", data => updateAssistantMessage(data[0], true));

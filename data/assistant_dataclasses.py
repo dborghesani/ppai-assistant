@@ -153,7 +153,7 @@ class LaneTracing:
 @dataclass
 class VisionObject:
     track_id: int | None = None
-    category: str | None = None  # ["Unknown", "Truck", "Car", "Motor Bike", "Bicycle", "Pedestrian", "Undecided"]
+    category: str | None = None  # Includes vehicle, pedestrian, child, dog and cat detections.
     distance_longitudinal: float | None = None  # m
     distance_lateral: float | None = None  # m
     length: float | None = None  # m, default to 25.4 for pedestrian and bicycle
@@ -221,8 +221,19 @@ class TrafficSigns:
 @dataclass
 class DetectedObjects:
     vision_objects: list[VisionObject] | None = field(default_factory=list)
+    internal_vision_objects: list[VisionObject] | None = field(default_factory=list)
     radar_objects: list[RadarObject] | None = field(default_factory=list)
     traffic_signs: TrafficSigns | None = field(default_factory=TrafficSigns)
+    children_inside: int | None = knowledge_field(
+        default=0,
+        change_threshold=1.0,
+        value_kind="count",
+        skills=(SkillType.WELLBEING,),
+    )
+    animal_inside: bool | None = knowledge_field(
+        default=False,
+        skills=(SkillType.WELLBEING,),
+    )
     people_around: int | None = knowledge_field(
         default=0,
         change_threshold=1.0,
@@ -235,16 +246,14 @@ class DetectedObjects:
         value_kind="density",
         skills=(SkillType.WELLBEING,),
     )
-    dangerous_objects_around: int | None = knowledge_field(
-        default=0,
-        change_threshold=1.0,
-        value_kind="density",
+    dangerous_objects_around: bool | None = knowledge_field(
+        default=False,
         skills=(SkillType.WELLBEING,),
     )
 
 @dataclass
 class DriverPhysicalState:
-    activity: str | None = knowledge_field(default="Idle", skills=(SkillType.WELLBEING,))  # ["Idle", "Driving", "Talking", "Using Phone", "Eating", "Sleeping"]
+    activity: str | None = knowledge_field(default="Idle", skills=(SkillType.WELLBEING,))  # Includes "Children out of place".
     attention_level: float | None = knowledge_field(default=1.0, value_kind="intensity", skills=(SkillType.WELLBEING,))  # [0.0, 1.0]
     fatigue_level: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))  # [0.0, 1.0]
 

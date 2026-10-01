@@ -9,6 +9,7 @@ import numpy as np
 import structlog
 from voice import moshi_compat  # noqa: F401  # must run before importing Moshi
 from voice.gpu_lock import GPU_LOCK
+from voice.hf_cache import checkpoint_info_cache_first
 
 try:
     import moshi.models
@@ -94,11 +95,32 @@ class STTManager:
 
         try:
             logger.info(f"Loading Kyutai STT model", hf_repo=hf_repo)
-            self._info = moshi.models.loaders.CheckpointInfo.from_hf_repo(hf_repo)
+            checkpoint_started = time.perf_counter()
+            self._info = checkpoint_info_cache_first(hf_repo)
+            logger.info(
+                "Kyutai STT checkpoint files ready",
+                elapsed_seconds=round(time.perf_counter() - checkpoint_started, 2),
+            )
+            mimi_started = time.perf_counter()
             self._mimi = self._info.get_mimi(device=device)
             self._sample_rate = self._mimi.sample_rate
+            logger.info(
+                "Kyutai STT audio model loaded",
+                elapsed_seconds=round(time.perf_counter() - mimi_started, 2),
+            )
+            tokenizer_started = time.perf_counter()
             self._tokenizer = self._info.get_text_tokenizer()
+            logger.info(
+                "Kyutai STT tokenizer loaded",
+                elapsed_seconds=round(time.perf_counter() - tokenizer_started, 2),
+            )
+            language_model_started = time.perf_counter()
             self._lm = self._info.get_moshi(device=device, dtype=torch.bfloat16)
+            logger.info(
+                "Kyutai STT language model loaded",
+                device=device,
+                elapsed_seconds=round(time.perf_counter() - language_model_started, 2),
+            )
         except Exception as e:
             logger.warning(
                 "Failed to load Kyutai STT model, STT disabled", error=str(e)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from agents.agents_dataclasses import VoiceType
+from agents.agents_dataclasses import ToneType
+from voice.hf_cache import download_hf_file_cache_first
 from voice.tts_manager import TTSManager
 
 
@@ -59,5 +60,72 @@ def test_set_voice_single_speaker_updates_prefix():
 
 
 def test_resolve_voice_name_maps_voice_type_to_default_voice():
-    assert TTSManager.resolve_voice_name(VoiceType.CALM) == "expresso/ex03-ex01_happy_001_channel1_334s.wav"
+    assert TTSManager.resolve_voice_name(ToneType.CALM) == "expresso/ex03-ex01_happy_001_channel1_334s.wav"
     assert TTSManager.resolve_voice_name("energetic") == "expresso/ex03-ex01_happy_001_channel1_334s.wav"
+
+
+def test_hf_file_download_uses_cache_without_network(monkeypatch, tmp_path):
+    cached_file = tmp_path / "cached.safetensors"
+    monkeypatch.setattr(
+        "huggingface_hub.try_to_load_from_cache",
+        lambda repo_id, filename, revision=None: str(cached_file),
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.hf_hub_download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cache hit must not call hf_hub_download")
+        ),
+    )
+
+    assert download_hf_file_cache_first("kyutai/model", "weights.safetensors") == cached_file
+
+
+def test_hf_file_download_contacts_server_only_after_cache_miss(monkeypatch, tmp_path):
+    downloaded_file = tmp_path / "downloaded.safetensors"
+    calls = []
+
+    def fake_download(repo_id, filename, **kwargs):
+        calls.append(kwargs)
+        return str(downloaded_file)
+
+    monkeypatch.setattr(
+        "huggingface_hub.try_to_load_from_cache",
+        lambda repo_id, filename, revision=None: None,
+    )
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
+
+    assert download_hf_file_cache_first("kyutai/model", "weights.safetensors") == downloaded_file
+    assert len(calls) == 1
+    assert "local_files_only" not in calls[0]
+
+
+def test_set_voice_uses_cached_voice_embedding_without_hub_download(
+    monkeypatch, tmp_path
+):
+    cached_voice = tmp_path / "voice.safetensors"
+    model = FakeModel(multi_speaker=True)
+    model.voice_repo = "kyutai/tts-voices"
+    model.voice_suffix = ".model.safetensors"
+    manager = TTSManager.__new__(TTSManager)
+    manager.enabled = True
+    manager._model = model
+    manager._condition_attributes = None
+    manager._prefix = None
+    manager._cfg_coef = 3.0
+    manager._current_voice = "default"
+
+    monkeypatch.setattr(
+        "huggingface_hub.try_to_load_from_cache",
+        lambda repo_id, filename, revision=None: str(cached_voice),
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.hf_hub_download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cached voice must not call hf_hub_download")
+        ),
+    )
+
+    assert manager.set_voice(ToneType.CALM)
+    assert model.calls == [
+        ("make_condition_attributes", [cached_voice], 3.0)
+    ]

@@ -51,6 +51,7 @@ class WebUIServer:
             "responseUpdated",
             "speakingToneChanged",
             "assistantStatusChanged",
+            "sttEnabledChanged",
             "userSpeechReceived",
             "conversationModeChanged",
             "knowledgeUpdated",
@@ -66,7 +67,7 @@ class WebUIServer:
         return f"http://{browser_host}:{self.port}"
 
     async def start(self) -> None:
-        self._runner = web.AppRunner(self._app)
+        self._runner = web.AppRunner(self._app, access_log=None)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         await site.start()

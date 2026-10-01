@@ -71,6 +71,16 @@ class KnowledgeManager:
             if value
             else "The driver is not late for any meeting."
         ),
+        ("DetectedObjects", "animal_inside"): lambda value: (
+            "An animal (dog or cat) is detected inside the vehicle."
+            if value
+            else "No dogs or cats are detected inside the vehicle."
+        ),
+        ("DetectedObjects", "dangerous_objects_around"): lambda value: (
+            "A dangerous object is detected around the vehicle."
+            if value
+            else "No dangerous objects are detected around the vehicle."
+        ),
     }
     _COUNT_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[int], str]] = {
         ("DetectedObjects", "people_around"): lambda value: (
@@ -79,16 +89,15 @@ class KnowledgeManager:
             else f"People density around the vehicle is "
             f"{KnowledgeManager._density_level(value)}."
         ),
+        ("DetectedObjects", "children_inside"): lambda value: (
+            "No children are detected inside the vehicle."
+            if value == 0
+            else f"{value} {'child is' if value == 1 else 'children are'} detected inside the vehicle."
+        ),
         ("DetectedObjects", "vehicles_around"): lambda value: (
             "No vehicles are currently detected around the vehicle."
             if value == 0
             else f"Traffic around the vehicle is "
-            f"{KnowledgeManager._density_level(value)}."
-        ),
-        ("DetectedObjects", "dangerous_objects_around"): lambda value: (
-            "No dangerous objects are currently detected around the vehicle."
-            if value == 0
-            else f"Dangerous object density around the vehicle is "
             f"{KnowledgeManager._density_level(value)}."
         ),
     }
@@ -112,6 +121,7 @@ class KnowledgeManager:
             "Eating": "The driver is eating, which distracts from driving.",
             "On the phone": "The driver is using a phone, which seriously distracts from driving.",
             "Sleeping": "The driver appears to be asleep and unable to drive safely.",
+            "Children out of place": "Children are out of place near the vehicle.",
         }.get(value, f"The driver's current activity is {value}."),
         ("EnvironmentState", "forecast_weather"): lambda value: {
             "Sunny": "The weather forecast predicts sunny conditions.",

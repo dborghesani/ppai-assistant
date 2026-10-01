@@ -63,6 +63,19 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("VehicleState", response["result"])
         await socket.close()
 
+    async def test_websocket_forwards_stt_readiness_changes(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+
+        self.web_ui.bridge.listeners["sttEnabledChanged"](True)
+        message = await socket.receive_json()
+
+        self.assertEqual(
+            message,
+            {"event": "sttEnabledChanged", "data": [True]},
+        )
+        await socket.close()
+
     async def test_websocket_forwards_recognized_speech(self) -> None:
         socket = await self.client.ws_connect("/ws")
         await socket.receive_json()

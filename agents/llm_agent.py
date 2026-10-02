@@ -14,7 +14,7 @@ from agents.agents_dataclasses import (
     ToneType,
     UrgencyType,
 )
-from data.events import CarEvent
+from data.events import CarEvent, EventName
 from crewai import LLM, Agent, Crew, Process, Task
 
 if TYPE_CHECKING:
@@ -47,7 +47,8 @@ class NotificationDecision(BaseModel):
         default=None,
         description=(
             "Exact message to speak directly to the user. "
-            "Must be null when urgency is none."
+            "Must be null when urgency is none or when permission is requested "
+            "through the visual assistant status."
         ),
     )
 
@@ -62,6 +63,7 @@ class LLMAgent:
         self.agent = agent
         self.recent_notifications: list[dict] = []
         self.minimum_urgency = UrgencyType.MEDIUM
+        self.duplicate_suppression_enabled = False
 
         opt = agent.opt
         self.llm = LLM(
@@ -87,6 +89,9 @@ class LLMAgent:
                 ActionType.NONE,
                 ActionType.FIND_REST_AREA,
                 ActionType.ASK_ATTEND_MEETING,
+                ActionType.ANNOUNCE_INCOMING_MESSAGE,
+                ActionType.ASK_PERMISSION_TO_TALK,
+                ActionType.READ_PENDING_MESSAGES,
             }
         )
         self.direct_action_options = "\n".join(
@@ -129,6 +134,8 @@ class LLMAgent:
                 {changed_facts}
                 Supporting current vehicle context (not a new trigger):
                 {context}
+                Event name: {event_name}
+                Event details: {event_details}
                 user_input={user_input}
                 urgency_options={urgency_options}
                 tone_options={tone_options}
@@ -139,6 +146,52 @@ class LLMAgent:
                 silent_decision_guidance={silent_decision_guidance}
 
                 Rules:
+                - Incoming message workflow has priority over the general silent/proactive
+                    notification rules below. An incoming_message_received event is an
+                    explicit message delivery event even when user_input is empty; never
+                    choose the silent decision only because the driver did not request it.
+                - For incoming_message_received, event details include the sender's
+                    raw message text. Classify its tone and urgency from that content. Tone
+                    is serious for road breakdowns, safety problems, alarming news, or
+                    practical requests for urgent help; enthusiastic only for genuinely
+                    positive or playful content, never bad news or requests for help. Urgency
+                    is high for explicit ASAP/immediate requests, a stranded person needing
+                    help, or a near deadline; critical only for immediate risk of serious
+                    injury. Do not infer one value from the other. For example, "Giulia is
+                    down on Highway 402 with a mechanical issue and needs help ASAP" is
+                    serious/high; a ten-minute booking deadline can be calm/high; harmless
+                    gossip is enthusiastic/none.
+                - For incoming_message_received, apply this strict priority. First, privacy
+                    mode ON or unknown is an absolute veto: choose ask_permission_to_talk
+                    regardless of attention, fatigue, or traffic. Never let favorable driver
+                    conditions override privacy mode. Second, if privacy mode is OFF but
+                    fatigue is high/very high, attention is low, or traffic is explicitly
+                    heavy, choose ask_permission_to_talk. In either ask case keep the
+                    message's classified tone and urgency; use intervention_type=act,
+                    skill=conversation, action=ask_permission_to_talk, suggestion_type=none
+                    and spoken_message=null. This action is conveyed
+                    only by the brief visual ASK_PERMISSION_TO_TALK animation. Do not speak,
+                    name the sender, or reveal any part of the message.
+                - Choose announce_incoming_message only when privacy mode is explicitly OFF,
+                    fatigue is not high/very high, attention is not low, and traffic is not
+                    explicitly heavy. Keep the message's classified tone and urgency; use
+                    intervention_type=act, skill=conversation, suggestion_type=none. Relay the message in third
+                    person and attribute it to its sender (for example, "Luca says that…").
+                    Retell every distinct detail, name, timeframe, qualifier, and question;
+                    keep roughly the same level of detail as the original instead of giving
+                    only its gist. Do not answer the message as if it were addressed to you,
+                    or speak in the sender's voice. Use up to three natural sentences if
+                    needed. Do not ask permission in this case.
+                - Contrastive examples: privacy ON + high attention + no fatigue =>
+                    ask_permission_to_talk; privacy OFF + high attention + no fatigue +
+                    light traffic => announce_incoming_message. Use only explicit current
+                    facts for these checks.
+                - For pending_messages_reminder with pending_count greater than zero, choose
+                    ask_permission_to_talk, urgency=low, intervention_type=act,
+                    skill=conversation, action=ask_permission_to_talk,
+                    suggestion_type=none, spoken_message=null. Do not announce that messages
+                    are pending or ask verbally; use only the brief visual status animation.
+                    If pending_count is zero, remain silent.
                 - For a knowledge_updated event, an empty user_input is expected: there was
                     no direct utterance. Do not call it unintelligible; decide from the
                     changed vehicle facts and skill instructions.
@@ -206,8 +259,10 @@ class LLMAgent:
                     Never pair a silent urgency with spoken text, or an active urgency with
                     a null spoken_message.
                 - Alert: urgency is not none, reason names the concrete risk, and
-                    spoken_message is one short natural sentence. Populate all six
-                    structured decision fields, even when some are none.
+                    spoken_message is one short natural sentence. For
+                    incoming_message_received, follow its higher-priority relay rule instead
+                    and use up to three sentences to preserve the full message. Populate all
+                    six structured decision fields, even when some are none.
                 - Never expose internal reasoning or implementation details.
                 """,
             expected_output=(
@@ -234,12 +289,20 @@ class LLMAgent:
                 User request: {user_input}
                 Vehicle action reference: {vehicle_action_guidance}
                 Supported vehicle actions: {action_options}
+                Pending private messages: {pending_message_count}
                 Skills: {skill_options}
                 Tones: {tone_options}
 
                 Rules:
                 - Consider only the user's requested operation and the action reference.
                     Do not use telemetry, meeting guidance, or proactive notification rules.
+                - If pending private messages are available, choose read_pending_messages
+                    only when the user explicitly asks to hear/read them or asks what the
+                    pending message says (for example "what do you want to tell me?",
+                    "tell me the pending messages", "che cosa mi vuoi dire?", or
+                    "dimmi pure i messaggi in sospeso"). A bare "yes", "okay" or similar
+                    reply is not explicit permission. The action reads the existing queue;
+                    do not repeat its message content in spoken_message.
                 - If the user requests a supported operation, select its exact action,
                     intervention_type=act, urgency=low, suggestion_type=none, and its
                     driving or wellbeing skill. This includes polite forms such as "Can you..."
@@ -267,38 +330,6 @@ class LLMAgent:
             process=Process.sequential,
             memory=None,
         )
-
-    @staticmethod
-    def _is_non_actionable_decision(decision: NotificationDecision) -> bool:
-        """Reject model notifications that explicitly describe no actionable risk."""
-        if (
-            decision.urgency is UrgencyType.NONE
-            or decision.intervention_type is InterventionType.NONE
-            or (
-                decision.action is ActionType.NONE
-                and decision.suggestion_type is SuggestionType.NONE
-            )
-        ):
-            return True
-
-        text = " ".join(
-            part.strip().lower()
-            for part in (decision.reason, decision.spoken_message or "")
-            if part
-        )
-        non_actionable_markers = (
-            "no immediate safety concern",
-            "no immediate safety risk",
-            "no safety concern",
-            "no safety risk",
-            "no immediate action",
-            "no action is recommended",
-            "no action recommended",
-            "nothing to do",
-            "no action needed",
-            "context is stable",
-        )
-        return any(marker in text for marker in non_actionable_markers)
 
     def _is_duplicate_or_cooling_down(
         self,
@@ -358,7 +389,22 @@ class LLMAgent:
 
         return False, ""
 
+    def message_simulation_stopped(self, event: CarEvent) -> bool:
+        if (
+            event.event_name != "incoming_message_received"
+            or not isinstance(event.event_value, dict)
+            or event.event_value.get("sender") != "Luca"
+        ):
+            return False
+        simulator = getattr(self.agent, "message_simulator", None)
+        return simulator is not None and not getattr(simulator, "active", True)
+
     async def process_event(self, event: CarEvent):
+        if (
+            event.event_name is EventName.PENDING_MESSAGES_REMINDER
+            and getattr(self.agent, "pending_message_count", 0) == 0
+        ):
+            return
         self.logger.info(
             f">>> received {event.event_name} event with value: {event.event_value}"
         )
@@ -380,6 +426,16 @@ class LLMAgent:
             skill_instructions = "No additional skill-specific instructions."
 
         inputs = {
+            "event_name": event.event_name,
+            "event_details": (
+                str(event.event_value)
+                if event.event_name
+                in {
+                    EventName.INCOMING_MESSAGE_RECEIVED,
+                    EventName.PENDING_MESSAGES_REMINDER,
+                }
+                else "No additional event-specific details."
+            ),
             "skill_instructions": skill_instructions,
             "vehicle_action_guidance": getattr(
                 self.agent.skill_manager, "vehicle_action_guidance", ""
@@ -406,22 +462,53 @@ class LLMAgent:
             result = await self.crew.kickoff_async(inputs=inputs)
         finally:
             self.llm.temperature = default_temperature
+        self.agent.log_llm_usage(
+            "notification decision", getattr(result, "token_usage", None)
+        )
+        if self.message_simulation_stopped(event):
+            return
         llm_elapsed = time.time() - llm_start
         self.logger.info(f">>> LLM generation took {llm_elapsed:.2f}s")
         response = result.raw if hasattr(result, "raw") else str(result)
         self.logger.info(f">>> {response}")
 
         decision: NotificationDecision = result.pydantic
-        if decision.notify and decision.spoken_message:
-            if self._is_non_actionable_decision(decision):
-                self.logger.info(">>> [suppressed non-actionable model decision]")
-                return
-
-            suppressed, reason = self._is_duplicate_or_cooling_down(
-                message=decision.spoken_message,
-                urgency=decision.urgency,
-                measures=measures,
+        if event.event_name is EventName.INCOMING_MESSAGE_RECEIVED:
+            self.agent.remember_pending_message_classification(
+                event.event_value, decision.tone, decision.urgency
             )
+            self.agent.notify_incoming_message_classification(
+                decision.tone, decision.urgency
+            )
+        elif event.event_name is EventName.PENDING_MESSAGES_REMINDER:
+            classification = self.agent.most_urgent_pending_message_classification()
+            if classification is not None:
+                decision.tone, decision.urgency = classification
+            self.agent.notify_incoming_message_classification(
+                decision.tone, decision.urgency
+            )
+
+        if decision.action in {
+            ActionType.ASK_PERMISSION_TO_TALK,
+            ActionType.ANNOUNCE_INCOMING_MESSAGE,
+        }:
+            if (
+                decision.action is ActionType.ANNOUNCE_INCOMING_MESSAGE
+                and decision.spoken_message
+            ):
+                await self.agent.speak(decision.spoken_message, tone=decision.tone)
+            self.agent.action_manager.handle_decision(decision.action, {})
+            return
+
+        if decision.notify and decision.spoken_message:
+            if getattr(self, "duplicate_suppression_enabled", False):
+                suppressed, reason = self._is_duplicate_or_cooling_down(
+                    message=decision.spoken_message,
+                    urgency=decision.urgency,
+                    measures=measures,
+                )
+            else:
+                suppressed, reason = False, ""
 
             if suppressed:
                 self.logger.info(f">>> [suppressed duplicate] {reason}")
@@ -451,12 +538,20 @@ class LLMAgent:
                     )
 
     async def _process_direct_user_input(self, event: CarEvent) -> None:
+        pending_message_count = getattr(self.agent, "pending_message_count", 0)
+        action_options = self.direct_action_options
+        if pending_message_count:
+            action_options += (
+                f"\n- {ActionType.READ_PENDING_MESSAGES.value}: read queued private "
+                "messages after the driver's explicit request"
+            )
         inputs = {
             "user_input": event.user_input,
             "vehicle_action_guidance": getattr(
                 self.agent.skill_manager, "vehicle_action_guidance", ""
             ),
-            "action_options": self.direct_action_options,
+            "action_options": action_options,
+            "pending_message_count": pending_message_count,
             "skill_options": self.decision_options["skill_options"],
             "tone_options": self.decision_options["tone_options"],
         }
@@ -466,8 +561,18 @@ class LLMAgent:
             result = await self.direct_action_crew.kickoff_async(inputs=inputs)
         finally:
             self.llm.temperature = default_temperature
+        self.agent.log_llm_usage(
+            "direct action classification", getattr(result, "token_usage", None)
+        )
 
         decision: NotificationDecision = result.pydantic
+        if (
+            decision.action is ActionType.READ_PENDING_MESSAGES
+            and pending_message_count > 0
+        ):
+            self.agent.action_manager.handle_decision(decision.action, {})
+            return
+
         action_selected = (
             decision.intervention_type is InterventionType.ACT
             and decision.action in self.direct_vehicle_actions
@@ -507,11 +612,11 @@ class LLMAgent:
 
     def _start_conversation_response(self, event: CarEvent) -> None:
         response_task = asyncio.create_task(self.agent.stream_user_response(event))
-        self.agent._voice_response_task = response_task
+        self.agent.voice_response_task = response_task
 
         def _voice_response_done(task: asyncio.Task) -> None:
-            if self.agent._voice_response_task is task:
-                self.agent._voice_response_task = None
+            if self.agent.voice_response_task is task:
+                self.agent.voice_response_task = None
             if task.cancelled():
                 self.logger.info(">>> voice response interrupted")
                 return

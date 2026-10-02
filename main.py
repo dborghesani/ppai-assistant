@@ -3,9 +3,11 @@ import json
 import logging
 import shutil
 import subprocess
+import os
+
+os.environ["OTEL_SDK_DISABLED"] = "true"
 
 # fake openAI api key
-import os
 import webbrowser
 from datetime import datetime, timezone
 from logging import warning
@@ -186,6 +188,9 @@ async def main(opt: ConfigAssistant):
         data_event_queue=measurement_event_queue,
         knowledge_event_queue=agent.event_queue,
         opt=opt,
+    )
+    agent.set_knowledge_context_provider(
+        lambda: list(knowledge_manager.context.values())
     )
     # publish the known baseline (doors closed, lights off, ...) before any
     # real telemetry source starts feeding data

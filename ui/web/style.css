@@ -64,7 +64,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .brand-mark i { display: block; background: var(--accent); }
 .brand-mark i:nth-child(2) { margin-top: 6px; }
 .brand-mark i:nth-child(3) { margin-top: 12px; }
-.drive-status { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.drive-status { display: flex; align-items: center; gap: 8px; padding: 8px; overflow: visible; color: var(--muted); font-size: 12px; }
 .status-dot { --tone-color: #ffffff; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 50%; background: #fff; box-shadow: 0 0 16px rgba(255,255,255,.34); transition: background-color .8s ease, box-shadow .8s ease, transform .5s ease, border-radius .5s ease, width .45s ease, height .45s ease, flex-basis .45s ease; }
 .status-dot.connecting,
 .status-dot.offline {
@@ -78,9 +78,40 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .status-dot.assistant-talking { width: 48px; height: 48px; flex-basis: 48px; animation: voice-wobble 1.15s ease-in-out infinite; }
 .status-dot.assistant-talking[data-tone="calm"] { --tone-color: #78baff; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
 .status-dot.assistant-talking[data-tone="enthusiastic"] { --tone-color: #ffd166; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
-.status-dot.assistant-talking[data-tone="serious"] { --tone-color: #ff7770; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.assistant-talking[data-tone="serious"] { --tone-color: #ff3b30; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
 .status-dot.assistant-talking[data-tone="empathetic"] { --tone-color: #efa2c7; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
 .status-dot.assistant-talking[data-tone="discreet"] { --tone-color: #a9bcff; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.incoming-message-classified[data-message-tone="calm"] { --tone-color: #78baff; }
+.status-dot.incoming-message-classified[data-message-tone="enthusiastic"] { --tone-color: #ffd166; }
+.status-dot.incoming-message-classified[data-message-tone="serious"] { --tone-color: #ff3b30; }
+.status-dot.incoming-message-classified[data-message-tone="empathetic"] { --tone-color: #efa2c7; }
+.status-dot.incoming-message-classified[data-message-tone="discreet"] { --tone-color: #a9bcff; }
+.status-dot.incoming-message-classified[data-message-urgency="medium"] { --tone-color: #ffd166; }
+.status-dot.incoming-message-classified[data-message-urgency="high"] { --tone-color: #ff9f0a; }
+.status-dot.incoming-message-classified[data-message-urgency="critical"] { --tone-color: #ff3b30; }
+.status-dot.incoming-message-urgent { animation: voice-wobble .42s ease-in-out 4; }
+.status-dot.incoming-message-urgent { background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
+.status-dot.assistant-ask_permission_to_talk,
+.status-dot.permission-returning {
+  position: relative;
+  background: transparent;
+  box-shadow: none;
+}
+.status-dot.assistant-ask_permission_to_talk::before,
+.status-dot.permission-returning::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--permission-rest-radius, 50%);
+  background: var(--tone-color);
+}
+.status-dot.assistant-ask_permission_to_talk::before {
+  animation: permission-impatient .28s ease-in-out 7 forwards;
+}
+.status-dot.permission-returning::before {
+  border-radius: var(--permission-return-radius, 50%);
+  transition: border-radius .28s ease-out;
+}
 .status-dot.assistant-act { animation: action-bloom .76s ease-out both; }
 .status-dot.assistant-background { animation: background-wobble 1.4s ease-in-out infinite; }
 @keyframes voice-wobble {
@@ -102,10 +133,27 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   50% { transform: scale(1.04, .88); border-radius: 55% 45% 58% 42%; }
   75% { transform: scale(.96, 1.16); border-radius: 41% 59% 52% 48%; }
 }
+@keyframes permission-impatient {
+  0% { border-radius: var(--permission-frame-0, 50%); }
+  8.333% { border-radius: var(--permission-frame-1, 50%); }
+  16.667% { border-radius: var(--permission-frame-2, 50%); }
+  25% { border-radius: var(--permission-frame-3, 50%); }
+  33.333% { border-radius: var(--permission-frame-4, 50%); }
+  41.667% { border-radius: var(--permission-frame-5, 50%); }
+  50% { border-radius: var(--permission-frame-6, 50%); }
+  58.333% { border-radius: var(--permission-frame-7, 50%); }
+  66.667% { border-radius: var(--permission-frame-8, 50%); }
+  75% { border-radius: var(--permission-frame-9, 50%); }
+  83.333% { border-radius: var(--permission-frame-10, 50%); }
+  91.667% { border-radius: var(--permission-frame-11, 50%); }
+  100% { border-radius: var(--permission-rest-radius, 50%); }
+}
 @media (prefers-reduced-motion: reduce) {
   .status-dot.assistant-talking,
   .status-dot.assistant-act,
-  .status-dot.assistant-background { animation: none; }
+  .status-dot.assistant-background,
+  .status-dot.assistant-ask_permission_to_talk,
+  .status-dot.incoming-message-urgent { animation: none; }
 }
 .topbar-actions { justify-self: end; display: flex; align-items: center; gap: 24px; }
 .compact-select { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
@@ -180,8 +228,11 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 button:disabled { cursor: not-allowed; opacity: .4; }
 
 .scenario-hint { margin: 0 0 11px; color: var(--muted); line-height: 1.5; }
-.scenario-button { width: 100%; height: 44px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: #c8d0d4; font-weight: 700; }
-.scenario-button + .scenario-button { margin-top: 9px; }
+.scenario-item { display: grid; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--line-soft); }
+.scenario-item:last-child { border-bottom: 0; }
+.scenario-copy h4 { margin: 0 0 5px; color: var(--text); font-size: 13px; }
+.scenario-copy p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.scenario-button { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: #c8d0d4; font-weight: 700; }
 .scenario-button:hover { border-color: var(--accent); color: var(--text); }
 .scenario-button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-deep); color: #d8e1ff; }
 

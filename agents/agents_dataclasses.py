@@ -25,7 +25,7 @@ class UrgencyType(str, Enum):
 class ToneType(str, Enum):
     CALM = "calm"  # UI: blue (#78baff)
     ENTHUSIASTIC = "enthusiastic"  # UI: yellow (#ffd166)
-    SERIOUS = "serious"  # UI: coral red (#ff7770)
+    SERIOUS = "serious"  # UI: red (#ff3b30)
     EMPATHETIC = "empathetic"  # UI: pink (#efa2c7)
     DISCREET = "discreet"  # UI: periwinkle (#a9bcff)
 
@@ -73,6 +73,11 @@ class ActionType(str, Enum):
     DISABLE_LANE_KEEP_ASSIST = "disable_lane_keep_assist"
     ENABLE_BLIND_SPOT_MONITOR = "enable_blind_spot_monitor"
     DISABLE_BLIND_SPOT_MONITOR = "disable_blind_spot_monitor"
+    ENABLE_PRIVACY_MODE = "enable_privacy_mode"
+    DISABLE_PRIVACY_MODE = "disable_privacy_mode"
+    ANNOUNCE_INCOMING_MESSAGE = "announce_incoming_message"
+    ASK_PERMISSION_TO_TALK = "ask_permission_to_talk"
+    READ_PENDING_MESSAGES = "read_pending_messages"
     APPLY_RESTRICTIVE_ADAS_PROFILE = "apply_restrictive_adas_profile"
     ENABLE_SIDELIGHTS = "enable_sidelights"
     DISABLE_SIDELIGHTS = "disable_sidelights"
@@ -121,6 +126,11 @@ class ActionType(str, Enum):
             ActionType.DISABLE_LANE_KEEP_ASSIST: "disable lane keeping assistance",
             ActionType.ENABLE_BLIND_SPOT_MONITOR: "enable blind spot monitoring",
             ActionType.DISABLE_BLIND_SPOT_MONITOR: "disable blind spot monitoring",
+            ActionType.ENABLE_PRIVACY_MODE: "enable privacy mode",
+            ActionType.DISABLE_PRIVACY_MODE: "disable privacy mode",
+            ActionType.ANNOUNCE_INCOMING_MESSAGE: "announce an incoming message",
+            ActionType.ASK_PERMISSION_TO_TALK: "ask permission to read queued messages",
+            ActionType.READ_PENDING_MESSAGES: "read the queued messages after explicit permission",
             ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE: (
                 "apply the restrictive ADAS safety profile: lower target speed, "
                 "increase following distance, and enable available assistance"

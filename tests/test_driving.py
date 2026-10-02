@@ -47,11 +47,12 @@ def test_aggressive_driving_style_warns_driver() -> None:
 	).read_text(encoding="utf-8")
 	agent = SimpleNamespace(
 		maybe_handle_meeting_confirmation=AsyncMock(return_value=False),
+		log_llm_usage=Mock(),
 		cancel_voice_response=Mock(),
 		action_manager=SimpleNamespace(handle_decision=Mock()),
 		speak=AsyncMock(),
 		stream_user_response=AsyncMock(),
-		_voice_response_task=None,
+		voice_response_task=None,
 		skill_manager=SimpleNamespace(
 			get_skill=Mock(return_value=driving_instructions),
 			vehicle_action_guidance="vehicle action reference",

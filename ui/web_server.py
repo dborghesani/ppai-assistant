@@ -12,8 +12,13 @@ class WebUIServer:
     _METHODS = {
         "boolChanged",
         "dumpKnowledge",
+        "duplicateSuppressionChanged",
         "eventProcessingChanged",
         "floatChanged",
+        "startMessageSimulation",
+        "stopMessageSimulation",
+        "startFriendMessageSimulation",
+        "stopFriendMessageSimulation",
         "intChanged",
         "minimumUrgencyChanged",
         "setScenario",
@@ -51,6 +56,7 @@ class WebUIServer:
             "responseReceived",
             "responseUpdated",
             "speakingToneChanged",
+            "incomingMessageClassified",
             "assistantStatusChanged",
             "sttEnabledChanged",
             "vehicleStateChanged",
@@ -59,6 +65,7 @@ class WebUIServer:
             "userSpeechReceived",
             "conversationModeChanged",
             "knowledgeUpdated",
+            "friendMessageSimulationChanged",
         ):
             bridge.on(
                 event_name,
@@ -118,6 +125,16 @@ class WebUIServer:
                     "sttEnabled": bool(
                         self.bridge.stt_manager is not None
                         and self.bridge.stt_manager.enabled
+                    ),
+                    "friendMessageSimulationActive": bool(
+                        getattr(
+                            getattr(self.bridge, "friend_message_agent", None),
+                            "active",
+                            False,
+                        )
+                    ),
+                    "duplicateSuppressionEnabled": bool(
+                        getattr(self.bridge, "duplicate_suppression_enabled", False)
                     ),
                 },
             }

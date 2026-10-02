@@ -3,8 +3,10 @@ import unittest
 from collections import defaultdict
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import Mock
 
 from aiohttp.test_utils import TestClient, TestServer
+from agents.agents_dataclasses import AssistantStatus
 from agents.automotive_agent import AutomotiveAgent
 from ui.bridge import VehicleBridge
 from ui.web_server import WebUIServer
@@ -15,6 +17,8 @@ class FakeBridge:
 
     def __init__(self) -> None:
         self.listeners = {}
+        self.friend_simulation_running = False
+        self.duplicate_suppression_enabled = False
         self.driver_preferences = {
             "preferred_cabin_temperature": None,
             "preferred_music": "",
@@ -46,6 +50,13 @@ class FakeBridge:
         self.driver_preferences[name] = value
         self.listeners["driverPreferencesChanged"](self.driver_preferences)
 
+    def startFriendMessageSimulation(self) -> bool:
+        self.friend_simulation_running = True
+        return self.friend_simulation_running
+
+    def duplicateSuppressionChanged(self, enabled: bool) -> None:
+        self.duplicate_suppression_enabled = enabled
+
 
 class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -74,6 +85,7 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         ready = await socket.receive_json()
         self.assertEqual(ready["event"], "ready")
         self.assertFalse(ready["data"]["sttEnabled"])
+        self.assertFalse(ready["data"]["duplicateSuppressionEnabled"])
         self.assertEqual(
             ready["data"]["vehicleState"],
             {"engine_on": False, "privacy_mode": False},
@@ -99,6 +111,29 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         response = await socket.receive_json()
         self.assertEqual(response["id"], 1)
         self.assertIn("VehicleState", response["result"])
+        await socket.close()
+
+    async def test_websocket_updates_duplicate_suppression(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+        await socket.send_json(
+            {"id": 4, "method": "duplicateSuppressionChanged", "params": [True]}
+        )
+
+        response = await socket.receive_json()
+        self.assertEqual(response, {"id": 4, "result": None})
+        self.assertTrue(cast(Any, self.web_ui.bridge).duplicate_suppression_enabled)
+        await socket.close()
+
+    async def test_websocket_accepts_legacy_friend_simulation_method(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+        await socket.send_json(
+            {"id": 3, "method": "startFriendMessageSimulation", "params": []}
+        )
+
+        response = await socket.receive_json()
+        self.assertEqual(response, {"id": 3, "result": True})
         await socket.close()
 
     async def test_websocket_forwards_vehicle_state_changes(self) -> None:
@@ -229,6 +264,7 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
         class FakeStream:
             def __init__(self) -> None:
                 self.chunks = iter(("Bonjour. ", "Comment allez-vous?"))
+                self.usage = None
 
             def __aiter__(self):
                 return self
@@ -252,9 +288,13 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
             return FakeStream()
 
         agent = AutomotiveAgent.__new__(AutomotiveAgent)
+        agent._assistant_status = AssistantStatus.IDLE
+        agent.on_assistant_status_changed = None
+        agent.on_speaking_tone_changed = None
+        agent.log_llm_usage = Mock()
         agent.skill_manager = SimpleNamespace(get_skill=lambda _: "")
-        agent._conversation_history = []
-        agent._voice_llm = SimpleNamespace(
+        agent.conversation_history = []
+        agent.voice_llm = SimpleNamespace(
             chat=SimpleNamespace(completions=SimpleNamespace(create=create))
         )
         agent.opt = SimpleNamespace(ollama_model="ollama/test")

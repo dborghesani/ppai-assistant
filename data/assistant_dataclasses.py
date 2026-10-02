@@ -272,7 +272,7 @@ class DetectedObjects:
         default=0,
         change_threshold=1.0,
         value_kind="count",
-        skills=(SkillType.WELLBEING,),
+        skills=(SkillType.WELLBEING, SkillType.DRIVING),
     )
     animal_inside: bool | None = knowledge_field(
         default=False,

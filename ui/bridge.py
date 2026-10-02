@@ -13,7 +13,7 @@ from config import ConfigAssistant
 from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
 from data.database_manager import DatabaseManager
 from data.mqtt_thread import MqttThreadClient
-from data.events import CarEvent
+from data.events import CarEvent, EventName
 from managers.knowledge_manager import KnowledgeManager
 from managers.skill_manager import SkillType
 from voice.stt_manager import STTManager
@@ -47,6 +47,10 @@ class VehicleBridge:
         )
         self.agent.on_speaking_tone_changed = lambda tone: self._emit(
             "speakingToneChanged", tone
+        )
+        self.agent.on_incoming_message_classified = lambda tone, urgency: self._emit(
+            "incomingMessageClassified",
+            {"tone": tone.value, "urgency": urgency.value},
         )
         self.agent.on_assistant_status_changed = lambda status: self._emit(
             "assistantStatusChanged", status.value
@@ -106,6 +110,8 @@ class VehicleBridge:
             ActionType.DISABLE_LANE_KEEP_ASSIST: {"lane_keep_assist_enabled": False},
             ActionType.ENABLE_BLIND_SPOT_MONITOR: {"blind_spot_monitor": True},
             ActionType.DISABLE_BLIND_SPOT_MONITOR: {"blind_spot_monitor": False},
+            ActionType.ENABLE_PRIVACY_MODE: {"privacy_mode": True},
+            ActionType.DISABLE_PRIVACY_MODE: {"privacy_mode": False},
             ActionType.ENABLE_SIDELIGHTS: {"lights_on_sidelights": True},
             ActionType.DISABLE_SIDELIGHTS: {"lights_on_sidelights": False},
             ActionType.ENABLE_LOW_BEAM_HEADLIGHTS: {"lights_on_low_beams": True},
@@ -238,6 +244,7 @@ class VehicleBridge:
 
     def close(self) -> None:
         """Release audio and thread-backed resources before the event loop closes."""
+        self.agent.cancel_message_tasks()
         if self.stt_manager is not None:
             self.stt_manager.close()
         if self.agent.tts_manager is not None:
@@ -245,6 +252,22 @@ class VehicleBridge:
         if self._mqtt_client is not None:
             self._mqtt_client.stop()
             self._mqtt_client = None
+
+    def startMessageSimulation(self) -> bool:
+        started = self.agent.start_message_simulation()
+        self._emit("friendMessageSimulationChanged", self.agent.message_simulator.active)
+        return started
+
+    async def stopMessageSimulation(self) -> bool:
+        stopped = await self.agent.stop_message_simulation()
+        self._emit("friendMessageSimulationChanged", self.agent.message_simulator.active)
+        return stopped
+
+    def startFriendMessageSimulation(self) -> bool:
+        return self.startMessageSimulation()
+
+    async def stopFriendMessageSimulation(self) -> bool:
+        return await self.stopMessageSimulation()
 
     def send_event(self, ui_event_type: str, value: Any):
         if not self.agent.is_listening:
@@ -301,10 +324,11 @@ class VehicleBridge:
         text = text.strip()
         if not text:
             return
+
         context = list(self.knowledge_manager.context.values())
         event = CarEvent(
             skill=SkillType.CONVERSATION,
-            event_name="user_input",
+            event_name=EventName.USER_INPUT,
             event_value=text,
             context=context,
             user_input=text,
@@ -321,6 +345,13 @@ class VehicleBridge:
             self.logger.warning(
                 "Ignoring invalid Laya urgency threshold", urgency=urgency
             )
+
+    @property
+    def duplicate_suppression_enabled(self) -> bool:
+        return self.agent.llm_agent.duplicate_suppression_enabled
+
+    def duplicateSuppressionChanged(self, enabled: bool) -> None:
+        self.agent.llm_agent.duplicate_suppression_enabled = bool(enabled)
 
     # Registry of demo scenarios: scenario_id -> (knowledge class, field, active value, inactive value).
     _SCENARIOS: dict[str, tuple[str, str, Any, Any]] = {

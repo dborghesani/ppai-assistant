@@ -57,6 +57,7 @@ commands are not supported.
   lane keeping state.
 - `enable_blind_spot_monitor` / `disable_blind_spot_monitor`: toggle the
   simulated blind-spot monitoring state.
+- `enable_privacy_mode` / `disable_privacy_mode`: toggle the simulated privacy mode.
 - `apply_restrictive_adas_profile`: lower target speed by 10 km/h, increase
   following distance by one step, and enable ACC, lane keeping and blind-spot
   monitoring. Values are bounded by the corresponding controls.

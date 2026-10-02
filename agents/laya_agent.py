@@ -303,7 +303,7 @@ class LayaAgent:
 
         messages = [
             {"role": "system", "content": system_message},
-            *self.agent._conversation_history[-8:],
+            *self.agent.conversation_history[-8:],
             {"role": "user", "content": user_message},
         ]
 
@@ -315,7 +315,7 @@ class LayaAgent:
         if self.agent.on_speaking_tone_changed is not None:
             self.agent.on_speaking_tone_changed(output_tone.value)
         try:
-            stream = await self.agent._voice_llm.chat.completions.create(
+            stream = await self.agent.voice_llm.chat.completions.create(
                 model=self.agent.opt.ollama_model.removeprefix("ollama/"),
                 messages=messages,
                 stream=True,
@@ -357,12 +357,12 @@ class LayaAgent:
 
         full_response = full_response.strip()
         if full_response:
-            self.agent._conversation_history.extend(
+            self.agent.conversation_history.extend(
                 [
                     {"role": "user", "content": event.user_input},
                     {"role": "assistant", "content": full_response},
                 ]
             )
-            self.agent._conversation_history = self.agent._conversation_history[-8:]
+            self.agent.conversation_history = self.agent.conversation_history[-8:]
             if self.agent.on_response is not None:
                 self.agent.on_response(full_response + "\n")

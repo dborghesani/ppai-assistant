@@ -4,13 +4,15 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import structlog
 
+from agents.automotive_agent import AutomotiveAgent
 from agents.agents_dataclasses import (
 	ActionType,
+	AssistantStatus,
 	InterventionType,
 	SkillType,
 	SuggestionType,
@@ -18,6 +20,8 @@ from agents.agents_dataclasses import (
 	UrgencyType,
 )
 from agents.llm_agent import LLMAgent, NotificationDecision
+from managers.action_manager import ActionManager
+from config import ConfigAssistant
 from data.events import CarEvent
 
 
@@ -47,11 +51,12 @@ def make_llm_agent(decision: NotificationDecision):
 	).read_text(encoding="utf-8")
 	agent = SimpleNamespace(
 		maybe_handle_meeting_confirmation=AsyncMock(return_value=False),
+		log_llm_usage=Mock(),
 		cancel_voice_response=Mock(),
 		action_manager=SimpleNamespace(handle_decision=Mock()),
 		speak=AsyncMock(),
 		stream_user_response=AsyncMock(),
-		_voice_response_task=None,
+		voice_response_task=None,
 		skill_manager=SimpleNamespace(
 			get_skill=Mock(return_value="conversation instructions"),
 			vehicle_action_guidance=vehicle_action_guidance,
@@ -71,6 +76,39 @@ def make_llm_agent(decision: NotificationDecision):
 		f"- {action.value}: {action.description}" for action in direct_actions
 	)
 	return llm_agent, agent
+
+
+def test_log_llm_usage_reports_context_window_fill() -> None:
+	agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+	agent.opt = ConfigAssistant(context_window_size=4096)
+	agent.logger = Mock()
+	agent.log_llm_usage(
+		"test call",
+		SimpleNamespace(prompt_tokens=1000, completion_tokens=250, total_tokens=1250),
+	)
+
+	agent.logger.info.assert_called_once_with(
+		"LLM token usage",
+		llm_call="test call",
+		available=True,
+		prompt_tokens=1000,
+		completion_tokens=250,
+		total_tokens=1250,
+		context_tokens=1250,
+		context_window_tokens=4096,
+		context_window_percent=30.5,
+	)
+
+
+def test_car_event_dataclass_preserves_context_copy_and_timestamp() -> None:
+	context = ["vehicle is stopped"]
+	event = CarEvent(SkillType.CONVERSATION, "user_input", "Hello", context, "Hello")
+
+	context.append("external mutation")
+
+	assert event.context == ["vehicle is stopped"]
+	assert event.timestamp is not None
+	assert event.user_input == "Hello"
 
 
 VEHICLE_COMMANDS = [
@@ -106,6 +144,8 @@ VEHICLE_COMMANDS = [
 	("Please disable lane keep assist.", ActionType.DISABLE_LANE_KEEP_ASSIST),
 	("Please enable blind spot monitoring.", ActionType.ENABLE_BLIND_SPOT_MONITOR),
 	("Please disable blind spot monitoring.", ActionType.DISABLE_BLIND_SPOT_MONITOR),
+	("Please enable privacy mode.", ActionType.ENABLE_PRIVACY_MODE),
+	("Please disable privacy mode.", ActionType.DISABLE_PRIVACY_MODE),
 	("Please turn on the sidelights.", ActionType.ENABLE_SIDELIGHTS),
 	("Please turn off the sidelights.", ActionType.DISABLE_SIDELIGHTS),
 	(
@@ -149,6 +189,9 @@ def test_vehicle_command_matrix_covers_all_direct_actions() -> None:
 		ActionType.NONE,
 		ActionType.FIND_REST_AREA,
 		ActionType.ASK_ATTEND_MEETING,
+		ActionType.ANNOUNCE_INCOMING_MESSAGE,
+		ActionType.ASK_PERMISSION_TO_TALK,
+		ActionType.READ_PENDING_MESSAGES,
 	}
 
 	assert {action for _, action in VEHICLE_COMMANDS} == set(ActionType) - excluded_actions
@@ -182,4 +225,71 @@ def test_explicit_vehicle_command_dispatches_matching_action(
 	agent.speak.assert_awaited_once_with(
 		"I received your request.", tone=ToneType.CALM
 	)
+
+
+def make_meeting_agent(confirmed: bool):
+	agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+	agent.action_manager = ActionManager(agent)
+	agent.action_manager.logger = Mock()
+	agent.conversation_history = []
+	agent.interpret_confirmation = AsyncMock(return_value=confirmed)
+	agent.assistant_status = AssistantStatus.IDLE
+	agent.set_assistant_status = Mock()
+	agent.speak = AsyncMock()
+	agent.llm_agent = SimpleNamespace(llm=object())
+	agent.opt = SimpleNamespace(crewai_verbose=False)
+	return agent
+
+
+def test_meeting_permission_yes_starts_meeting_and_speaks_summary() -> None:
+	async def run_flow() -> None:
+		agent = make_meeting_agent(confirmed=True)
+		meeting_crew = SimpleNamespace(kickoff=Mock())
+		driver_summary_task = SimpleNamespace(
+			output=SimpleNamespace(raw="We agreed on a project timeline.")
+		)
+		with patch(
+			"managers.action_manager.build_crew",
+			return_value=(meeting_crew, driver_summary_task),
+		) as build_crew_mock:
+			agent.action_manager.handle_decision(ActionType.ASK_ATTEND_MEETING)
+			assert agent.action_manager.awaiting_confirmation is True
+
+			handled = await agent.maybe_handle_meeting_confirmation("Yes, please.")
+			assert handled is True
+			assert agent.action_manager._meeting_task is not None
+			await agent.action_manager._meeting_task
+
+		build_crew_mock.assert_called_once()
+		meeting_crew.kickoff.assert_called_once_with()
+		assert agent.action_manager.awaiting_confirmation is False
+		agent.set_assistant_status.assert_any_call(
+			AssistantStatus.BACKGROUND_TASK_RUNNING
+		)
+		assert [call.args[0] for call in agent.speak.await_args_list] == [
+			"Sure, I will sit in and brief you as soon as it wraps up.",
+			"We agreed on a project timeline.",
+		]
+
+	asyncio.run(run_flow())
+
+
+def test_meeting_permission_no_declines_without_starting_meeting() -> None:
+	async def run_flow() -> None:
+		agent = make_meeting_agent(confirmed=False)
+		with patch("managers.action_manager.build_crew") as build_crew_mock:
+			agent.action_manager.handle_decision(ActionType.ASK_ATTEND_MEETING)
+			assert agent.action_manager.awaiting_confirmation is True
+
+			handled = await agent.maybe_handle_meeting_confirmation("No, thanks.")
+
+		assert handled is True
+		assert agent.action_manager.awaiting_confirmation is False
+		assert agent.action_manager._meeting_task is None
+		build_crew_mock.assert_not_called()
+		agent.speak.assert_awaited_once_with(
+			"No problem, I will leave the meeting to you."
+		)
+
+	asyncio.run(run_flow())
 

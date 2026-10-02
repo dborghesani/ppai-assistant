@@ -34,6 +34,11 @@ Consider the following situations:
   detected around the vehicle and the doors are unlocked. Do not infer the object's
   location or proximity, recommend unrelated actions, or repeat protection that is
   already active.
+- Keep privacy mode aligned with occupancy: when more than one person is detected
+  inside the vehicle, enable privacy mode; when zero or one person is detected,
+  disable it. Compare the current privacy-mode fact before acting and do nothing
+  when the setting already matches. Treat this as a useful vehicle-state action,
+  and briefly tell the occupants when the setting changes.
 - Warn immediately if a door or the trunk is open while the vehicle is moving.
 - Warn the driver about explicitly reported hazardous road or weather
   conditions and adapt the guidance accordingly.

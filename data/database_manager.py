@@ -105,6 +105,15 @@ class DatabaseManager:
                 self.write_dataclass(event["data"])
 
     @staticmethod
+    def _coerce_float(value: Any, annotation: Any) -> Any:
+        if (
+            type(value) is int
+            and (annotation is float or float in get_args(annotation))
+        ):
+            return float(value)
+        return value
+
+    @staticmethod
     def _influx_field_value(value: Any) -> str | bool | int | float:
         if isinstance(value, (str, bool, int, float)):
             return value
@@ -118,13 +127,16 @@ class DatabaseManager:
     @staticmethod
     def _nested_knowledge_values(data: Any, prefix: str = "") -> dict[str, Any]:
         values: dict[str, Any] = {}
+        type_hints = get_type_hints(type(data))
         for data_field in fields(data):
             value = getattr(data, data_field.name)
             if value is None:
                 continue
             path = f"{prefix}.{data_field.name}" if prefix else data_field.name
             if data_field.metadata.get("knowledge", False):
-                values[path] = value
+                values[path] = DatabaseManager._coerce_float(
+                    value, type_hints.get(data_field.name)
+                )
             elif is_dataclass(value):
                 values.update(DatabaseManager._nested_knowledge_values(value, path))
         return values
@@ -134,11 +146,14 @@ class DatabaseManager:
             self.logger.warning("Ignoring non-dataclass data event", data=data)
             return
 
-        values = {
-            field.name: getattr(data, field.name)
-            for field in fields(data)
-            if getattr(data, field.name) is not None
-        }
+        type_hints = get_type_hints(type(data))
+        values = {}
+        for data_field in fields(data):
+            value = getattr(data, data_field.name)
+            value = self._coerce_float(value, type_hints.get(data_field.name))
+            if value is not None:
+                setattr(data, data_field.name, value)
+                values[data_field.name] = value
         knowledge_values = self._nested_knowledge_values(data)
         if not values:
             self.logger.warning(
@@ -198,6 +213,8 @@ class DatabaseManager:
                 nested_data = cast(Any, nested_type)()
                 setattr(current_data, path_part, nested_data)
             current_data = nested_data
+        field_type = get_type_hints(type(current_data)).get(path[-1])
+        value = self._coerce_float(value, field_type)
         setattr(current_data, path[-1], value)
         point = Point(name).time(time.time_ns())
         point.field(measure, self._influx_field_value(value))

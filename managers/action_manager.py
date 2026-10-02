@@ -25,7 +25,14 @@ class ActionManager:
     def handle_decision(
         self, action_type: ActionType, parameters: dict[str, Any] | None = None
     ) -> None:
-        if action_type is ActionType.ASK_ATTEND_MEETING:
+        if action_type is ActionType.ASK_PERMISSION_TO_TALK:
+            self.agent.set_assistant_status(AssistantStatus.ASK_PERMISSION_TO_TALK)
+        elif action_type in {
+            ActionType.ANNOUNCE_INCOMING_MESSAGE,
+            ActionType.READ_PENDING_MESSAGES,
+        }:
+            self.agent.handle_pending_message_action(action_type)
+        elif action_type is ActionType.ASK_ATTEND_MEETING:
             self._mark_awaiting_meeting_confirmation()
         elif action_type is not ActionType.NONE:
             self.agent.set_assistant_status(AssistantStatus.ACT)

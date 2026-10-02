@@ -91,8 +91,9 @@ const CONTROL_GROUPS = {
     ]}
   ],
   scenario: [
-    { title: "Demo scenarios", type: "scenarios", hint: "Simulate a situation instead of tweaking raw values. Only one scenario can be active at a time.", controls: [
-      ["Driver late for a meeting", "late_for_meeting"]
+    { title: "Demo scenarios", type: "scenarios", hint: "Choose a scenario to add context or start a message simulation.", controls: [
+      { label: "Driver late for a meeting", id: "late_for_meeting", description: "The driver is running late and may ask the assistant to attend the upcoming meeting." },
+      { label: "Messages from Luca", id: "friend_messages", description: "Luca sends occasional messages about mutual friends. Privacy mode queues them until you allow the assistant to read them.", simulation: "friend-messages" }
     ]}
   ]
 };
@@ -154,6 +155,7 @@ const conversation = document.querySelector("#conversation");
 const welcomeState = document.querySelector("#welcome-state");
 const input = document.querySelector("#message-input");
 const conversationButton = document.querySelector("#conversation-toggle");
+const duplicateSuppressionToggle = document.querySelector("#duplicate-suppression-toggle");
 let activeTab = "driver";
 let activeScenario = null;
 let conversationActive = false;
@@ -165,7 +167,12 @@ let controlState = {};
 let speakingTone = null;
 let actPulseTimer = null;
 let showActPulse = false;
+let incomingMessageClassification = null;
+let incomingMessageTimer = null;
 let pendingAssistantMessage = null;
+let friendSimulationActive = false;
+let permissionReturnRadius = null;
+let permissionReturnTimer = null;
 let toastTimer;
 
 function controlStateKey(className, key) {
@@ -222,6 +229,37 @@ function randomizeOfflineShape(dot) {
   dot.style.setProperty("--offline-flat", random(.24, .33));
 }
 
+function permissionRestRadius() {
+  return "50% 50% 50% 50% / 50% 50% 50% 50%";
+}
+
+function randomizePermissionShape(dot) {
+  const pointCount = 12;
+  const phases = Array.from({ length: pointCount }, () => Math.random() * Math.PI * 2);
+  const amplitudes = Array.from({ length: pointCount }, () => 10 + Math.random() * 4);
+  dot.style.setProperty("--permission-rest-radius", permissionRestRadius());
+  dot.style.setProperty("--permission-frame-0", permissionRestRadius());
+
+  for (let frame = 1; frame < pointCount; frame += 1) {
+    const pointOffsets = phases.map((phase, index) => (
+      amplitudes[index] * Math.sin((frame / pointCount) * Math.PI * 2 + phase)
+    ));
+    const cornerRadii = Array.from({ length: 8 }, (_, index) => {
+      const pointPosition = (index * pointCount) / 8;
+      const lowerIndex = Math.floor(pointPosition);
+      const upperIndex = (lowerIndex + 1) % pointCount;
+      const fraction = pointPosition - lowerIndex;
+      return 50 + pointOffsets[lowerIndex] * (1 - fraction) + pointOffsets[upperIndex] * fraction;
+    });
+    const horizontal = cornerRadii.slice(0, 4).map(value => `${value.toFixed(2)}%`).join(" ");
+    const vertical = cornerRadii.slice(4).map(value => `${value.toFixed(2)}%`).join(" ");
+    dot.style.setProperty(
+      `--permission-frame-${frame}`,
+      `${horizontal} / ${vertical}`,
+    );
+  }
+}
+
 function renderDriveStatus() {
   const dot = document.querySelector("#connection-dot");
   const disconnected = connectionState !== "connected";
@@ -232,8 +270,30 @@ function renderDriveStatus() {
       : assistantStatus === "background_task_running"
         ? "background"
         : assistantStatus;
-  dot.className = `status-dot ${connectionState} assistant-${visualStatus}`;
-  if (!disconnected && assistantStatus === "talking" && speakingTone) {
+  const classifiedIncomingMessage =
+    !disconnected && incomingMessageClassification !== null;
+  const urgentIncomingMessage = classifiedIncomingMessage &&
+    ["high", "critical"].includes(incomingMessageClassification.urgency);
+  const permissionReturning = permissionReturnRadius !== null;
+  dot.className = `status-dot ${connectionState} assistant-${visualStatus}${permissionReturning ? " permission-returning" : ""}${classifiedIncomingMessage ? " incoming-message-classified" : ""}${urgentIncomingMessage ? " incoming-message-urgent" : ""}`;
+  if (classifiedIncomingMessage) {
+    dot.dataset.messageTone = incomingMessageClassification.tone;
+    dot.dataset.messageUrgency = incomingMessageClassification.urgency;
+  } else {
+    delete dot.dataset.messageTone;
+    delete dot.dataset.messageUrgency;
+  }
+    if (permissionReturning) {
+      dot.style.setProperty("--permission-return-radius", permissionReturnRadius);
+    } else {
+      dot.style.removeProperty("--permission-return-radius");
+    }
+  if (urgentIncomingMessage) {
+    dot.setAttribute(
+      "aria-label",
+      `Incoming message, ${incomingMessageClassification.urgency} urgency, ${incomingMessageClassification.tone} tone`,
+    );
+  } else if (!disconnected && assistantStatus === "talking" && speakingTone) {
     dot.dataset.tone = speakingTone;
     dot.setAttribute("aria-label", `Assistant speaking, ${speakingTone} tone`);
   } else {
@@ -249,7 +309,47 @@ function setSpeakingTone(tone) {
   renderDriveStatus();
 }
 
+function setIncomingMessageClassification(classification) {
+  clearTimeout(incomingMessageTimer);
+  incomingMessageClassification = classification;
+  renderDriveStatus();
+  if (!classification) return;
+
+  if (["high", "critical"].includes(classification.urgency)) {
+    const dot = document.querySelector("#connection-dot");
+    void dot.offsetWidth;
+    renderDriveStatus();
+  }
+  incomingMessageTimer = setTimeout(() => {
+    incomingMessageTimer = null;
+    incomingMessageClassification = null;
+    renderDriveStatus();
+  }, 1960);
+}
+
+function restartPermissionPulse(dot) {
+  dot.classList.remove("assistant-ask_permission_to_talk");
+  void dot.offsetWidth;
+  dot.classList.add("assistant-ask_permission_to_talk");
+}
+
 function setAssistantStatus(status) {
+  const leavingPermission =
+    assistantStatus === "ask_permission_to_talk" && status !== "ask_permission_to_talk";
+  const dot = document.querySelector("#connection-dot");
+
+  if (status === "ask_permission_to_talk") {
+    clearTimeout(permissionReturnTimer);
+    permissionReturnTimer = null;
+    permissionReturnRadius = null;
+    dot.style.removeProperty("--permission-return-radius");
+    randomizePermissionShape(dot);
+  } else if (leavingPermission) {
+    permissionReturnRadius = getComputedStyle(dot, "::before").borderRadius;
+    clearTimeout(incomingMessageTimer);
+    incomingMessageTimer = null;
+  }
+
   assistantStatus = status;
   if (status === "act") {
     showActPulse = true;
@@ -263,7 +363,34 @@ function setAssistantStatus(status) {
     clearTimeout(actPulseTimer);
   }
   renderDriveStatus();
+  if (status === assistantStatus && status === "ask_permission_to_talk") {
+    restartPermissionPulse(dot);
+  }
+  if (leavingPermission) {
+    requestAnimationFrame(() => {
+      if (permissionReturnRadius !== null) {
+        permissionReturnRadius = permissionRestRadius();
+        renderDriveStatus();
+      }
+    });
+    clearTimeout(permissionReturnTimer);
+    permissionReturnTimer = setTimeout(() => {
+      permissionReturnRadius = null;
+      incomingMessageClassification = null;
+      dot.style.removeProperty("--permission-return-radius");
+      renderDriveStatus();
+    }, 320);
+  }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (
+    document.visibilityState === "visible"
+    && assistantStatus === "ask_permission_to_talk"
+  ) {
+    restartPermissionPulse(document.querySelector("#connection-dot"));
+  }
+});
 
 function showToast(message) {
   const toast = document.querySelector("#toast");
@@ -271,6 +398,14 @@ function showToast(message) {
   toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("show"), 2600);
+}
+
+function setFriendSimulation(active) {
+  friendSimulationActive = active;
+  const button = document.querySelector("#friend-simulation-toggle");
+  if (!button) return;
+  button.textContent = active ? "Stop simulation" : "Start simulation";
+  button.setAttribute("aria-pressed", String(active));
 }
 
 function formatValue(value, format) {
@@ -303,8 +438,19 @@ function renderControls(tabName) {
     }
     if (group.type === "scenarios") {
       const hint = group.hint ? `<p class="scenario-hint">${escapeHtml(group.hint)}</p>` : "";
-      const buttons = group.controls.map(([label, id]) => `<button type="button" class="scenario-button" data-scenario="${id}" aria-pressed="${activeScenario === id}">${escapeHtml(label)}</button>`).join("");
-      return `<section class="control-section" data-type="scenarios"><h3>${group.title}</h3>${hint}${buttons}</section>`;
+      const scenarios = group.controls.map(scenario => {
+        const isSimulation = Boolean(scenario.simulation);
+        const active = isSimulation ? friendSimulationActive : activeScenario === scenario.id;
+        const buttonId = isSimulation ? ' id="friend-simulation-toggle"' : "";
+        const buttonLabel = isSimulation
+          ? active ? "Stop simulation" : "Start simulation"
+          : active ? "Stop scenario" : "Start scenario";
+        const dataAttribute = isSimulation
+          ? `data-simulation="${scenario.simulation}"`
+          : `data-scenario="${scenario.id}"`;
+        return `<div class="scenario-item"><div class="scenario-copy"><h4>${escapeHtml(scenario.label)}</h4><p>${escapeHtml(scenario.description)}</p></div><button type="button" class="scenario-button"${buttonId} ${dataAttribute} aria-pressed="${active}">${buttonLabel}</button></div>`;
+      }).join("");
+      return `<section class="control-section" data-type="scenarios"><h3>${group.title}</h3>${hint}${scenarios}</section>`;
     }
     const controls = group.controls.map(([label, key, min, max, value, step, format, ownClass]) => {
       const controlClass = ownClass || group.cls;
@@ -314,6 +460,7 @@ function renderControls(tabName) {
     const sectionClass = group.cls ? ` data-class="${group.cls}"` : "";
     return `<section class="control-section" data-type="ranges"${sectionClass}><h3>${group.title}</h3>${controls}</section>`;
   }).join("");
+  if (tabName === "scenario") setFriendSimulation(friendSimulationActive);
 }
 
 function updateControlsInPlace(className, values) {
@@ -407,6 +554,16 @@ controlContent.addEventListener("change", event => {
 controlContent.addEventListener("click", event => {
   const button = event.target.closest(".scenario-button");
   if (!button) return;
+  if (button.dataset.simulation === "friend-messages") {
+    const wasActive = friendSimulationActive;
+    button.disabled = true;
+    bridge.call(
+      wasActive ? "stopMessageSimulation" : "startMessageSimulation"
+    ).then(() => setFriendSimulation(!wasActive))
+      .catch(() => showToast("Could not update friend message simulation"))
+      .finally(() => { button.disabled = false; });
+    return;
+  }
   const scenarioId = button.dataset.scenario;
   const wasActive = activeScenario === scenarioId;
   button.disabled = true;
@@ -465,6 +622,9 @@ document.querySelector("#processing-toggle").addEventListener("change", event =>
 });
 document.querySelector("#urgency-select").addEventListener("change", event => {
   bridge.call("minimumUrgencyChanged", event.target.value).catch(() => {});
+});
+duplicateSuppressionToggle.addEventListener("change", event => {
+  bridge.call("duplicateSuppressionChanged", event.target.checked).catch(() => {});
 });
 
 function addMessage(role, text) {
@@ -569,6 +729,8 @@ bridge.on("ready", data => {
   rememberControlState("DriverPreferences", data.driverPreferences);
   rememberControlState("VehicleState", data.vehicleState);
   rememberControlState("DetectedObjects", data.detectedObjectsState);
+  setFriendSimulation(Boolean(data.friendMessageSimulationActive));
+  duplicateSuppressionToggle.checked = Boolean(data.duplicateSuppressionEnabled);
   if (activeTab === "driver" || activeTab === "vehicle") renderControls(activeTab);
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
@@ -580,7 +742,9 @@ bridge.on("sttEnabledChanged", enabled => {
 bridge.on("responseUpdated", data => updateAssistantMessage(data[0]));
 bridge.on("responseReceived", data => updateAssistantMessage(data[0], true));
 bridge.on("speakingToneChanged", data => setSpeakingTone(data[0]));
+bridge.on("incomingMessageClassified", data => setIncomingMessageClassification(data[0]));
 bridge.on("assistantStatusChanged", data => setAssistantStatus(data[0]));
+bridge.on("friendMessageSimulationChanged", data => setFriendSimulation(Boolean(data[0])));
 bridge.on("userSpeechReceived", data => addMessage("user", data[0]));
 bridge.on("knowledgeUpdated", data => renderKnowledge(data[0]));
 bridge.on("vehicleStateChanged", data => {

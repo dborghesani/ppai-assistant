@@ -168,6 +168,16 @@ def test_restrictive_adas_profile_updates_simulated_controls():
     assert state.blind_spot_monitor is True
 
 
+def test_privacy_mode_actions_update_simulated_state():
+    bridge = make_bridge(VehicleState(privacy_mode=False))
+
+    bridge.apply_vehicle_action(ActionType.ENABLE_PRIVACY_MODE, {})
+    assert bridge.database_manager.current_state["VehicleState"].privacy_mode is True
+
+    bridge.apply_vehicle_action(ActionType.DISABLE_PRIVACY_MODE, {})
+    assert bridge.database_manager.current_state["VehicleState"].privacy_mode is False
+
+
 def test_vehicle_state_snapshot_fills_unreported_fields_from_defaults():
     bridge = make_bridge(VehicleState(window_open_front_left=True, sunroof_open=None))
 
@@ -240,6 +250,7 @@ def test_driver_preferences_become_non_notifying_knowledge():
     )
     assert KnowledgeManager._field_skills("DetectedObjects", "people_inside") == (
         SkillType.WELLBEING,
+        SkillType.DRIVING,
     )
 
     manager = KnowledgeManager.__new__(KnowledgeManager)
@@ -279,6 +290,7 @@ def test_privacy_mode_and_people_inside_are_readable_knowledge():
     )
     assert KnowledgeManager._field_skills("DetectedObjects", "people_inside") == (
         SkillType.WELLBEING,
+        SkillType.DRIVING,
     )
 
     manager = KnowledgeManager.__new__(KnowledgeManager)
@@ -305,13 +317,11 @@ def test_privacy_mode_and_people_inside_are_readable_knowledge():
             await manager.knowledge_event_queue.get()
         await manager.process_pending(
             {
-                ("VehicleState", "privacy_mode"): True,
                 ("DetectedObjects", "people_inside"): 2,
             }
         )
-        assert manager.context["VehicleState.privacy_mode"] == "Privacy mode is on."
         assert manager.context["DetectedObjects.people_inside"] == (
-            "2 people are detected inside the vehicle."
+            "Multiple people are detected inside the vehicle."
         )
         return [
             await manager.knowledge_event_queue.get(),
@@ -324,10 +334,14 @@ def test_privacy_mode_and_people_inside_are_readable_knowledge():
         for event in events
         for key, value in event.event_value.items()
     } == {
-        "VehicleState.privacy_mode": True,
         "DetectedObjects.people_inside": 2,
     }
     assert {event.skill for event in events} == {SkillType.DRIVING, SkillType.WELLBEING}
+    driving_event = next(event for event in events if event.skill is SkillType.DRIVING)
+    assert driving_event.event_value == {
+        "DetectedObjects.people_inside": 2,
+    }
+    assert "Privacy mode is off." in driving_event.context
 
 
 def test_database_restores_driver_preferences_for_initial_knowledge():
@@ -360,6 +374,38 @@ def test_database_restores_driver_preferences_for_initial_knowledge():
 
     assert captured[("DriverPreferences", "preferred_cabin_temperature")] == 21.5
     assert captured[("DriverPreferences", "preferred_music")] == "classic 1970s rock"
+
+
+def test_database_write_measure_coerces_int_for_float_field():
+    database = DatabaseManager.__new__(DatabaseManager)
+    database.current_state = {"VehicleState": VehicleState()}
+    database.measurement_event_queue = None
+    database.logger = Mock()
+    database.write_point = Mock()
+
+    database.write_measure("VehicleState", "internal_temperature", 25)
+
+    assert database.current_state["VehicleState"].internal_temperature == 25.0
+    assert type(database.current_state["VehicleState"].internal_temperature) is float
+    line = database.write_point.call_args.args[0].to_line_protocol()
+    assert "internal_temperature=25" in line
+    assert "internal_temperature=25i" not in line
+
+
+def test_database_write_dataclass_coerces_int_for_float_field():
+    database = DatabaseManager.__new__(DatabaseManager)
+    database.current_state = {}
+    database.measurement_event_queue = None
+    database.logger = Mock()
+    database.write_point = Mock()
+    state = VehicleState(internal_temperature=25)
+
+    database.write_dataclass(state)
+
+    assert type(state.internal_temperature) is float
+    line = database.write_point.call_args.args[0].to_line_protocol()
+    assert "internal_temperature=25" in line
+    assert "internal_temperature=25i" not in line
 
 
 def test_dangerous_object_count_becomes_boolean_knowledge():

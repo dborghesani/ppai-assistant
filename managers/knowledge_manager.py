@@ -6,7 +6,7 @@ import structlog
 from config import ConfigAssistant
 from data import assistant_dataclasses
 from data.database_manager import DatabaseManager
-from data.events import CarEvent
+from data.events import CarEvent, EventName
 from agents.agents_dataclasses import SkillType
 
 
@@ -136,7 +136,9 @@ class KnowledgeManager:
         ("DetectedObjects", "people_inside"): lambda value: (
             "No people are detected inside the vehicle."
             if value == 0
-            else f"{value} {'person is' if value == 1 else 'people are'} detected inside the vehicle."
+            else "One person is detected inside the vehicle."
+            if value == 1
+            else "Multiple people are detected inside the vehicle."
         ),
         ("DetectedObjects", "vehicles_around"): lambda value: (
             "No vehicles are currently detected around the vehicle."
@@ -496,19 +498,20 @@ class KnowledgeManager:
             await self.knowledge_event_queue.put(
                 CarEvent(
                     skill=SkillType.NONE,
-                    event_name="knowledge_updated",
+                    event_name=EventName.KNOWLEDGE_UPDATED,
                     event_value=dict(changes),
                     context=list(self.context.values()),
                 )
             )
             return
 
-        changes_by_skill: dict[str, dict[str, Any]] = {}
+        changes_by_skill: dict[SkillType, dict[str, Any]] = {}
         for key, value in changes.items():
             name, separator, measure = key.partition(".")
             if not separator:
                 continue
             # management of specific derived knowledge
+            skills: tuple[SkillType, ...]
             if key == self._SPEED_STATUS_KEY:
                 skills = (SkillType.DRIVING,)
             else:
@@ -540,7 +543,7 @@ class KnowledgeManager:
             await self.knowledge_event_queue.put(
                 CarEvent(
                     skill=skill,
-                    event_name="knowledge_updated",
+                    event_name=EventName.KNOWLEDGE_UPDATED,
                     event_value=dict(skill_changes),
                     context=skill_context_all_values_as_list,
                 )

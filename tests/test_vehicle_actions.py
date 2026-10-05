@@ -8,12 +8,12 @@ from unittest.mock import Mock
 
 import pytest
 import structlog
-from agents.agents_dataclasses import ActionType, SkillType
+from data.agents_dataclasses import ActionType, SkillType
 from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
-from data.database_manager import DatabaseManager
+from managers.database_manager import DatabaseManager
 from managers.action_manager import ActionManager
 from managers.knowledge_manager import KnowledgeManager
-from data.source_manager import SourceManager
+from managers.source_manager import SourceManager
 from ui.bridge import VehicleBridge
 
 
@@ -71,6 +71,7 @@ def test_driver_preferences_are_persisted_and_broadcast():
     bridge.setDriverPreference("preferred_music", "  classic 1970s rock  ")
 
     assert bridge.dumpDriverPreferences() == {
+        "driver_name": "David",
         "preferred_cabin_temperature": 30.0,
         "preferred_music": "classic 1970s rock",
     }
@@ -81,6 +82,7 @@ def test_driver_preferences_are_persisted_and_broadcast():
     assert bridge._emit.call_args_list[-1].args == (
         "driverPreferencesChanged",
         {
+            "driver_name": "David",
             "preferred_cabin_temperature": 30.0,
             "preferred_music": "classic 1970s rock",
         },
@@ -91,6 +93,11 @@ def test_driver_preferences_are_persisted_and_broadcast():
         "preferred_music",
         "",
     )
+    bridge.setDriverPreference("driver_name", "  Alex  ")
+    assert bridge.dumpDriverPreferences()["driver_name"] == "Alex"
+    assert bridge.database_manager.writes[-1] == ("DriverPreferences", "driver_name", "Alex")
+    bridge.setDriverPreference("driver_name", "   ")
+    assert bridge.dumpDriverPreferences()["driver_name"] == "David"
 
 
 def test_user_input_uses_driver_preferences_from_knowledge_context():

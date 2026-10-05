@@ -34,6 +34,7 @@
             "console": "integratedTerminal",
             "env": {
                 "OPENAI_API_KEY": "fake",
+                "JAMENDO_CLIENT_ID": "5f6703fc"
             },
             "args": [
                 "ollama_model=ollama/qwen3.5:4b",

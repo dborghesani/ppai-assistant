@@ -226,11 +226,93 @@ python main.py \
   tts_enabled=True stt_enabled=True
 ```
 
+## Driver Identity And Messages
+
+The Driver tab includes an editable `driver_name` preference, defaulting to `David`.
+Incoming delivery and pending-message reading receive that name as the recipient. The assistant
+lightly interprets messages and addresses the driver naturally, without report formulas such as
+"Luca says". Sender identity, requests, questions and meaningful details remain intact; no motives
+or details are invented. Privacy and permission rules are unchanged. If pending-message generation
+fails, the fallback preserves the original text with a simple "Message from ..." label.
+
+## Live Music Playlists
+
+The local LLM generates music-search queries from the editable driver preferences, current
+emotion or an explicit request. Jamendo playlists are searched live; if no playable playlist
+is found, a themed queue is built from live track results. No playlist IDs or emotion-to-playlist
+tables are hard-coded. Jamendo's documented radio-stream endpoint is no longer working, so
+this integration uses playlists instead. Named artists in the default preferences are style
+references, not promises of catalog availability.
+
+Register an application at https://devportal.jamendo.com/ and configure its client ID locally:
+
+```bash
+export JAMENDO_CLIENT_ID="your-client-id"
+uv run python main.py music_enabled=True
+```
+
+Alternatively pass `jamendo_client_id=...` at startup. Do not commit credentials to launch
+settings. For VS Code debugging the variable must be available in the debugger environment;
+exports in a terminal do not update an already-running VS Code process. Without a client ID,
+music reports "Not configured" while the assistant continues working normally.
+
+Emotion-based proposals ask permission and never autoplay. A clear reply to the latest music
+question or the Yes/Not now controls accepts or declines; consent is single-use. The LLM decides
+whether a proposal is appropriate from all reported emotions, readiness, environment, preferences
+and recent conversation. It selects the theme and generates the permission question. There are no
+Python genre-selection or dominant-emotion rules; cooldown and deduplication prevent repetition.
+Automatic music proposals require explicit emotional persistence from the KnowledgeManager.
+Non-neutral emotions at medium intensity or higher are tracked continuously for 30 seconds,
+using the existing persistence mechanism and its 5-second periodic check. Dropping below the
+qualifying levels resets the timer. The resulting temporal facts are supplied to the LLM alongside
+the full current emotional state; the model chooses whether and what to propose. A silent initial
+evaluation does not consume the proposal cooldown. Explicit play requests do not wait for emotional
+persistence, and immediate safety warnings are not delayed.
+Music is not a substitute for rest or safety interventions.
+
+Explicit text or transcribed voice requests support "Play relaxing music", "Put on some jazz",
+"Pause the music", "Resume the music", "Next track" and "Stop the music". The normal LLM
+classifier receives recent conversation and the registered action catalog. ActionManager
+dispatches the selected capability through a registry; MusicManager implements playback and
+validates consent. New capabilities can register actions and guidance without adding feature
+branches to direct-request processing.
+
+Audio plays in the dashboard browser, which must remain open. Browser autoplay restrictions
+may require tapping Play even after a voice request. The existing Vehicle Audio volume control
+sets the music volume; while the assistant speaks it is reduced to 25% of that base and restored
+afterwards. Changes during speech apply immediately. A base volume of zero remains zero.
+
+| Argument | Description | Default |
+| :--- | :--- | :--- |
+| `music_enabled` | Enable live music functionality | `True` |
+| `jamendo_client_id` | Application ID; falls back to `JAMENDO_CLIENT_ID` | Empty |
+| `music_timeout` | Per-request timeout; whole search is bounded at three times this | `30.0` |
+| `music_cooldown_seconds` | Interval between automatic proposals | `300.0` |
+| `music_min_emotion` | Legacy compatibility setting; ignored by LLM-driven selection | `0.4` |
+| `music_track_limit` | Maximum tracks in a playlist/queue | `15` |
+| `music_ducking_factor` | Music volume multiplier during speech, greater than zero | `0.25` |
+
+Only derived search queries/tags are sent to Jamendo, not raw preferences or emotional state.
+Artist and license links are shown when returned by the API. Free API access does not grant
+unrestricted commercial/public playback rights: check API terms and each track's license,
+especially for a branded or public demonstration. Authenticated catalog/playback testing
+requires your own Jamendo client ID.
+
 ## Vehicle Manual RAG
 
 Manual retrieval runs locally with PyMuPDF, Ollama embeddings and a persistent Chroma index.
 It enriches the direct Ollama conversational response, independently of CrewAI event decisions.
 The manual does not expand the vehicle action catalog or replace live telemetry.
+
+The request classifier selects a structured response source using the request and recent
+conversation: `general`, `vehicle_state`, or `vehicle_manual`. Only `vehicle_manual` invokes
+retrieval. General conversation and live-state questions do not query the PDF. If manual
+retrieval is disabled or unavailable, a manual-specific question still retains its evidence
+constraints instead of silently falling back to unsupported vehicle advice.
+
+`AutomotiveAgent` owns routing, action dispatch, interruptions, UI/TTS delivery and conversation
+history. `LLMBackend` owns prompts, classification, parsing and token generation, and has no
+reference to the orchestrator. `LayaBackend` is renamed but retains its existing implementation.
 
 ```bash
 ollama pull bge-m3

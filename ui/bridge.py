@@ -7,12 +7,12 @@ from dataclasses import asdict, is_dataclass
 from typing import Any, Callable, DefaultDict, Tuple
 
 import structlog
-from agents.agents_dataclasses import ActionType
+from data.agents_dataclasses import ActionType
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
 from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
-from data.database_manager import DatabaseManager
-from data.mqtt_thread import MqttThreadClient
+from managers.database_manager import DatabaseManager
+from managers.mqtt_thread import MqttThreadClient
 from data.events import CarEvent, EventName
 from managers.knowledge_manager import KnowledgeManager
 from managers.skill_manager import SkillType
@@ -57,6 +57,9 @@ class VehicleBridge:
             "assistantStatusChanged", status.value
         )
         self.agent.action_manager.on_action = self.apply_vehicle_action
+        self.agent.on_music_update = lambda value: self._emit("musicUpdated", value)
+        self.agent.music_preferences_provider = lambda: self.dumpDriverPreferences().get("preferred_music") or ""
+        self.agent.driver_preferences_provider = self.dumpDriverPreferences
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:
@@ -232,6 +235,7 @@ class VehicleBridge:
 
     def close(self) -> None:
         """Release audio and thread-backed resources before the event loop closes."""
+        self.agent.action_manager.close()
         self.agent.cancel_message_tasks()
         if self.stt_manager is not None:
             self.stt_manager.close()
@@ -288,6 +292,10 @@ class VehicleBridge:
                 self.logger.warning("Ignoring invalid preferred temperature", value=value)
                 return
             value = min(30.0, max(16.0, temperature))
+        elif name == "driver_name":
+            if not isinstance(value, str):
+                return
+            value = " ".join(value.split())[:80] or DriverPreferences().driver_name
         elif name == "preferred_music":
             if not isinstance(value, str):
                 self.logger.warning("Ignoring invalid music preference", value=value)
@@ -304,6 +312,7 @@ class VehicleBridge:
             "DriverPreferences", DriverPreferences()
         )
         return {
+            "driver_name": preferences.driver_name or DriverPreferences().driver_name,
             "preferred_cabin_temperature": preferences.preferred_cabin_temperature,
             "preferred_music": preferences.preferred_music,
         }
@@ -336,10 +345,10 @@ class VehicleBridge:
 
     @property
     def duplicate_suppression_enabled(self) -> bool:
-        return self.agent.llm_agent.duplicate_suppression_enabled
+        return self.agent.duplicate_suppression_enabled
 
     def duplicateSuppressionChanged(self, enabled: bool) -> None:
-        self.agent.llm_agent.duplicate_suppression_enabled = bool(enabled)
+        self.agent.duplicate_suppression_enabled = bool(enabled)
 
     # Registry of demo scenarios: scenario_id -> (knowledge class, field, active value, inactive value).
     _SCENARIOS: dict[str, tuple[str, str, Any, Any]] = {
@@ -483,6 +492,28 @@ class VehicleBridge:
         """Called synchronously by KnowledgeManager right after its context changes."""
         self._emit("knowledgeUpdated", self.dumpKnowledgeData())
         self._emit("detectedObjectsStateChanged", self.dumpDetectedObjectsState())
+        music_manager = getattr(self.agent.action_manager, "music_manager", None)
+        if music_manager is not None and self.agent.is_listening:
+            state = {name: asdict(value) for name, value in self.database_manager.current_state.items()
+                     if is_dataclass(value) and not isinstance(value, type)}
+            state["DriverPreferences"] = self.dumpDriverPreferences()
+            state["DriverEmotionState"] = {
+                key.partition(".")[2]: fact for key, fact in self.knowledge_manager.context.items()
+                if key.startswith("DriverEmotionState.")
+            }
+            music_manager.observe(state, self.agent.ask_music_permission)
+
+    def dumpMusicState(self) -> dict[str, Any]:
+        manager = getattr(self.agent.action_manager, "music_manager", None)
+        return {**manager.current, "autoplay": False} if manager is not None else {"status": "disabled"}
+
+    def musicConsent(self, accepted: bool) -> bool:
+        if not isinstance(accepted, bool):
+            raise ValueError("Music consent must be a boolean")
+        return self.agent.action_manager.music_manager.consent(accepted)
+
+    def musicControl(self, command: str) -> None:
+        self.agent.action_manager.music_manager.control(command)
 
     def on_knowledge_changed(self, changes: list[str]) -> None:
         self._emit("knowledgeChanged", changes)

@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from agents.agents_dataclasses import SkillType
+from data.agents_dataclasses import SkillType
 
 
 class EventName(StrEnum):

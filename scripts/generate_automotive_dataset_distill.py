@@ -50,7 +50,7 @@ except ImportError:  # pragma: no cover
 # Allow running this script directly (e.g. `python scripts/generate_automotive_dataset.py`)
 # while still importing the project's shared decision enums as the single source of truth.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from agents.agents_dataclasses import (  # noqa: E402
+from data.agents_dataclasses import (  # noqa: E402
     ActionType,
     InterventionType,
     SkillType,

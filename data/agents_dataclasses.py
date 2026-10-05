@@ -59,6 +59,13 @@ class ActionType(str, Enum):
     UNLOCK_DOORS = "unlock_doors"
     START_RADIO = "start_radio"
     STOP_RADIO = "stop_radio"
+    PLAY_MUSIC = "play_music"
+    PAUSE_MUSIC = "pause_music"
+    RESUME_MUSIC = "resume_music"
+    NEXT_MUSIC = "next_music"
+    STOP_MUSIC = "stop_music"
+    ACCEPT_MUSIC = "accept_music"
+    DECLINE_MUSIC = "decline_music"
     INCREASE_AUDIO_VOLUME = "increase_audio_volume"
     DECREASE_AUDIO_VOLUME = "decrease_audio_volume"
     START_NAVIGATION = "start_navigation"
@@ -112,6 +119,13 @@ class ActionType(str, Enum):
             ActionType.UNLOCK_DOORS: "unlock doors",
             ActionType.START_RADIO: "start radio",
             ActionType.STOP_RADIO: "stop radio",
+            ActionType.PLAY_MUSIC: "find and play a themed music playlist on explicit request",
+            ActionType.PAUSE_MUSIC: "pause music playback",
+            ActionType.RESUME_MUSIC: "resume music playback",
+            ActionType.NEXT_MUSIC: "skip to the next music track",
+            ActionType.STOP_MUSIC: "stop music playback and cancel pending music proposals",
+            ActionType.ACCEPT_MUSIC: "accept the assistant's pending music proposal",
+            ActionType.DECLINE_MUSIC: "decline the assistant's pending music proposal",
             ActionType.INCREASE_AUDIO_VOLUME: "increase audio volume by one step",
             ActionType.DECREASE_AUDIO_VOLUME: "decrease audio volume by one step",
             ActionType.START_NAVIGATION: "start navigation",

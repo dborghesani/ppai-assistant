@@ -77,6 +77,24 @@
           </div>
         </div>
 
+        <section id="music-panel" class="music-panel" aria-label="Music" hidden>
+          <div class="music-heading"><strong id="music-title">Jamendo</strong><span id="music-status" role="status"></span></div>
+          <div id="music-proposal" class="music-proposal" hidden>
+            <span></span>
+            <button id="music-accept" type="button">Yes</button>
+            <button id="music-decline" type="button">Not now</button>
+          </div>
+          <div id="music-transport" class="music-transport" hidden>
+            <img id="music-cover" alt="" width="40" height="40" hidden>
+            <div class="music-track"><span id="music-track-title"></span><small id="music-artist"></small></div>
+            <button id="music-play" class="icon-button" type="button" title="Play or pause music" aria-label="Play music">&#9654;</button>
+            <button id="music-next" class="icon-button" type="button" title="Next track" aria-label="Next track">&#9197;</button>
+            <button id="music-stop" class="icon-button" type="button" title="Stop music" aria-label="Stop music">&#9632;</button>
+          </div>
+          <div class="music-attribution"><a id="music-source" target="_blank" rel="noopener noreferrer" hidden>Jamendo</a><a id="music-license" target="_blank" rel="noopener noreferrer" hidden>License</a></div>
+          <audio id="music-audio" preload="none"></audio>
+        </section>
+
         <form id="composer" class="composer">
           <button id="conversation-toggle" class="voice-button" type="button" title="Start conversation" aria-label="Start conversation" aria-pressed="false" disabled>
             <span class="mic-icon" aria-hidden="true">&#127908;</span>

@@ -10,7 +10,7 @@ import pytest
 import structlog
 
 from agents.automotive_agent import AutomotiveAgent
-from agents.agents_dataclasses import (
+from data.agents_dataclasses import (
 	ActionType,
 	AssistantStatus,
 	InterventionType,
@@ -19,8 +19,9 @@ from agents.agents_dataclasses import (
 	ToneType,
 	UrgencyType,
 )
-from agents.llm_agent import LLMAgent, NotificationDecision
+from agents.llm_backend import LLMBackend, NotificationDecision
 from managers.action_manager import ActionManager
+from managers.music_manager import MUSIC_ACTIONS
 from config import ConfigAssistant
 from data.events import CarEvent
 
@@ -44,12 +45,14 @@ def make_llm_agent(decision: NotificationDecision):
 			ActionType.NONE,
 			ActionType.FIND_REST_AREA,
 			ActionType.ASK_ATTEND_MEETING,
+			*MUSIC_ACTIONS,
 		}
 	)
 	vehicle_action_guidance = (
 		Path(__file__).resolve().parents[1] / "skills" / "vehicle_actions.md"
 	).read_text(encoding="utf-8")
-	agent = SimpleNamespace(
+	agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+	agent.__dict__.update(vars(SimpleNamespace(
 		maybe_handle_meeting_confirmation=AsyncMock(return_value=False),
 		log_llm_usage=Mock(),
 		cancel_voice_response=Mock(),
@@ -61,10 +64,23 @@ def make_llm_agent(decision: NotificationDecision):
 			get_skill=Mock(return_value="conversation instructions"),
 			vehicle_action_guidance=vehicle_action_guidance,
 		),
-	)
-	llm_agent = LLMAgent.__new__(LLMAgent)
+	)))
+	agent.opt = ConfigAssistant()
+	agent.voice_llm = SimpleNamespace()
+	agent.conversation_history = []
+	agent.knowledge_context_provider = lambda: []
+	agent.logger = structlog.get_logger()
+	agent.recent_notifications = []
+	agent.duplicate_suppression_enabled = False
+	async def prepare_response(event, source):
+		await agent.stream_user_response(event)
+
+	agent.prepare_user_response = AsyncMock(side_effect=prepare_response)
+	agent.action_manager = cast(Any, ActionManager(cast(Any, agent)))
+	agent.action_manager.handle_decision = Mock()
+	llm_agent = LLMBackend.__new__(LLMBackend)
 	llm_agent.logger = structlog.get_logger()
-	llm_agent.agent = cast(Any, agent)
+	llm_agent.on_usage = agent.log_llm_usage
 	llm_agent.direct_action_crew = cast(Any, FakeCrew(decision))
 	llm_agent.llm = cast(Any, SimpleNamespace(temperature=0.7))
 	llm_agent.decision_options = {
@@ -75,7 +91,71 @@ def make_llm_agent(decision: NotificationDecision):
 	llm_agent.direct_action_options = "\n".join(
 		f"- {action.value}: {action.description}" for action in direct_actions
 	)
+	agent.llm_backend = llm_agent
 	return llm_agent, agent
+
+
+def test_llm_classification_returns_decision_without_applying_it() -> None:
+	async def check():
+		decision = NotificationDecision(
+			urgency=UrgencyType.LOW, tone=ToneType.CALM,
+			intervention_type=InterventionType.ACT, skill=SkillType.DRIVING,
+			action=ActionType.OPEN_WINDOWS, suggestion_type=SuggestionType.NONE, reason="Explicit request",
+		)
+		llm_agent, agent = make_llm_agent(decision)
+		assert await llm_agent.classify_request({"user_input": "Open the windows"}) is decision
+		agent.speak.assert_not_awaited()
+		agent.action_manager.handle_decision.assert_not_called()
+		agent.stream_user_response.assert_not_awaited()
+		assert llm_agent.llm.temperature == 0.7
+		assert not hasattr(llm_agent, "agent")
+		assert not hasattr(llm_agent, "process_event")
+	asyncio.run(check())
+
+
+def test_backend_usage_is_per_call_not_cumulative():
+	async def check():
+		decision = NotificationDecision(urgency=UrgencyType.NONE, tone=ToneType.CALM,
+			intervention_type=InterventionType.NONE, skill=SkillType.NONE,
+			action=ActionType.NONE, suggestion_type=SuggestionType.NONE, reason="No action")
+		backend, agent = make_llm_agent(decision)
+		counters = {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100}
+		backend.llm.get_token_usage_summary = lambda: counters
+		async def kickoff(*, inputs):
+			counters["prompt_tokens"] += 200
+			counters["completion_tokens"] += 20
+			counters["total_tokens"] += 220
+			return SimpleNamespace(pydantic=decision, token_usage=SimpleNamespace(**counters))
+		backend.direct_action_crew.kickoff_async = kickoff
+		backend.crew = backend.direct_action_crew
+		await backend.classify_request({})
+		await backend.evaluate_event({"event_name": "knowledge_updated"})
+		assert agent.log_llm_usage.call_count == 2
+		for call in agent.log_llm_usage.call_args_list:
+			assert call.args[1] == {"prompt_tokens": 200, "completion_tokens": 20, "total_tokens": 220}
+		assert counters["total_tokens"] == 1540
+	asyncio.run(check())
+
+
+def test_orchestrator_applies_backend_decision() -> None:
+	async def check():
+		decision = NotificationDecision(urgency=UrgencyType.LOW, tone=ToneType.CALM,
+			intervention_type=InterventionType.ACT, skill=SkillType.DRIVING,
+			action=ActionType.OPEN_WINDOWS, suggestion_type=SuggestionType.NONE, reason="Explicit request")
+		agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+		agent.logger = Mock()
+		agent.action_manager = SimpleNamespace(message_manager=SimpleNamespace(pending_count=0),
+			registered_action_options="", registered_action_guidance="", registered_actions=frozenset(), handle_decision=Mock())
+		agent.skill_manager = SimpleNamespace(vehicle_action_guidance="Vehicle actions")
+		agent.conversation_history = []
+		agent.speak = AsyncMock()
+		agent.llm_backend = SimpleNamespace(classify_request=AsyncMock(return_value=decision),
+			direct_action_options="open_windows", direct_vehicle_actions=(ActionType.OPEN_WINDOWS,),
+			decision_options={"skill_options": "driving", "tone_options": "calm"})
+		await agent._process_direct_user_input(CarEvent(SkillType.CONVERSATION, "user_input", "Open windows", [], "Open windows"))
+		agent.action_manager.handle_decision.assert_called_once_with(ActionType.OPEN_WINDOWS, {})
+		agent.speak.assert_awaited_once_with("I received the action request.", tone=ToneType.CALM)
+	asyncio.run(check())
 
 
 def test_log_llm_usage_reports_context_window_fill() -> None:
@@ -194,6 +274,7 @@ def test_vehicle_command_matrix_covers_all_direct_actions() -> None:
 		ActionType.ANNOUNCE_INCOMING_MESSAGE,
 		ActionType.ASK_PERMISSION_TO_TALK,
 		ActionType.READ_PENDING_MESSAGES,
+		*MUSIC_ACTIONS,
 	}
 
 	assert {action for _, action in VEHICLE_COMMANDS} == set(ActionType) - excluded_actions
@@ -216,7 +297,7 @@ def test_explicit_vehicle_command_dispatches_matching_action(
 	llm_agent, agent = make_llm_agent(decision)
 	event = CarEvent(SkillType.CONVERSATION, "user_input", command, [], command)
 
-	asyncio.run(llm_agent.process_event(event))
+	asyncio.run(agent.process_event_llm(event))
 
 	assert llm_agent.direct_action_crew.inputs["user_input"] == command
 	assert expected_action.value in llm_agent.direct_action_crew.inputs["action_options"]
@@ -238,9 +319,48 @@ def make_meeting_agent(confirmed: bool):
 	agent._assistant_status = AssistantStatus.IDLE
 	agent.set_assistant_status = Mock()
 	agent.speak = AsyncMock()
-	agent.llm_agent = SimpleNamespace(llm=object())
+	async def generated_reply(event, *, response_context):
+		await agent.speak("A contextual response generated by the LLM.")
+	agent.stream_user_response = AsyncMock(side_effect=generated_reply)
+	agent.knowledge_context_provider = lambda: ["The driver is late for a meeting."]
+	agent.llm_backend = SimpleNamespace(llm=object(), meeting_reply_context=LLMBackend.meeting_reply_context)
 	agent.opt = SimpleNamespace(crewai_verbose=False)
 	return agent
+
+
+def test_invalid_confirmation_keeps_meeting_pending():
+	async def check():
+		agent = make_meeting_agent(confirmed=False)
+		agent.interpret_confirmation = AsyncMock(return_value=None)
+		agent.action_manager.awaiting_confirmation = True
+		assert await agent.maybe_handle_meeting_confirmation("yes, please")
+		assert agent.action_manager.awaiting_confirmation
+		assert agent.action_manager._meeting_task is None
+		agent.stream_user_response.assert_awaited_once()
+		assert '"confirmed": null' in agent.stream_user_response.call_args.kwargs["response_context"][1]
+	asyncio.run(check())
+
+
+@pytest.mark.parametrize("content, expected", [
+	('{"confirmed": true}', True), ('{"confirmed": false}', False),
+	('', None), ('{}', None), ('{"confirmed": "false"}', None),
+])
+def test_confirmation_backend_requires_boolean_output(content, expected):
+	async def check():
+		backend = LLMBackend.__new__(LLMBackend)
+		backend.opt = ConfigAssistant()
+		backend.on_usage = Mock()
+		backend.logger = Mock()
+		create = AsyncMock(return_value=SimpleNamespace(usage=None, choices=[
+			SimpleNamespace(message=SimpleNamespace(content=content))
+		]))
+		backend.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+		result = await backend.interpret_confirmation("yes, please", [{"role": "assistant", "content": "Should I attend the meeting?"}])
+		assert result is expected
+		assert create.call_args.kwargs["reasoning_effort"] == "none"
+		assert create.call_args.kwargs["max_tokens"] == 64
+		assert create.call_args.kwargs["response_format"]["json_schema"]["schema"]["required"] == ["confirmed"]
+	asyncio.run(check())
 
 
 def test_meeting_permission_yes_starts_meeting_and_speaks_summary() -> None:
@@ -269,11 +389,59 @@ def test_meeting_permission_yes_starts_meeting_and_speaks_summary() -> None:
 			AssistantStatus.BACKGROUND_TASK_RUNNING
 		)
 		assert [call.args[0] for call in agent.speak.await_args_list] == [
-			"Sure, I will sit in and brief you as soon as it wraps up.",
+			"A contextual response generated by the LLM.",
 			"We agreed on a project timeline.",
 		]
+		assert '"confirmed": true' in agent.stream_user_response.call_args.kwargs["response_context"][1]
+		assert agent.stream_user_response.call_args.args[0].context == ["The driver is late for a meeting."]
 
 	asyncio.run(run_flow())
+
+
+@pytest.mark.parametrize("action", [
+	ActionType.PLAY_MUSIC, ActionType.PAUSE_MUSIC, ActionType.RESUME_MUSIC,
+	ActionType.NEXT_MUSIC, ActionType.STOP_MUSIC,
+])
+def test_music_commands_use_music_handler_not_vehicle_controls(action) -> None:
+	async def check():
+		decision = NotificationDecision(
+			urgency=UrgencyType.LOW, tone=ToneType.CALM,
+			intervention_type=InterventionType.ACT, skill=SkillType.CONVERSATION,
+			action=action, suggestion_type=SuggestionType.NONE, reason="Explicit music request",
+		)
+		llm_agent, agent = make_llm_agent(decision)
+		agent.handle_music_action = AsyncMock()
+		agent.action_manager._music_manager = cast(Any, SimpleNamespace(execute=agent.handle_music_action))
+		event = CarEvent(SkillType.CONVERSATION, "user_input", "Music command", [], "Music command")
+		await agent._process_direct_user_input(event)
+		if agent.voice_response_task is not None:
+			await agent.voice_response_task
+		agent.handle_music_action.assert_awaited_once_with(action, event.user_input, agent=agent)
+		agent.action_manager.handle_decision.assert_not_called()
+		assert "play_music" in llm_agent.direct_action_crew.inputs["action_options"]
+	asyncio.run(check())
+
+
+def test_registered_action_dispatch_is_generic_and_receives_conversation_history() -> None:
+	async def check():
+		decision = NotificationDecision(
+			urgency=UrgencyType.LOW, tone=ToneType.CALM,
+			intervention_type=InterventionType.ACT, skill=SkillType.CONVERSATION,
+			action=ActionType.START_RADIO, suggestion_type=SuggestionType.NONE, reason="Contextual request",
+		)
+		llm_agent, agent = make_llm_agent(decision)
+		agent.conversation_history = [{"role": "assistant", "content": "Would you like the radio?"}]
+		handler = AsyncMock()
+		agent.action_manager.register_actions([ActionType.START_RADIO], handler, "Use the conversation for radio replies.")
+		event = CarEvent(SkillType.CONVERSATION, "user_input", "Yes please", [], "Yes please")
+		await agent._process_direct_user_input(event)
+		await agent.voice_response_task
+		handler.assert_awaited_once_with(ActionType.START_RADIO, "Yes please")
+		inputs = llm_agent.direct_action_crew.inputs
+		assert "Would you like the radio?" in inputs["conversation_history"]
+		assert "Use the conversation for radio replies." in inputs["registered_action_guidance"]
+		assert "music_permission_prompt" not in inputs
+	asyncio.run(check())
 
 
 def test_meeting_permission_no_declines_without_starting_meeting() -> None:
@@ -290,8 +458,9 @@ def test_meeting_permission_no_declines_without_starting_meeting() -> None:
 		assert agent.action_manager._meeting_task is None
 		build_crew_mock.assert_not_called()
 		agent.speak.assert_awaited_once_with(
-			"No problem, I will leave the meeting to you."
+			"A contextual response generated by the LLM."
 		)
+		assert '"confirmed": false' in agent.stream_user_response.call_args.kwargs["response_context"][1]
 
 	asyncio.run(run_flow())
 

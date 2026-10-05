@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import structlog
 
-from agents.agents_dataclasses import (
+from data.agents_dataclasses import (
 	ActionType,
 	InterventionType,
 	SkillType,
@@ -16,7 +16,8 @@ from agents.agents_dataclasses import (
 	ToneType,
 	UrgencyType,
 )
-from agents.llm_agent import LLMAgent, NotificationDecision
+from agents.llm_backend import LLMBackend, NotificationDecision
+from agents.automotive_agent import AutomotiveAgent
 from data.events import CarEvent, EventName
 
 
@@ -31,11 +32,12 @@ class FakeCrew:
 
 
 def make_llm_agent(decision: NotificationDecision):
-	agent = SimpleNamespace(
+	agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+	agent.__dict__.update(vars(SimpleNamespace(
 		maybe_handle_meeting_confirmation=AsyncMock(return_value=False),
 		log_llm_usage=Mock(),
 		cancel_voice_response=Mock(),
-		action_manager=SimpleNamespace(handle_decision=Mock()),
+		action_manager=SimpleNamespace(handle_decision=Mock(), message_manager=SimpleNamespace(simulation_stopped=Mock(return_value=False))),
 		speak=AsyncMock(),
 		stream_user_response=AsyncMock(),
 		voice_response_task=None,
@@ -45,10 +47,13 @@ def make_llm_agent(decision: NotificationDecision):
 				"increase or decrease cabin temperature or fan speed by one step"
 			),
 		),
-	)
-	llm_agent = LLMAgent.__new__(LLMAgent)
+	)))
+	agent.logger = structlog.get_logger()
+	agent.recent_notifications = []
+	agent.duplicate_suppression_enabled = False
+	llm_agent = LLMBackend.__new__(LLMBackend)
 	llm_agent.logger = structlog.get_logger()
-	llm_agent.agent = cast(Any, agent)
+	llm_agent.on_usage = agent.log_llm_usage
 	llm_agent.crew = cast(Any, FakeCrew(decision))
 	llm_agent.llm = cast(Any, SimpleNamespace(temperature=0.7))
 	llm_agent.decision_options = {
@@ -56,7 +61,7 @@ def make_llm_agent(decision: NotificationDecision):
 		"tone_options": "calm, discreet",
 	}
 	llm_agent.silent_decision_guidance = "silent guidance"
-	llm_agent.recent_notifications = []
+	agent.llm_backend = llm_agent
 	return llm_agent, agent
 
 
@@ -83,7 +88,7 @@ def test_dangerous_object_update_warns_driver_and_locks_unlocked_doors() -> None
 		],
 	)
 
-	asyncio.run(llm_agent.process_event(event))
+	asyncio.run(agent.process_event_llm(event))
 
 	assert llm_agent.crew.inputs["changed_facts"] == (
 		"- A dangerous object is detected around the vehicle."
@@ -129,7 +134,7 @@ def test_high_fatigue_or_low_attention_suggests_a_break(
 		[f"Changed just now: {changed_fact}", supporting_context],
 	)
 
-	asyncio.run(llm_agent.process_event(event))
+	asyncio.run(agent.process_event_llm(event))
 
 	assert llm_agent.crew.inputs["skill_instructions"] == "wellbeing instructions"
 	assert llm_agent.crew.inputs["changed_facts"] == f"- {changed_fact}"
@@ -219,7 +224,7 @@ def test_adas_profile_requires_persistent_attention_or_fatigue_while_moving(
 		],
 	)
 
-	asyncio.run(llm_agent.process_event(event))
+	asyncio.run(agent.process_event_llm(event))
 
 	agent.speak.assert_awaited_once_with(warning, tone=ToneType.SERIOUS)
 	if expected_action is ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE:
@@ -292,7 +297,7 @@ def test_dangerous_driver_activity_warns_and_applies_supported_action(
 		[f"Changed just now: {changed_fact}", "The vehicle is moving."],
 	)
 
-	asyncio.run(llm_agent.process_event(event))
+	asyncio.run(agent.process_event_llm(event))
 
 	assert llm_agent.crew.inputs["changed_facts"] == f"- {changed_fact}"
 	assert llm_agent.crew.inputs["context"] == "- The vehicle is moving."
@@ -332,7 +337,7 @@ def test_children_out_of_place_triggers_high_priority_safety_warning() -> None:
 		],
 	)
 
-	asyncio.run(llm_agent.process_event(event))
+	asyncio.run(agent.process_event_llm(event))
 
 	assert llm_agent.crew.inputs["changed_facts"] == (
 		"- Children are out of place near the vehicle."

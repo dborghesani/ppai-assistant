@@ -21,6 +21,8 @@ class WebUIServer:
         "stopFriendMessageSimulation",
         "intChanged",
         "minimumUrgencyChanged",
+        "musicConsent",
+        "musicControl",
         "setScenario",
         "setDriverPreference",
         "startConversation",
@@ -67,6 +69,7 @@ class WebUIServer:
             "knowledgeUpdated",
             "knowledgeChanged",
             "friendMessageSimulationChanged",
+            "musicUpdated",
         ):
             bridge.on(
                 event_name,
@@ -123,6 +126,8 @@ class WebUIServer:
                     "vehicleState": self.bridge.dumpVehicleState(),
                     "detectedObjectsState": self.bridge.dumpDetectedObjectsState(),
                     "driverPreferences": self.bridge.dumpDriverPreferences(),
+                    "musicState": getattr(self.bridge, "dumpMusicState", lambda: {"status": "disabled"})(),
+                    "musicDuckingFactor": getattr(getattr(self.bridge, "opt", None), "music_ducking_factor", 0.25),
                     "sttEnabled": bool(
                         self.bridge.stt_manager is not None
                         and self.bridge.stt_manager.enabled

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import laya
 import structlog
 
-from agents.agents_dataclasses import (
+from data.agents_dataclasses import (
     ActionType,
     AssistantStatus,
     InterventionType,
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from agents.automotive_agent import AutomotiveAgent
 
 
-class LayaAgent:
+class LayaBackend:
     def __init__(self, agent: "AutomotiveAgent"):
         self.agent = agent
         self.logger = structlog.get_logger()

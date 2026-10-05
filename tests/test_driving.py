@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import structlog
 
-from agents.agents_dataclasses import (
+from data.agents_dataclasses import (
 	ActionType,
 	InterventionType,
 	SkillType,
@@ -16,7 +16,8 @@ from agents.agents_dataclasses import (
 	ToneType,
 	UrgencyType,
 )
-from agents.llm_agent import LLMAgent, NotificationDecision
+from agents.llm_backend import LLMBackend, NotificationDecision
+from agents.automotive_agent import AutomotiveAgent
 from data.events import CarEvent
 
 
@@ -45,11 +46,12 @@ def test_aggressive_driving_style_warns_driver() -> None:
 	driving_instructions = (
 		Path(__file__).resolve().parents[1] / "skills" / "driving.md"
 	).read_text(encoding="utf-8")
-	agent = SimpleNamespace(
+	agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+	agent.__dict__.update(vars(SimpleNamespace(
 		maybe_handle_meeting_confirmation=AsyncMock(return_value=False),
 		log_llm_usage=Mock(),
 		cancel_voice_response=Mock(),
-		action_manager=SimpleNamespace(handle_decision=Mock()),
+		action_manager=SimpleNamespace(handle_decision=Mock(), message_manager=SimpleNamespace(simulation_stopped=Mock(return_value=False))),
 		speak=AsyncMock(),
 		stream_user_response=AsyncMock(),
 		voice_response_task=None,
@@ -57,10 +59,13 @@ def test_aggressive_driving_style_warns_driver() -> None:
 			get_skill=Mock(return_value=driving_instructions),
 			vehicle_action_guidance="vehicle action reference",
 		),
-	)
-	llm_agent = LLMAgent.__new__(LLMAgent)
+	)))
+	agent.logger = structlog.get_logger()
+	agent.recent_notifications = []
+	agent.duplicate_suppression_enabled = False
+	llm_agent = LLMBackend.__new__(LLMBackend)
 	llm_agent.logger = structlog.get_logger()
-	llm_agent.agent = cast(Any, agent)
+	llm_agent.on_usage = agent.log_llm_usage
 	llm_agent.crew = cast(Any, FakeCrew(decision))
 	llm_agent.llm = cast(Any, SimpleNamespace(temperature=0.7))
 	llm_agent.decision_options = {
@@ -72,7 +77,7 @@ def test_aggressive_driving_style_warns_driver() -> None:
 		"suggestion_options": "none, calm_driving",
 	}
 	llm_agent.silent_decision_guidance = "silent guidance"
-	llm_agent.recent_notifications = []
+	agent.llm_backend = llm_agent
 	event = CarEvent(
 		SkillType.DRIVING,
 		"knowledge_updated",
@@ -82,7 +87,7 @@ def test_aggressive_driving_style_warns_driver() -> None:
 		],
 	)
 
-	asyncio.run(llm_agent.process_event(event))
+	asyncio.run(agent.process_event_llm(event))
 
 	crew = cast(Any, llm_agent.crew)
 	assert "excessively aggressive" in crew.inputs["skill_instructions"]

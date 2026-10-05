@@ -1,5 +1,6 @@
 const CONTROL_GROUPS = {
   driver: [
+    { title: "Driver name", type: "text", cls: "DriverPreferences", key: "driver_name", value: "David", maxLength: 80 },
     { title: "Activity", type: "options", cls: "DriverPhysicalState", key: "activity", value: "Idle", options: ["Idle", "Talking", "Driving", "Eating", "On the phone", "Sleeping", "About to exit", "Children out of place"] },
     { title: "Emotion", type: "ranges", cls: "DriverEmotionState", controls: [
       ["Angry", "angry", 0, 1, 0, .01, "decimal"], ["Disgust", "disgust", 0, 1, 0, .01, "decimal"],
@@ -175,6 +176,123 @@ let friendSimulationActive = false;
 let permissionReturnRadius = null;
 let permissionReturnTimer = null;
 let toastTimer;
+const musicAudio = document.querySelector("#music-audio");
+let musicQueue = [];
+let musicTrackIndex = 0;
+let musicDuckingFactor = 0.25;
+let musicPlaylistTitle = "Jamendo";
+
+function updateMusicVolume() {
+  const configured = Number(controlState["VehicleState.audio_volume"] ?? 20);
+  const base = Math.max(0, Math.min(100, Number.isFinite(configured) ? configured : 20)) / 100;
+  const ducked = assistantStatus === "talking" || speakingTone !== null;
+  musicAudio.volume = base * (ducked ? musicDuckingFactor : 1);
+}
+
+function musicLink(selector, url) {
+  const link = document.querySelector(selector);
+  link.hidden = !url;
+  if (url) link.href = url;
+  else link.removeAttribute("href");
+}
+
+function syncMusicTransport() {
+  const playing = !musicAudio.paused && Boolean(musicAudio.src);
+  const button = document.querySelector("#music-play");
+  button.innerHTML = playing ? "&#10074;&#10074;" : "&#9654;";
+  button.title = playing ? "Pause music" : "Play music";
+  button.setAttribute("aria-label", button.title);
+  document.querySelector("#music-next").disabled = musicTrackIndex + 1 >= musicQueue.length;
+}
+
+async function playMusicTrack(index) {
+  if (!musicQueue[index]) return;
+  musicTrackIndex = index;
+  const track = musicQueue[index];
+  musicAudio.src = track.audio;
+  document.querySelector("#music-track-title").textContent = track.title;
+  document.querySelector("#music-artist").textContent = track.artist;
+  const cover = document.querySelector("#music-cover");
+  cover.hidden = !track.image;
+  if (track.image) cover.src = track.image;
+  else cover.removeAttribute("src");
+  musicLink("#music-source", track.url);
+  musicLink("#music-license", track.license);
+  updateMusicVolume();
+  try {
+    await musicAudio.play();
+    document.querySelector("#music-status").textContent = "Playing";
+  } catch (_) {
+    document.querySelector("#music-status").textContent = "Ready";
+    showToast("Tap play to start music");
+  }
+  syncMusicTransport();
+}
+
+async function controlMusic(command) {
+  if (command === "stop") {
+    musicAudio.pause();
+    musicAudio.removeAttribute("src");
+    musicAudio.load();
+    musicQueue = [];
+    document.querySelector("#music-proposal").hidden = true;
+    document.querySelector("#music-transport").hidden = true;
+    document.querySelector("#music-status").textContent = "Stopped";
+    musicLink("#music-source", "");
+    musicLink("#music-license", "");
+  } else if (command === "pause") {
+    musicAudio.pause();
+    document.querySelector("#music-status").textContent = "Paused";
+  } else if (command === "resume" && musicQueue.length) {
+    if (!musicAudio.getAttribute("src")) return playMusicTrack(musicTrackIndex);
+    try { await musicAudio.play(); } catch (_) { showToast("Tap play to resume music"); }
+  } else if (command === "next") {
+    await playMusicTrack(musicTrackIndex + 1);
+  }
+  syncMusicTransport();
+}
+
+function renderMusic(state) {
+  if (!state) return;
+  if (state.status === "control") {
+    controlMusic(state.command);
+    return;
+  }
+  document.querySelector("#music-panel").hidden = state.status === "disabled";
+  document.querySelector("#music-proposal").hidden = state.status !== "proposal";
+  if (state.status === "proposal") {
+    document.querySelector("#music-proposal span").textContent = state.permission_question ?? "";
+  }
+  const statuses = {not_configured: "Not configured", loading: "Finding a playlist", empty: "No matching music", error: "Music unavailable", idle: "", ready: "Ready", proposal: "Awaiting your reply"};
+  document.querySelector("#music-status").textContent = statuses[state.status] ?? "";
+  if (state.title) document.querySelector("#music-title").textContent = state.title;
+  else document.querySelector("#music-title").textContent = musicPlaylistTitle;
+  if (state.status === "ready" && state.autoplay && state.tracks?.length) {
+    musicQueue = state.tracks;
+    musicPlaylistTitle = state.title;
+    document.querySelector("#music-transport").hidden = false;
+    playMusicTrack(0);
+  }
+}
+
+musicAudio.addEventListener("ended", () => {
+  if (musicTrackIndex + 1 < musicQueue.length) playMusicTrack(musicTrackIndex + 1);
+  else { document.querySelector("#music-status").textContent = "Finished"; syncMusicTransport(); }
+});
+musicAudio.addEventListener("error", () => {
+  if (musicAudio.getAttribute("src")) showToast("This track could not be played");
+  syncMusicTransport();
+});
+musicAudio.addEventListener("play", syncMusicTransport);
+musicAudio.addEventListener("pause", syncMusicTransport);
+document.querySelector("#music-accept").addEventListener("click", () => bridge.call("musicConsent", true).catch(() => showToast("Music permission could not be sent")));
+document.querySelector("#music-decline").addEventListener("click", () => bridge.call("musicConsent", false).catch(() => {}));
+document.querySelector("#music-play").addEventListener("click", () => controlMusic(musicAudio.paused ? "resume" : "pause"));
+document.querySelector("#music-next").addEventListener("click", () => controlMusic("next"));
+document.querySelector("#music-stop").addEventListener("click", () => {
+  controlMusic("stop");
+  bridge.call("musicControl", "stop").catch(() => {});
+});
 
 function controlStateKey(className, key) {
   return `${className}.${key}`;
@@ -420,6 +538,10 @@ function formatValue(value, format) {
 
 function renderControls(tabName) {
   controlContent.innerHTML = CONTROL_GROUPS[tabName].map((group, groupIndex) => {
+    if (group.type === "text") {
+      const current = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
+      return `<section class="control-section" data-type="text" data-class="${group.cls}"><label class="preference-field" for="${tabName}-${group.key}"><span>${group.title}</span><input id="${tabName}-${group.key}" type="text" data-key="${group.key}" maxlength="${group.maxLength}" value="${escapeHtml(current)}" autocomplete="given-name"></label></section>`;
+    }
     if (group.type === "options") {
       const name = `${tabName}-${groupIndex}-${group.key}`;
       const selectedValue = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
@@ -496,6 +618,9 @@ function updateControlsInPlace(className, values) {
       } else if (section.dataset.type === "textarea") {
         const inputElement = section.querySelector("textarea");
         if (inputElement) inputElement.value = value ?? "";
+      } else if (section.dataset.type === "text") {
+        const inputElement = section.querySelector('input[type="text"]');
+        if (inputElement) inputElement.value = value ?? "";
       }
     });
   });
@@ -526,6 +651,7 @@ controlContent.addEventListener("input", event => {
     const value = Number(event.target.value);
     event.target.nextElementSibling.value = formatValue(value, event.target.dataset.format);
     controlState[controlStateKey(event.target.dataset.class, event.target.dataset.key)] = value;
+    if (event.target.dataset.class === "VehicleState" && event.target.dataset.key === "audio_volume") updateMusicVolume();
   }
 });
 controlContent.addEventListener("change", event => {
@@ -543,7 +669,7 @@ controlContent.addEventListener("change", event => {
     controlState[controlStateKey(section.dataset.class, target.dataset.key)] = target.checked;
     target.closest(".switch-control").querySelector("[data-state]").textContent = target.checked ? control[3] : control[4];
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
-  } else if (target.matches("textarea[data-key]")) {
+  } else if (target.matches('textarea[data-key], input[type="text"][data-key]')) {
     const section = target.closest(".control-section");
     controlState[controlStateKey(section.dataset.class, target.dataset.key)] = target.value;
     bridge.call("setDriverPreference", target.dataset.key, target.value).catch(() => {});
@@ -750,6 +876,10 @@ bridge.on("ready", data => {
   renderKnowledge(data.knowledge);
   rememberControlState("DriverPreferences", data.driverPreferences);
   rememberControlState("VehicleState", data.vehicleState);
+  const ducking = Number(data.musicDuckingFactor);
+  musicDuckingFactor = Number.isFinite(ducking) && ducking > 0 && ducking <= 1 ? ducking : 0.25;
+  updateMusicVolume();
+  renderMusic(data.musicState);
   rememberControlState("DetectedObjects", data.detectedObjectsState);
   setFriendSimulation(Boolean(data.friendMessageSimulationActive));
   duplicateSuppressionToggle.checked = Boolean(data.duplicateSuppressionEnabled);
@@ -763,15 +893,17 @@ bridge.on("sttEnabledChanged", enabled => {
 });
 bridge.on("responseUpdated", data => updateAssistantMessage(data[0]));
 bridge.on("responseReceived", data => updateAssistantMessage(data[0], true));
-bridge.on("speakingToneChanged", data => setSpeakingTone(data[0]));
+bridge.on("speakingToneChanged", data => { setSpeakingTone(data[0]); updateMusicVolume(); });
 bridge.on("incomingMessageClassified", data => setIncomingMessageClassification(data[0]));
-bridge.on("assistantStatusChanged", data => setAssistantStatus(data[0]));
+bridge.on("assistantStatusChanged", data => { setAssistantStatus(data[0]); updateMusicVolume(); });
+bridge.on("musicUpdated", data => renderMusic(data[0]));
 bridge.on("friendMessageSimulationChanged", data => setFriendSimulation(Boolean(data[0])));
 bridge.on("userSpeechReceived", data => addMessage("user", data[0]));
 bridge.on("knowledgeUpdated", data => renderKnowledge(data[0]));
 bridge.on("knowledgeChanged", data => renderChangedEvents(data[0]));
 bridge.on("vehicleStateChanged", data => {
   const changed = rememberControlState("VehicleState", data[0]);
+  updateMusicVolume();
   if (changed) updateControlsInPlace("VehicleState", data[0]);
 });
 bridge.on("detectedObjectsStateChanged", data => {

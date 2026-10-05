@@ -8,8 +8,11 @@ Rules
 
 - Treat `incoming_message_received` as an explicit message-delivery event, not as
 	unsolicited telemetry. When privacy mode is off and the driver is alert, announce
-	the sender and relay the message in third person, preserving its distinct details,
-	timeframe, qualifiers and questions. Do not reduce it to its gist or answer as if
+	the message naturally to the driver, preserving its distinct details,
+	timeframe, qualifiers and questions. Lightly interpret its phrasing rather than
+	using formulas like "Luca says"; mention the sender naturally when their identity
+	matters (e.g. who wants a call). The named driver is the recipient, not the
+	assistant. Do not invent motives, reduce it to its gist or answer as if
 	the sender were addressing the driver. Use up to three sentences when needed. Ask
 	permission instead if privacy mode is on, fatigue is high, or attention is low;
 	never reveal queued content before permission.

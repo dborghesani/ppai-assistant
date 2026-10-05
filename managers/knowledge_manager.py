@@ -7,9 +7,9 @@ from typing import Any, Callable, List, Mapping, get_args, get_type_hints
 import structlog
 from config import ConfigAssistant
 from data import assistant_dataclasses
-from data.database_manager import DatabaseManager
+from managers.database_manager import DatabaseManager
 from data.events import CarEvent, EventName
-from agents.agents_dataclasses import SkillType
+from data.agents_dataclasses import SkillType
 
 
 @dataclass(frozen=True)
@@ -182,6 +182,7 @@ class KnowledgeManager:
             if value
             else "The driver has not specified music preferences."
         ),
+        ("DriverPreferences", "driver_name"): lambda value: f"The driver's name is {value}.",
         ("DriverPhysicalState", "activity"): lambda value: {
             "Idle": "No distracting driver activity is detected.",
             "About to exit": "The driver is about to exit the vehicle.",

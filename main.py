@@ -19,8 +19,8 @@ import structlog
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
 from crewai_core.printer import set_suppress_console_output
-from data.database_manager import DatabaseManager
-from data.source_manager import SourceManager
+from managers.database_manager import DatabaseManager
+from managers.source_manager import SourceManager
 from managers.knowledge_manager import KnowledgeManager
 from omegaconf import OmegaConf
 from ui.bridge import VehicleBridge

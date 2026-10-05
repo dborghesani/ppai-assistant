@@ -34,6 +34,14 @@ class ConfigAssistant:
     rag_context_max_chars: int = 6000
     rag_timeout: float = 120.0
 
+    music_enabled: bool = True
+    jamendo_client_id: str = ""
+    music_timeout: float = 30.0
+    music_cooldown_seconds: float = 300.0
+    music_min_emotion: float = 0.4
+    music_track_limit: int = 15
+    music_ducking_factor: float = 0.25
+
     data_websocket_url: str = "ws://localhost:4545/stream"
     data_replay_folder: str = ""
 

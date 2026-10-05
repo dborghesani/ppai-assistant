@@ -30,7 +30,7 @@ from data.assistant_dataclasses import (
     VehicleState,
     VisionObject,
 )
-from data.mqtt_thread import MqttThreadClient
+from managers.mqtt_thread import MqttThreadClient
 
 
 class SourceManager:

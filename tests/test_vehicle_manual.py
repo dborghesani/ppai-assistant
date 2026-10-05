@@ -88,11 +88,23 @@ def test_invalid_chunk_configuration():
         VehicleManualManager(ConfigAssistant(rag_chunk_words=10, rag_chunk_overlap_words=10))
 
 
+def test_response_source_is_structured_and_defaults_to_general():
+    from agents.llm_backend import NotificationDecision, ResponseSource
+    payload = {"urgency": "none", "tone": "calm", "intervention_type": "none", "skill": "none",
+               "action": "none", "suggestion_type": "none", "reason": "Informational question"}
+    assert NotificationDecision(**payload).response_source is ResponseSource.GENERAL
+    assert NotificationDecision(**payload, response_source="vehicle_manual").response_source is ResponseSource.VEHICLE_MANUAL
+    with pytest.raises(ValueError):
+        NotificationDecision(**payload, response_source="invented_source")
+
+
 @pytest.mark.parametrize("rag_enabled", [False, True])
-def test_manual_passages_reach_ollama_without_entering_history(rag_enabled):
-    from agents.agents_dataclasses import AssistantStatus, SkillType, ToneType
+@pytest.mark.parametrize("manual_question", [False, True])
+def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manual_question):
+    from data.agents_dataclasses import AssistantStatus, SkillType, ToneType
     from agents.automotive_agent import AutomotiveAgent
     from data.events import CarEvent
+    from agents.llm_backend import ResponseSource
 
     class FakeStream:
         async def __aiter__(self):
@@ -112,6 +124,12 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled):
         agent.manual_manager = SimpleNamespace(context_for=AsyncMock(
             return_value="Source: manual.pdf; PDF page 1\nUse the steering wheel button."
         )) if rag_enabled else None
+        agent.response_context_providers = {ResponseSource.VEHICLE_MANUAL: VehicleManualManager.unavailable_response_context}
+        if agent.manual_manager is not None:
+            async def manual_context(question, history):
+                context = await agent.manual_manager.context_for(question, history)
+                return VehicleManualManager.RESPONSE_INSTRUCTIONS, f"Retrieved vehicle manual passages:\n{context}"
+            agent.response_context_providers[ResponseSource.VEHICLE_MANUAL] = manual_context
         create = AsyncMock(return_value=FakeStream())
         agent.voice_llm = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         agent._assistant_status = AssistantStatus.IDLE
@@ -121,16 +139,28 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled):
         agent.on_response = Mock()
         agent.tts_manager = SimpleNamespace(speak=AsyncMock())
         agent.log_llm_usage = Mock()
+        from agents.llm_backend import LLMBackend
+        agent.llm_backend = LLMBackend.__new__(LLMBackend)
+        agent.llm_backend.opt = agent.opt
+        agent.llm_backend.client = agent.voice_llm
+        agent.llm_backend.on_usage = agent.log_llm_usage
+        agent.llm_backend.logger = Mock()
         event = CarEvent(SkillType.CONVERSATION, "user_input", "How does cruise control work?", [], "How does cruise control work?")
-        await agent.stream_user_response(event)
+        source = ResponseSource.VEHICLE_MANUAL if manual_question else ResponseSource.GENERAL
+        await agent.prepare_user_response(event, source)
         messages = create.call_args.kwargs["messages"]
         assert create.call_args.kwargs["reasoning_effort"] == "none"
         assert create.call_args.kwargs["max_tokens"] == agent.opt.max_tokens
-        assert ("Retrieved vehicle manual passages" in messages[-1]["content"]) is rag_enabled
-        if rag_enabled:
+        assert ("Retrieved vehicle manual passages" in messages[-1]["content"]) is (rag_enabled and manual_question)
+        if rag_enabled and manual_question:
             assert "PDF page 1" in messages[-1]["content"]
             assert "never invent" in messages[0]["content"]
             agent.manual_manager.context_for.assert_awaited_once()
+        elif rag_enabled:
+            agent.manual_manager.context_for.assert_not_awaited()
+        if manual_question and not rag_enabled:
+            assert "No verified manual passages" in messages[-1]["content"]
+            assert "never invent" in messages[0]["content"]
         assert agent.conversation_history[0]["content"] == event.user_input
         assert "Retrieved" not in str(agent.conversation_history)
         agent.tts_manager.speak.assert_awaited_once_with("Use the steering wheel button.")
@@ -145,7 +175,7 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled):
     ('{"tone": "unknown"}', "calm"),
 ])
 def test_tone_classification_requests_schema_without_reasoning(content, expected_tone):
-    from agents.agents_dataclasses import SkillType
+    from data.agents_dataclasses import SkillType
     from agents.automotive_agent import AutomotiveAgent
     from data.events import CarEvent
 
@@ -160,6 +190,12 @@ def test_tone_classification_requests_schema_without_reasoning(content, expected
         create = AsyncMock(return_value=response)
         agent.voice_llm = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         event = CarEvent(SkillType.CONVERSATION, "user_input", "How do I activate cruise control?", [], "How do I activate cruise control?")
+        from agents.llm_backend import LLMBackend
+        agent.llm_backend = LLMBackend.__new__(LLMBackend)
+        agent.llm_backend.opt = agent.opt
+        agent.llm_backend.client = agent.voice_llm
+        agent.llm_backend.on_usage = agent.log_llm_usage
+        agent.llm_backend.logger = Mock()
         tone = await agent._classify_conversation_tone(event, "")
         assert tone.value == expected_tone
         assert create.call_args.kwargs["reasoning_effort"] == "none"

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import structlog
-from agents.agents_dataclasses import ToneType
+from data.agents_dataclasses import ToneType
 from voice import moshi_compat  # noqa: F401  # must run before importing Moshi
 from voice.gpu_lock import GPU_LOCK
 from voice.hf_cache import (

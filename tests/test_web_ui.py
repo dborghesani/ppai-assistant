@@ -6,7 +6,7 @@ from typing import Any, cast
 from unittest.mock import Mock
 
 from aiohttp.test_utils import TestClient, TestServer
-from agents.agents_dataclasses import AssistantStatus
+from data.agents_dataclasses import AssistantStatus
 from agents.automotive_agent import AutomotiveAgent
 from ui.bridge import VehicleBridge
 from ui.web_server import WebUIServer
@@ -311,7 +311,13 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
         agent.voice_llm = SimpleNamespace(
             chat=SimpleNamespace(completions=SimpleNamespace(create=create))
         )
-        agent.opt = SimpleNamespace(ollama_model="ollama/test")
+        agent.opt = SimpleNamespace(ollama_model="ollama/test", max_tokens=1024)
+        from agents.llm_backend import LLMBackend
+        agent.llm_backend = LLMBackend.__new__(LLMBackend)
+        agent.llm_backend.opt = agent.opt
+        agent.llm_backend.client = agent.voice_llm
+        agent.llm_backend.on_usage = agent.log_llm_usage
+        agent.llm_backend.logger = Mock()
         agent.tts_manager = FakeTTS()
         agent.on_response_update = lambda text: order.append(("ui", text))
         agent.on_response = lambda text: order.append(("final", text.strip()))

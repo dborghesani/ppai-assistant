@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any
 import quaternion
 
-from agents.agents_dataclasses import SkillType
+from data.agents_dataclasses import SkillType
 
 
 def knowledge_field(
@@ -334,8 +334,24 @@ class DriverPhysicalState:
     )  # [0.0, 1.0]
 
 
+DEFAULT_MUSIC_PREFERENCE = (
+    "I enjoy 1970s rock, Radiohead, Zero 7 and classical music. "
+    "When happy, choose warm, upbeat 1970s-style rock. When sad or reflective, "
+    "choose gentle alternative rock with Radiohead-like textures, not darker music. "
+    "When tense, angry or afraid, choose mellow downtempo inspired by Zero 7, "
+    "or calm classical piano and strings. When surprised, choose spacious instrumental music. "
+    "Artists are style references: I prefer themed playlists."
+)
+
+
 @dataclass
 class DriverPreferences:
+    driver_name: str | None = knowledge_field(
+        default="David",
+        value_kind="category",
+        notify_on_change=False,
+        skills=(SkillType.CONVERSATION,),
+    )
     preferred_cabin_temperature: float | None = knowledge_field(
         default=22.0,
         value_kind="category",
@@ -343,7 +359,7 @@ class DriverPreferences:
         skills=(SkillType.CONVERSATION, SkillType.WELLBEING),
     )
     preferred_music: str | None = knowledge_field(
-        default=None,
+        default=DEFAULT_MUSIC_PREFERENCE,
         value_kind="category",
         notify_on_change=False,
         skills=(SkillType.CONVERSATION, SkillType.WELLBEING),
@@ -352,12 +368,12 @@ class DriverPreferences:
 
 @dataclass
 class DriverEmotionState:
-    angry: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
-    disgust: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
-    fear: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
-    happy: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
-    sad: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
-    surprise: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
+    angry: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
+    disgust: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
+    fear: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
+    happy: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
+    sad: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
+    surprise: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
     neutral: float | None = knowledge_field(default=1.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
 
 @dataclass

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable
 
 import structlog
-from agents.agents_dataclasses import ActionType, AssistantStatus
+from data.agents_dataclasses import ActionType, AssistantStatus
+from managers.music_manager import MUSIC_ACTIONS, MusicManager
+from managers.message_manager import MessageManager
 from sim.meeting_sim import DEFAULT_TOPIC, build_crew
 
 if TYPE_CHECKING:
@@ -21,6 +23,57 @@ class ActionManager:
         self.awaiting_confirmation = False
         self._meeting_task: asyncio.Task | None = None
         self.on_action: Callable[[ActionType, dict[str, Any]], None] | None = None
+        self._registered_handlers: dict[ActionType, Callable[[ActionType, str], Awaitable[None]]] = {}
+        self._registered_guidance: list[str] = []
+        self._music_manager: MusicManager | None = None
+        self._message_manager: MessageManager | None = None
+        self.register_actions(MUSIC_ACTIONS, self._execute_music_action, MusicManager.ACTION_GUIDANCE)
+
+    @property
+    def music_manager(self) -> MusicManager:
+        if self._music_manager is None:
+            self._music_manager = MusicManager(
+                self.agent.opt, self.agent.voice_llm, self.agent._notify_music_update,
+                history_provider=lambda: self.agent.conversation_history,
+            )
+        return self._music_manager
+
+    async def _execute_music_action(self, action: ActionType, request: str) -> None:
+        await self.music_manager.execute(action, request, agent=self.agent)
+
+    def close(self) -> None:
+        if self._music_manager is not None:
+            self._music_manager.close()
+        if self._message_manager is not None:
+            self._message_manager.close()
+
+    @property
+    def message_manager(self) -> MessageManager:
+        if self._message_manager is None:
+            self._message_manager = MessageManager(self.agent)
+        return self._message_manager
+
+    @property
+    def registered_actions(self) -> frozenset[ActionType]:
+        return frozenset(self._registered_handlers)
+
+    @property
+    def registered_action_options(self) -> str:
+        return "\n".join(f"- {action.value}: {action.description}" for action in ActionType if action in self._registered_handlers)
+
+    @property
+    def registered_action_guidance(self) -> str:
+        return "\n".join(self._registered_guidance)
+
+    def register_actions(self, actions: Iterable[ActionType], handler: Callable[[ActionType, str], Awaitable[None]], guidance: str) -> None:
+        for action in actions:
+            if action in self._registered_handlers:
+                raise ValueError(f"Action already registered: {action.value}")
+            self._registered_handlers[action] = handler
+        self._registered_guidance.append(guidance)
+
+    async def execute_registered_action(self, action: ActionType, request: str) -> None:
+        await self._registered_handlers[action](action, request)
 
     def handle_decision(
         self, action_type: ActionType, parameters: dict[str, Any] | None = None
@@ -31,7 +84,7 @@ class ActionManager:
             ActionType.ANNOUNCE_INCOMING_MESSAGE,
             ActionType.READ_PENDING_MESSAGES,
         }:
-            self.agent.handle_pending_message_action(action_type)
+            self.message_manager.handle_action(action_type)
         elif action_type is ActionType.ASK_ATTEND_MEETING:
             self._mark_awaiting_meeting_confirmation()
         elif action_type is not ActionType.NONE:

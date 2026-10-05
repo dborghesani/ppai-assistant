@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agents.agents_dataclasses import ToneType
+from data.agents_dataclasses import ToneType
 from voice.hf_cache import download_hf_file_cache_first
 from voice.tts_manager import TTSManager
 

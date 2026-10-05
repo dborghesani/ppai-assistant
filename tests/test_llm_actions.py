@@ -61,8 +61,8 @@ def make_llm_agent(decision: NotificationDecision):
         "tone_options": "calm, discreet",
         "action_options": "ask_attend_meeting: attend the meeting",
     }
-    llm_agent.direct_action_options = "increase_temperature: increase temperature"
-    llm_agent.direct_vehicle_actions = (ActionType.INCREASE_TEMPERATURE, ActionType.OPEN_WINDOWS)
+    llm_agent.direct_action_options = "enable_heating: enable cabin heating"
+    llm_agent.direct_vehicle_actions = (ActionType.ENABLE_HEATING, ActionType.OPEN_WINDOWS)
     llm_agent.silent_decision_guidance = "silent guidance"
     llm_agent.duplicate_suppression_enabled = False
     llm_agent.recent_notifications = []
@@ -103,7 +103,7 @@ def test_direct_vehicle_command_dispatches_structured_action():
 
 def test_direct_vehicle_action_is_dispatched_with_unrelated_meeting_context():
     command = "increase the temperature, please"
-    llm_agent, agent = make_llm_agent(make_decision(ActionType.INCREASE_TEMPERATURE))
+    llm_agent, agent = make_llm_agent(make_decision(ActionType.ENABLE_HEATING))
     event = CarEvent(
         SkillType.CONVERSATION,
         "user_input",
@@ -117,7 +117,7 @@ def test_direct_vehicle_action_is_dispatched_with_unrelated_meeting_context():
     asyncio.run(llm_agent.process_event(event))
 
     agent.action_manager.handle_decision.assert_called_once_with(
-        ActionType.INCREASE_TEMPERATURE, {}
+        ActionType.ENABLE_HEATING, {}
     )
     agent.speak.assert_awaited_once_with("I received your request.", tone=ToneType.CALM)
     assert "context" not in llm_agent.direct_action_crew.inputs

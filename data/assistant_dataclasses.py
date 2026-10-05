@@ -12,8 +12,15 @@ def knowledge_field(
     change_ratio: float | None = None,
     notify_on_trend_change: bool = True,
     notify_on_change: bool = True,
-    value_kind: str | None = "magnitude",  # "magnitude" (default), "count", "density" or "category"
+    value_kind: str | None = "magnitude",  # "category" reports the value directly, including numeric values.
     skills: tuple[SkillType, ...] = (),
+    persistence_levels: tuple[str, ...] = (),
+    persistence_seconds: float = 30.0,
+    reference: tuple[str, str] | None = None,
+    reference_tolerance: float = 1.0,
+    reference_extreme_threshold: float = 3.0,
+    reference_label: str | None = None,
+    reference_unit: str | None = None,
 ) -> Any:
     return field(default=default, metadata={
         "knowledge": True,
@@ -23,6 +30,13 @@ def knowledge_field(
         "notify_on_change": notify_on_change,
         "value_kind": value_kind,
         "skills": skills,
+        "persistence_levels": persistence_levels,
+        "persistence_seconds": persistence_seconds,
+        "reference": reference,
+        "reference_tolerance": reference_tolerance,
+        "reference_extreme_threshold": reference_extreme_threshold,
+        "reference_label": reference_label,
+        "reference_unit": reference_unit,
     })
 
 
@@ -68,8 +82,12 @@ class VehicleMotion:
     speed: float | None = knowledge_field(
         default=0.0,
         change_threshold=10.0,
-        notify_on_change=False,
         skills=(SkillType.DRIVING, SkillType.WELLBEING),
+        reference=("DetectedObjects", "traffic_signs.speed_limit"),
+        reference_tolerance=0.0,
+        reference_extreme_threshold=10.0,
+        reference_label="Vehicle speed",
+        reference_unit="km/h",
     )  # km/h, aggregated
     wheel_speed_front_left: float | None = None  # km/h
     wheel_speed_front_right: float | None = None  # km/h
@@ -132,6 +150,7 @@ class VehicleState:
     engine_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     privacy_mode: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
     air_conditioning_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
+    heating_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
     air_recirculation_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
     fan_speed: int | None = knowledge_field(
         default=3,
@@ -152,7 +171,9 @@ class VehicleState:
         default=22.0,
         change_threshold=1.0,
         notify_on_trend_change=False,
-        skills=(SkillType.DRIVING,),
+        skills=(SkillType.WELLBEING,),
+        reference=("DriverPreferences", "preferred_cabin_temperature"),
+        reference_label="Cabin temperature",
     )  # °C
 
 @dataclass
@@ -299,14 +320,24 @@ class DetectedObjects:
 @dataclass
 class DriverPhysicalState:
     activity: str | None = knowledge_field(default="Idle", skills=(SkillType.WELLBEING,))  # Includes "Children out of place".
-    attention_level: float | None = knowledge_field(default=1.0, value_kind="intensity", skills=(SkillType.WELLBEING,))  # [0.0, 1.0]
-    fatigue_level: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))  # [0.0, 1.0]
+    attention_level: float | None = knowledge_field(
+        default=1.0,
+        value_kind="intensity",
+        skills=(SkillType.WELLBEING,),
+        persistence_levels=("low",),
+    )  # [0.0, 1.0]
+    fatigue_level: float | None = knowledge_field(
+        default=0.0,
+        value_kind="intensity",
+        skills=(SkillType.WELLBEING,),
+        persistence_levels=("high", "very high"),
+    )  # [0.0, 1.0]
 
 
 @dataclass
 class DriverPreferences:
     preferred_cabin_temperature: float | None = knowledge_field(
-        default=None,
+        default=22.0,
         value_kind="category",
         notify_on_change=False,
         skills=(SkillType.CONVERSATION, SkillType.WELLBEING),

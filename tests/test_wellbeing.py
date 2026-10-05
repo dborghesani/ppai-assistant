@@ -17,7 +17,7 @@ from agents.agents_dataclasses import (
 	UrgencyType,
 )
 from agents.llm_agent import LLMAgent, NotificationDecision
-from data.events import CarEvent
+from data.events import CarEvent, EventName
 
 
 class FakeCrew:
@@ -75,7 +75,7 @@ def test_dangerous_object_update_warns_driver_and_locks_unlocked_doors() -> None
 	llm_agent, agent = make_llm_agent(decision)
 	event = CarEvent(
 		SkillType.DRIVING,
-		"knowledge_updated",
+		EventName.KNOWLEDGE_UPDATED,
 		{"DetectedObjects.dangerous_objects_around": True},
 		[
 			"Changed just now: A dangerous object is detected around the vehicle.",
@@ -104,12 +104,6 @@ def test_dangerous_object_update_warns_driver_and_locks_unlocked_doors() -> None
 			"Fatigue level is high.",
 			"It is night.",
 		),
-		(
-			"DriverPhysicalState.attention_level",
-			0.2,
-			"Attention level is low.",
-			"Current traffic is heavy.",
-		),
 	],
 )
 def test_high_fatigue_or_low_attention_suggests_a_break(
@@ -130,7 +124,7 @@ def test_high_fatigue_or_low_attention_suggests_a_break(
 	agent.skill_manager.get_skill.return_value = "wellbeing instructions"
 	event = CarEvent(
 		SkillType.WELLBEING,
-		"knowledge_updated",
+		EventName.KNOWLEDGE_UPDATED,
 		{measure: value},
 		[f"Changed just now: {changed_fact}", supporting_context],
 	)
@@ -142,6 +136,98 @@ def test_high_fatigue_or_low_attention_suggests_a_break(
 	assert llm_agent.crew.inputs["context"] == f"- {supporting_context}"
 	agent.speak.assert_awaited_once_with(suggestion, tone=ToneType.CALM)
 	agent.action_manager.handle_decision.assert_not_called()
+
+
+@pytest.mark.parametrize(
+	("measure", "value", "fact", "persisted", "vehicle_moving", "expected_action"),
+	[
+		(
+			"DriverPhysicalState.attention_level",
+			0.2,
+			"Attention level is low.",
+			True,
+			True,
+			ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE,
+		),
+		(
+			"DriverPhysicalState.attention_level",
+			0.2,
+			"Attention level is low.",
+			False,
+			True,
+			ActionType.NONE,
+		),
+		(
+			"DriverPhysicalState.attention_level",
+			0.2,
+			"Attention level is low.",
+			True,
+			False,
+			ActionType.NONE,
+		),
+		(
+			"DriverPhysicalState.fatigue_level",
+			0.7,
+			"Fatigue level is high.",
+			True,
+			True,
+			ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE,
+		),
+	],
+)
+def test_adas_profile_requires_persistent_attention_or_fatigue_while_moving(
+	measure: str,
+	value: float,
+	fact: str,
+	persisted: bool,
+	vehicle_moving: bool,
+	expected_action: ActionType,
+) -> None:
+	changed_fact = (
+		f"{fact} This condition has persisted for at least one minute."
+		if persisted
+		else fact
+	)
+	warning = "Your attention or fatigue needs attention. Please take a break when safe."
+	decision = NotificationDecision(
+		urgency=UrgencyType.HIGH,
+		tone=ToneType.SERIOUS,
+		intervention_type=(
+			InterventionType.ACT
+			if vehicle_moving
+			else InterventionType.SUGGEST
+		),
+		skill=SkillType.WELLBEING,
+		action=expected_action,
+		suggestion_type=(
+			SuggestionType.NONE
+			if vehicle_moving
+			else SuggestionType.TAKE_BREAK
+		),
+		reason="The reported wellbeing condition requires a response.",
+		spoken_message=warning,
+	)
+	llm_agent, agent = make_llm_agent(decision)
+	agent.skill_manager.get_skill.return_value = "wellbeing instructions"
+	event = CarEvent(
+		SkillType.WELLBEING,
+		EventName.KNOWLEDGE_UPDATED,
+		{measure: value},
+		[
+			f"Changed just now: {changed_fact}",
+			"The vehicle is moving." if vehicle_moving else "The vehicle is stationary.",
+		],
+	)
+
+	asyncio.run(llm_agent.process_event(event))
+
+	agent.speak.assert_awaited_once_with(warning, tone=ToneType.SERIOUS)
+	if expected_action is ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE:
+		agent.action_manager.handle_decision.assert_called_once_with(
+			ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE, {}
+		)
+	else:
+		agent.action_manager.handle_decision.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -201,7 +287,7 @@ def test_dangerous_driver_activity_warns_and_applies_supported_action(
 	agent.skill_manager.get_skill.return_value = "wellbeing instructions"
 	event = CarEvent(
 		SkillType.WELLBEING,
-		"knowledge_updated",
+		EventName.KNOWLEDGE_UPDATED,
 		{"DriverPhysicalState.activity": activity},
 		[f"Changed just now: {changed_fact}", "The vehicle is moving."],
 	)
@@ -238,7 +324,7 @@ def test_children_out_of_place_triggers_high_priority_safety_warning() -> None:
 	agent.skill_manager.get_skill.return_value = "wellbeing instructions"
 	event = CarEvent(
 		SkillType.WELLBEING,
-		"knowledge_updated",
+		EventName.KNOWLEDGE_UPDATED,
 		{"DriverPhysicalState.activity": "Children out of place"},
 		[
 			"Changed just now: Children are out of place near the vehicle.",

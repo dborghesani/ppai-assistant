@@ -65,6 +65,7 @@ class WebUIServer:
             "userSpeechReceived",
             "conversationModeChanged",
             "knowledgeUpdated",
+            "knowledgeChanged",
             "friendMessageSimulationChanged",
         ):
             bridge.on(

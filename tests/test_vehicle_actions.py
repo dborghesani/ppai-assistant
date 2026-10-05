@@ -6,6 +6,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+import pytest
 import structlog
 from agents.agents_dataclasses import ActionType, SkillType
 from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
@@ -140,17 +141,51 @@ def test_action_manager_updates_all_window_controls():
     )
 
 
-def test_temperature_fan_and_volume_actions_change_vehicle_state():
+def test_heating_fan_and_volume_actions_change_vehicle_state():
     bridge = make_bridge(VehicleState(internal_temperature=24.0, fan_speed=4, audio_volume=35))
 
-    bridge.apply_vehicle_action(ActionType.INCREASE_TEMPERATURE, {})
+    bridge.apply_vehicle_action(ActionType.ENABLE_HEATING, {})
     bridge.apply_vehicle_action(ActionType.DECREASE_FAN_SPEED, {})
     bridge.apply_vehicle_action(ActionType.INCREASE_AUDIO_VOLUME, {})
 
     state = bridge.database_manager.current_state["VehicleState"]
-    assert state.internal_temperature == 25.0
+    assert state.internal_temperature == 24.0
+    assert state.heating_on is True
     assert state.fan_speed == 3
     assert state.audio_volume == 40
+
+
+@pytest.mark.parametrize(
+    ("action", "field", "enabled"),
+    [
+        (ActionType.ENABLE_HEATING, "heating_on", True),
+        (ActionType.DISABLE_HEATING, "heating_on", False),
+        (ActionType.ENABLE_AIR_CONDITIONING, "air_conditioning_on", True),
+        (ActionType.DISABLE_AIR_CONDITIONING, "air_conditioning_on", False),
+    ],
+)
+def test_climate_actions_toggle_controls_without_changing_temperature(
+    action, field, enabled
+):
+    bridge = make_bridge(
+        VehicleState(internal_temperature=24.0, heating_on=not enabled,
+                     air_conditioning_on=not enabled)
+    )
+    preference = bridge.dumpDriverPreferences()["preferred_cabin_temperature"]
+    bridge.apply_vehicle_action(action, {})
+    state = bridge.database_manager.current_state["VehicleState"]
+    assert getattr(state, field) is enabled
+    assert state.internal_temperature == 24.0
+    assert state.seat_heating_on is False
+    assert bridge.dumpDriverPreferences()["preferred_cabin_temperature"] == preference
+    bridge._emit.assert_called_once_with("vehicleStateChanged", {field: enabled})
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    knowledge = manager._boolean_knowledge("VehicleState", field, enabled)
+    assert knowledge == (
+        f"Cabin heating is {'on' if enabled else 'off'}."
+        if field == "heating_on"
+        else f"The air conditioning is {'on' if enabled else 'off'}."
+    )
 
 
 def test_restrictive_adas_profile_updates_simulated_controls():
@@ -242,6 +277,262 @@ def test_privacy_toggle_and_people_inside_control_update_dataclasses():
         ("VehicleState", "privacy_mode", True),
         ("DetectedObjects", "people_inside", 3),
     ]
+
+
+@pytest.mark.parametrize(
+    ("temperature", "preferred", "expected_status"),
+    [
+        (25.0, 27.0, "low"),
+        (23.0, 21.0, "high"),
+        (25.0, 22.0, "high"),
+        (19.0, 22.0, "low"),
+        (26.0, 22.0, "too high"),
+        (18.0, 22.0, "too low"),
+        (23.0, 22.0, "optimal"),
+        (21.0, 22.0, "optimal"),
+        (27.0, 27.0, "optimal"),
+        (17.0, 17.0, "optimal"),
+        (28.0, None, None),
+        (28.0, float("nan"), None),
+    ],
+)
+def test_cabin_temperature_knowledge_is_relative_to_user_preference(
+    temperature, preferred, expected_status
+):
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=False)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager._last_speed_status = None
+    manager.on_context_updated = None
+    manager._is_first_batch = True
+    changes = []
+    manager.on_knowledge_changed = changes.append
+
+    async def verify():
+        await manager.process_pending(
+            {("VehicleState", "internal_temperature"): 22.0}
+        )
+        assert manager.knowledge_event_queue.empty()
+        await manager.process_pending(
+            {
+                ("VehicleState", "internal_temperature"): temperature,
+                ("DriverPreferences", "preferred_cabin_temperature"): preferred,
+            }
+        )
+        status_key = "VehicleState.internal_temperature"
+        assert "VehicleState.temperature_status" not in manager.context
+        if expected_status is None:
+            assert status_key not in manager.context
+            assert manager.knowledge_event_queue.empty()
+            assert not changes
+        else:
+            fact = manager.context[status_key]
+            assert fact == f"Cabin temperature is {expected_status}."
+            event = await manager.knowledge_event_queue.get()
+            assert event.skill is SkillType.WELLBEING
+            assert event.event_value == {status_key: expected_status}
+            assert event.context[0] == f"Changed just now: {fact}"
+            assert changes == [[fact]]
+
+    asyncio.run(verify())
+
+
+def test_preference_changes_recalculate_cabin_temperature_without_new_reading():
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=False)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager._last_speed_status = None
+    manager.on_context_updated = None
+    manager._is_first_batch = True
+
+    async def verify():
+        await manager.process_pending(
+            {
+                ("VehicleState", "internal_temperature"): 25.0,
+                ("DriverPreferences", "preferred_cabin_temperature"): 25.0,
+            }
+        )
+        assert manager.knowledge_event_queue.empty()
+        for preferred, expected_status in (
+            (22.0, "high"),
+            (29.0, "too low"),
+            (27.0, "low"),
+            (25.0, "optimal"),
+        ):
+            await manager.process_pending(
+                {("DriverPreferences", "preferred_cabin_temperature"): preferred}
+            )
+            event = await manager.knowledge_event_queue.get()
+            assert event.skill is SkillType.WELLBEING
+            assert event.event_value == {"VehicleState.internal_temperature": expected_status}
+            await manager.process_pending(
+                {("VehicleState", "internal_temperature"): 25.0}
+            )
+            assert manager.knowledge_event_queue.empty()
+        await manager.process_pending(
+            {("DriverPreferences", "preferred_cabin_temperature"): None}
+        )
+        assert "VehicleState.internal_temperature" not in manager.context
+        assert "DriverPreferences.preferred_cabin_temperature" not in manager.context
+        assert "VehicleState.internal_temperature" not in manager._last_evaluated
+        assert manager.knowledge_event_queue.empty()
+
+    asyncio.run(verify())
+
+
+def test_reference_knowledge_is_generic_and_independent_of_batch_order(monkeypatch):
+    original_metadata = KnowledgeManager._knowledge_metadata
+    fan_metadata = {
+        **original_metadata("VehicleState", "fan_speed"),
+        "reference": ("VehicleState", "following_distance_level"),
+        "reference_tolerance": 0.5,
+        "reference_extreme_threshold": 1.5,
+        "reference_label": "Fan speed",
+    }
+
+    def reference_metadata(name, measure):
+        if (name, measure) == ("VehicleState", "fan_speed"):
+            return fan_metadata
+        return original_metadata(name, measure)
+
+    monkeypatch.setattr(
+        KnowledgeManager, "_knowledge_metadata", staticmethod(reference_metadata)
+    )
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=True)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager._last_speed_status = None
+    manager.on_context_updated = None
+    manager._is_first_batch = True
+
+    async def verify():
+        await manager.process_pending(
+            {
+                ("VehicleState", "fan_speed"): 0,
+                ("VehicleState", "following_distance_level"): 0,
+            }
+        )
+        assert manager.context["VehicleState.fan_speed"] == "Fan speed is optimal."
+        await manager.process_pending({("VehicleState", "fan_speed"): 1})
+        assert manager.context["VehicleState.fan_speed"] == "Fan speed is high."
+        await manager.process_pending(
+            {
+                ("VehicleState", "following_distance_level"): 4,
+                ("VehicleState", "fan_speed"): 2,
+            }
+        )
+        assert manager.context["VehicleState.fan_speed"] == "Fan speed is too low."
+        await manager.process_pending(
+            {("VehicleState", "following_distance_level"): 2}
+        )
+        assert manager.context["VehicleState.fan_speed"] == "Fan speed is optimal."
+
+    asyncio.run(verify())
+
+
+@pytest.mark.parametrize(
+    ("speed", "limit", "expected_level"),
+    [
+        (50.0, 50.0, "optimal"),
+        (55.0, 50.0, "high"),
+        (60.0, 50.0, "high"),
+        (61.0, 50.0, "too high"),
+        (45.0, 50.0, "low"),
+        (40.0, 50.0, "low"),
+        (39.0, 50.0, "too low"),
+        (60.0, None, None),
+        (60.0, float("nan"), None),
+    ],
+)
+def test_speed_uses_shared_relative_knowledge(speed, limit, expected_level):
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=False)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager.on_context_updated = None
+    manager._is_first_batch = True
+
+    async def verify():
+        await manager.process_pending(
+            {
+                ("VehicleMotion", "speed"): speed,
+                ("DetectedObjects", "traffic_signs.speed_limit"): limit,
+            }
+        )
+        assert "VehicleMotion.speed_status" not in manager.context
+        assert manager.knowledge_event_queue.empty()
+        if expected_level is None:
+            assert "VehicleMotion.speed" not in manager.context
+        else:
+            assert manager.context["VehicleMotion.speed"] == (
+                f"Vehicle speed is {expected_level}. Current value is {speed:g} km/h; "
+                f"reference value is {limit:g} km/h."
+            )
+
+    asyncio.run(verify())
+
+
+def test_changed_speed_limit_recalculates_relative_speed_without_new_measurement():
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=False)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager.on_context_updated = None
+    manager._is_first_batch = True
+
+    async def verify():
+        await manager.process_pending(
+            {
+                ("VehicleMotion", "speed"): 60.0,
+                ("DetectedObjects", "traffic_signs.speed_limit"): 60.0,
+            }
+        )
+        await manager.process_pending(
+            {("DetectedObjects", "traffic_signs.speed_limit"): 40.0}
+        )
+        events = []
+        while not manager.knowledge_event_queue.empty():
+            events.append(manager.knowledge_event_queue.get_nowait())
+        driving = next(event for event in events if event.skill is SkillType.DRIVING)
+        assert driving.event_value["VehicleMotion.speed"] == "too high"
+        assert any(
+            fact.startswith("Changed just now: Vehicle speed is too high.")
+            for fact in driving.context
+        )
+        assert "VehicleMotion.speed_status" not in manager.context
+        await manager.process_pending({("VehicleMotion", "speed"): 61.0})
+        assert manager.knowledge_event_queue.empty()
+        await manager.process_pending(
+            {("DetectedObjects", "traffic_signs.speed_limit"): None}
+        )
+        assert "VehicleMotion.speed" not in manager.context
+        assert "DetectedObjects.traffic_signs.speed_limit" not in manager.context
+        assert manager.knowledge_event_queue.empty()
+
+    asyncio.run(verify())
 
 
 def test_driver_preferences_become_non_notifying_knowledge():
@@ -342,6 +633,224 @@ def test_privacy_mode_and_people_inside_are_readable_knowledge():
         "DetectedObjects.people_inside": 2,
     }
     assert "Privacy mode is off." in driving_event.context
+
+
+def test_attention_and_fatigue_persistence_knowledge_resets_when_levels_change():
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.event_queue = asyncio.Queue()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=False)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager._last_speed_status = None
+    manager.persistence_since = {}
+    manager.persistence_notified = set()
+    timestamps = iter((100.0, 129.9, 130.1, 131.0))
+    manager.monotonic_clock = lambda: next(timestamps)
+    manager.on_context_updated = None
+    manager._is_first_batch = False
+    measurements = {
+        ("DriverPhysicalState", "attention_level"): 0.2,
+        ("DriverPhysicalState", "fatigue_level"): 0.7,
+    }
+
+    async def verify_persistence():
+        await manager.process_pending(measurements)
+        while not manager.knowledge_event_queue.empty():
+            await manager.knowledge_event_queue.get()
+        assert "persisted" not in manager.context[
+            "DriverPhysicalState.attention_level"
+        ]
+
+        await manager.process_pending(measurements)
+        assert manager.knowledge_event_queue.empty()
+
+        await manager.process_pending(measurements)
+        attention = manager.context["DriverPhysicalState.attention_level"]
+        fatigue = manager.context["DriverPhysicalState.fatigue_level"]
+        assert "persisted for a while" in attention
+        assert "persisted for a while" in fatigue
+        event = await manager.knowledge_event_queue.get()
+        assert "persisted for a while" in " ".join(event.context)
+
+        await manager.process_pending(
+            {
+                ("DriverPhysicalState", "attention_level"): 0.5,
+                ("DriverPhysicalState", "fatigue_level"): 0.2,
+            }
+        )
+        assert "persisted" not in manager.context[
+            "DriverPhysicalState.attention_level"
+        ]
+        assert "persisted" not in manager.context["DriverPhysicalState.fatigue_level"]
+        recovered_event = await manager.knowledge_event_queue.get()
+        assert "persisted" not in " ".join(recovered_event.context)
+
+    asyncio.run(verify_persistence())
+
+
+@pytest.mark.parametrize("continuous_telemetry", [False, True])
+def test_knowledge_manager_publishes_persistence_without_new_measurements(
+    monkeypatch, continuous_telemetry
+):
+    assert KnowledgeManager.PERSISTENCE_CHECK_INTERVAL == 5.0
+    monkeypatch.setattr(KnowledgeManager, "PERSISTENCE_CHECK_INTERVAL", 0.01)
+    original_metadata = KnowledgeManager._knowledge_metadata
+
+    def short_fatigue_threshold(name, measure):
+        metadata = original_metadata(name, measure)
+        if name == "DriverPhysicalState" and measure == "fatigue_level":
+            return {**metadata, "persistence_seconds": 0.02}
+        return metadata
+
+    monkeypatch.setattr(
+        KnowledgeManager,
+        "_knowledge_metadata",
+        staticmethod(short_fatigue_threshold),
+    )
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.event_queue = asyncio.Queue()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=False, knowledge_update_interval=0.001)
+    manager.context = {}
+    manager._last_evaluated = {
+        "DriverPhysicalState.fatigue_level": SimpleNamespace(
+            value="medium", trend=None
+        )
+    }
+    manager._raw_values = {}
+    manager._last_speed_status = None
+    manager.persistence_since = {}
+    manager.persistence_notified = set()
+    manager.on_context_updated = None
+    manager._is_first_batch = False
+    checks = Mock(wraps=manager._due_persistence_updates)
+    monkeypatch.setattr(manager, "_due_persistence_updates", checks)
+
+    async def produce_unrelated_telemetry():
+        while True:
+            manager.event_queue.put_nowait(
+                {
+                    "type": "measurements_updated",
+                    "name": "DriverPreferences",
+                    "values": {"preferred_music": "jazz"},
+                }
+            )
+            await asyncio.sleep(0.001)
+
+    async def verify_timer():
+        await manager.process_pending(
+            {("DriverPhysicalState", "fatigue_level"): 0.7}
+        )
+        await manager.knowledge_event_queue.get()
+        task = asyncio.create_task(manager.run())
+        producer = (
+            asyncio.create_task(produce_unrelated_telemetry())
+            if continuous_telemetry
+            else None
+        )
+        try:
+            event = await asyncio.wait_for(manager.knowledge_event_queue.get(), 0.5)
+            assert any("persisted for a while" in fact for fact in event.context)
+            assert checks.call_count >= 2
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(manager.knowledge_event_queue.get(), 0.03)
+        finally:
+            task.cancel()
+            tasks = [task]
+            if producer is not None:
+                producer.cancel()
+                tasks.append(producer)
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(verify_timer())
+
+
+def test_knowledge_manager_emits_only_changed_facts_for_live_changes_panel():
+    assert KnowledgeManager._knowledge_metadata(
+        "DriverPhysicalState", "attention_level"
+    )["persistence_seconds"] == 30.0
+    assert KnowledgeManager._knowledge_metadata(
+        "DriverPhysicalState", "fatigue_level"
+    )["persistence_seconds"] == 30.0
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace()
+    manager.event_queue = asyncio.Queue()
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=True)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager._last_speed_status = None
+    manager.persistence_since = {}
+    manager.persistence_notified = set()
+    timestamps = iter((10.0, 20.0, 40.1, 40.1, 41.0))
+    manager.monotonic_clock = lambda: next(timestamps)
+    manager.on_context_updated = None
+    emitted_changes: list[list[str]] = []
+    manager.on_knowledge_changed = emitted_changes.append
+    manager._is_first_batch = False
+
+    async def update_knowledge():
+        attention = {("DriverPhysicalState", "attention_level"): 0.2}
+        await manager.process_pending(attention)
+        await manager.process_pending(
+            {("DriverPreferences", "preferred_music"): "jazz"}
+        )
+        await manager.process_pending(
+            {("DriverPreferences", "preferred_music"): "classical"}
+        )
+        await manager.process_pending(manager._due_persistence_updates(40.1))
+        await manager.process_pending(
+            {("DriverPhysicalState", "attention_level"): 0.5}
+        )
+
+    asyncio.run(update_knowledge())
+
+    assert emitted_changes == [
+        ["Attention level is low."],
+        ["Attention level is low. This condition has persisted for a while."],
+        ["Attention level is medium."],
+    ]
+
+
+def test_default_temperature_preference_seeds_reference_and_ui():
+    assert DriverPreferences().preferred_cabin_temperature == 22.0
+    assert make_bridge().dumpDriverPreferences()["preferred_cabin_temperature"] == 22.0
+    metadata = KnowledgeManager._knowledge_metadata(
+        "DriverPreferences", "preferred_cabin_temperature"
+    )
+    assert metadata["value_kind"] == "category"
+
+    manager = KnowledgeManager.__new__(KnowledgeManager)
+    manager.logger = structlog.get_logger()
+    manager.database_manager = SimpleNamespace(
+        current_state={}, count=Mock(return_value=0)
+    )
+    manager.knowledge_event_queue = asyncio.Queue()
+    manager.opt = SimpleNamespace(use_laya=False)
+    manager.context = {}
+    manager._last_evaluated = {}
+    manager._raw_values = {}
+    manager.on_context_updated = None
+    manager._is_first_batch = True
+
+    asyncio.run(manager.seed_default_knowledge())
+
+    assert manager._raw_values["DriverPreferences.preferred_cabin_temperature"] == 22.0
+    assert manager.context["DriverPreferences.preferred_cabin_temperature"] == (
+        "The driver's preferred cabin temperature is 22 C."
+    )
+    assert manager.context["VehicleState.internal_temperature"] == (
+        "Cabin temperature is optimal."
+    )
+    assert manager.knowledge_event_queue.empty()
 
 
 def test_database_restores_driver_preferences_for_initial_knowledge():

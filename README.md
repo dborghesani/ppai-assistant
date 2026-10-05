@@ -226,6 +226,55 @@ python main.py \
   tts_enabled=True stt_enabled=True
 ```
 
+## Vehicle Manual RAG
+
+Manual retrieval runs locally with PyMuPDF, Ollama embeddings and a persistent Chroma index.
+It enriches the direct Ollama conversational response, independently of CrewAI event decisions.
+The manual does not expand the vehicle action catalog or replace live telemetry.
+
+```bash
+ollama pull bge-m3
+
+# Prepare the index before the demo (no voice, dashboard or InfluxDB needed).
+uv run python -m scripts.index_vehicle_manual rag_manual_filename=9999_9999_441_en-GB.pdf
+
+# Add these options to your usual application command.
+uv run python main.py rag_enabled=True rag_manual_filename=9999_9999_441_en-GB.pdf context_window_size=16384
+```
+
+Manuals are selected at startup. Relative directories resolve against the project root;
+absolute directories are also supported. Without pre-indexing, the first conversational
+request builds the index. Later runs reuse it; changing the PDF contents, filename,
+embedding model or chunk settings selects a new index. A partial build is retried safely.
+
+| Argument | Description | Default |
+| :--- | :--- | :--- |
+| `rag_enabled` | Add manual evidence to conversational answers | `False` |
+| `rag_manual_directory` | Directory containing vehicle manuals | `user_manual` |
+| `rag_manual_filename` | PDF selected for this run | `9999_9999_441_en-GB.pdf` |
+| `rag_index_directory` | Local persistent index directory | `.cache/vehicle_manual` |
+| `rag_embedding_model` | Ollama embedding model, separate from the chat model | `bge-m3` |
+| `rag_top_k` | Maximum retrieved passages | `3` |
+| `rag_min_similarity` | Minimum cosine similarity; tune using demo questions | `0.45` |
+| `rag_chunk_words` | Maximum words per page-local chunk | `250` |
+| `rag_chunk_overlap_words` | Overlap between adjacent chunks on a page | `40` |
+| `rag_context_max_chars` | Hard character budget for retrieved passages and their source labels | `6000` |
+| `rag_timeout` | Timeout in seconds per Ollama embedding request | `120.0` |
+
+Only retrieved passages enter the prompt, never the full PDF. Complete chunks are selected
+within the character budget; passages are not accumulated in conversation history.
+This is a character limit, not an exact token count or a budget for the entire prompt.
+Use a suitable context window (16384 for the demo) and reduce the retrieval budget for
+smaller windows or long conversations.
+
+Answers are instructed to preserve warnings, cite the PDF page (not necessarily the printed
+page number), and avoid unsupported vehicle procedures or specifications. Missing evidence
+or embedding errors do not stop ordinary conversation; the assistant must acknowledge when
+it cannot verify a manual-specific answer. These are model instructions, not a guarantee of
+factual correctness. Validate demo questions against the actual source pages and vehicle variant.
+Scanned PDFs without extractable text need OCR before indexing. Diagrams and image-only
+instructions are not interpreted by this text-only pipeline.
+
 ## 🧠 How It Works
 
 1. **Initialization**: The app starts the dashboard server and backend workers on one asyncio event loop. If enabled,

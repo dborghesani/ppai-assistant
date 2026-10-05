@@ -22,6 +22,18 @@ class ConfigAssistant:
     max_tokens: int = 1024
     context_window_size: int = 4096
 
+    rag_enabled: bool = False
+    rag_manual_directory: str = "user_manual"
+    rag_manual_filename: str = "9999_9999_441_en-GB.pdf"
+    rag_index_directory: str = ".cache/vehicle_manual"
+    rag_embedding_model: str = "bge-m3"
+    rag_top_k: int = 3
+    rag_min_similarity: float = 0.45
+    rag_chunk_words: int = 250
+    rag_chunk_overlap_words: int = 40
+    rag_context_max_chars: int = 6000
+    rag_timeout: float = 120.0
+
     data_websocket_url: str = "ws://localhost:4545/stream"
     data_replay_folder: str = ""
 

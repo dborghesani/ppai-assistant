@@ -146,6 +146,15 @@ class LLMAgent:
                 silent_decision_guidance={silent_decision_guidance}
 
                 Rules:
+                - For knowledge_updated, first check whether skill_instructions map a
+                    changed fact to a supported action. If so, choose that action before
+                    applying the general silence rules. This includes comfort adjustments
+                    while stationary, without a direct request or a safety hazard.
+                    For climate control, follow the skill's heating/cooling mapping and
+                    read the matching control's current on/off state before choosing an
+                    action. An already-enabled control requires no repeated activation.
+                    A preferred temperature in supporting context is not a veto: the
+                    changed relative fact already reflects that preference.
                 - Incoming message workflow has priority over the general silent/proactive
                     notification rules below. An incoming_message_received event is an
                     explicit message delivery event even when user_input is empty; never
@@ -212,9 +221,11 @@ class LLMAgent:
                     description. Tone describes delivery, not the driver's emotional state.
                 - Keep intervention_type, skill, action and suggestion_type mutually
                     consistent. Use the corresponding none option when a field does not apply.
-                - When skill_instructions prescribe a supported safety action for an
+                - When skill_instructions prescribe a supported safety or comfort action for an
                     explicitly reported current condition, include that action in the
-                    structured decision as well as the spoken warning.
+                    structured decision as well as the spoken warning or acknowledgement.
+                    A useful comfort adjustment does not require another safety risk:
+                    use urgency=low rather than suppressing the prescribed action.
                 - For a direct request that matches vehicle_action_guidance, this is the
                     action decision, not a conversational fallback: choose the matching
                     ActionType, intervention_type=act, urgency=low, suggestion_type=none,
@@ -226,7 +237,9 @@ class LLMAgent:
                     shows a concrete current safety risk, abnormal condition, or useful
                     action needed now.
                 - Do not speak about normal, stable, low, unchanged, or merely changing
-                    values. Do not summarize telemetry or say that no action is needed.
+                    values unless skill_instructions explicitly prescribe a useful action
+                    for that changed condition (for example, low cabin temperature needs
+                    heating). Do not summarize telemetry or say that no action is needed.
                 - A trend, fluctuation, or sensor value is not a risk without an explicit
                     threshold or safety consequence. Do not infer one.
                 - For proactive alerts, require all of the following: a concrete current
@@ -255,6 +268,13 @@ class LLMAgent:
                     actually needed to proceed (like ask_attend_meeting above).
 
                 Output:
+                - Final climate-state check: inspect Supporting current vehicle context,
+                    not examples in skill_instructions. If it says "The air conditioning
+                    is on.", do not output enable_air_conditioning. If it says "Cabin
+                    heating is on.", do not output enable_heating. The other control's
+                    off state does not make this control off. If the required control
+                    is already on and there is no separate changed hazard, output the
+                    silent decision with action=none and spoken_message=null.
                 - Silent: follow silent_decision_guidance and set spoken_message=null.
                     Never pair a silent urgency with spoken text, or an active urgency with
                     a null spoken_message.

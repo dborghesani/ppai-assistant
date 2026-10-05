@@ -39,6 +39,8 @@
                 "ollama_model=ollama/qwen3.5:4b",
                 //"ollama_model=ollama/qwen2.5:7b-instruct",
                 "context_window_size=16384",
+                "rag_enabled=True",
+                "rag_manual_filename=9999_9999_441_en-GB.pdf",
                 //"data_replay_folder=${workspaceFolder}/../Dataset/assistant/json_output_20260310_113315",
                 "mqtt_enabled=True",
                 "mqtt_embedded_broker=True",
@@ -48,6 +50,17 @@
                 "use_laya=False",
                 //"laya_custom_model=models/laya_automotive_typed_decisions_50k"
             ],
+        },
+        {
+            "name": "index_vehicle_manual",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "scripts.index_vehicle_manual",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "rag_manual_filename=9999_9999_441_en-GB.pdf"
+            ]
         },
         {
             "name": "generate_dataset_rules",

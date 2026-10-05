@@ -41,8 +41,8 @@ class ToneType(str, Enum):
 
 class ActionType(str, Enum):
     NONE = "none"
-    INCREASE_TEMPERATURE = "increase_temperature"
-    DECREASE_TEMPERATURE = "decrease_temperature"
+    ENABLE_HEATING = "enable_heating"
+    DISABLE_HEATING = "disable_heating"
     OPEN_WINDOWS = "open_windows"
     CLOSE_WINDOWS = "close_windows"
     OPEN_SUNROOF = "open_sunroof"
@@ -94,8 +94,8 @@ class ActionType(str, Enum):
     def description(self) -> str:
         return {
             ActionType.NONE: "No direct action.",
-            ActionType.INCREASE_TEMPERATURE: "increase cabin temperature by one step",
-            ActionType.DECREASE_TEMPERATURE: "decrease cabin temperature by one step",
+            ActionType.ENABLE_HEATING: "enable cabin heating",
+            ActionType.DISABLE_HEATING: "disable cabin heating",
             ActionType.OPEN_WINDOWS: "open the windows",
             ActionType.CLOSE_WINDOWS: "close the windows",
             ActionType.OPEN_SUNROOF: "open the sunroof",

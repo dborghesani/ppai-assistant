@@ -1,4 +1,6 @@
 import asyncio
+import math
+import time
 from dataclasses import dataclass, fields, is_dataclass
 from typing import Any, Callable, List, Mapping, get_args, get_type_hints
 
@@ -17,9 +19,7 @@ class KnowledgeState:
 
 
 class KnowledgeManager:
-    _SPEED_KEY = "VehicleMotion.speed"
-    _SPEED_LIMIT_KEY = "DetectedObjects.traffic_signs.speed_limit"
-    _SPEED_STATUS_KEY = "VehicleMotion.speed_status"
+    PERSISTENCE_CHECK_INTERVAL = 5.0
     _BOOLEAN_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[bool], str]] = {
         ("LaneTracing", "lane_crossing_left"): lambda value: (
             "The driver is crossing the lane to the left."
@@ -68,6 +68,9 @@ class KnowledgeManager:
         ),
         ("VehicleState", "air_conditioning_on"): lambda value: (
             "The air conditioning is on." if value else "The air conditioning is off."
+        ),
+        ("VehicleState", "heating_on"): lambda value: (
+            "Cabin heating is on." if value else "Cabin heating is off."
         ),
         ("VehicleState", "air_recirculation_on"): lambda value: (
             "Cabin air recirculation is on." if value else "Cabin air recirculation is off."
@@ -278,8 +281,11 @@ class KnowledgeManager:
         self.context: dict[str, str] = {}
         self._last_evaluated: dict[str, KnowledgeState] = {}
         self._raw_values: dict[str, Any] = {}
-        self._last_speed_status: str | None = None
+        self.persistence_since: dict[str, float] = {}
+        self.persistence_notified: set[str] = set()
+        self.monotonic_clock: Callable[[], float] = time.monotonic
         self.on_context_updated: Callable[[], None] | None = None
+        self.on_knowledge_changed: Callable[[list[str]], None] | None = None
         # The very first batch establishes the startup baseline: it must not
         # flood the model with every field's initial (mostly routine) value.
         self._is_first_batch = True
@@ -421,6 +427,52 @@ class KnowledgeManager:
         self.logger.debug("extracted knowledge", knowledge=extracted_knowledge)
         return extracted_knowledge
 
+    def add_persistence_knowledge(
+        self,
+        key: str,
+        value: Any,
+        knowledge: str,
+        metadata: Mapping[str, Any],
+        now: float,
+    ) -> tuple[str, bool]:
+        persistence_levels = metadata.get("persistence_levels", ())
+        persistence_since = getattr(self, "persistence_since", None)
+        persistence_notified = getattr(self, "persistence_notified", None)
+        if persistence_since is None:
+            persistence_since = self.persistence_since = {}
+        if persistence_notified is None:
+            persistence_notified = self.persistence_notified = set()
+
+        qualifies = (
+            metadata.get("value_kind") == "intensity"
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and value > 0.0
+            and self._intensity_level(float(value)) in persistence_levels
+        )
+        if not qualifies:
+            persistence_since.pop(key, None)
+            persistence_notified.discard(key)
+            return knowledge, False
+
+        duration_seconds = metadata.get("persistence_seconds", 30.0)
+        if key not in persistence_since:
+            self.logger.info(
+                "persistence timer started", key=key, seconds=duration_seconds
+            )
+        started_at = persistence_since.setdefault(key, now)
+        if now - started_at < duration_seconds:
+            return knowledge, False
+
+        persistence_fact = (
+            f"{knowledge} This condition has persisted for a while."
+        )
+        should_notify = key not in persistence_notified
+        persistence_notified.add(key)
+        if should_notify:
+            self.logger.info("persistence threshold reached", key=key)
+        return persistence_fact, should_notify
+
     @staticmethod
     def _knowledge_metadata(name: str, measure: str) -> Mapping[str, Any] | None:
         data_class = getattr(assistant_dataclasses, name, None)
@@ -510,26 +562,18 @@ class KnowledgeManager:
             name, separator, measure = key.partition(".")
             if not separator:
                 continue
-            # management of specific derived knowledge
-            skills: tuple[SkillType, ...]
-            if key == self._SPEED_STATUS_KEY:
-                skills = (SkillType.DRIVING,)
-            else:
-                skills = self._field_skills(name, measure)
+            skills = self._field_skills(name, measure)
             for skill in skills:
                 changes_by_skill.setdefault(skill, {})[key] = value
 
         for skill, skill_changes in changes_by_skill.items():
-            if self._SPEED_STATUS_KEY in changes:
-                skill_context = dict(self.context)
-            else:
-                skill_context = {}
-                for context_key, context_value in self.context.items():
-                    context_name, separator, context_measure = context_key.partition(".")
-                    if separator and skill in self._field_skills(
-                        context_name, context_measure
-                    ):
-                        skill_context[context_key] = context_value
+            skill_context = {}
+            for context_key, context_value in self.context.items():
+                context_name, separator, context_measure = context_key.partition(".")
+                if separator and skill in self._field_skills(
+                    context_name, context_measure
+                ):
+                    skill_context[context_key] = context_value
 
             changed_context = [
                 f"Changed just now: {skill_context[key]}"
@@ -549,63 +593,39 @@ class KnowledgeManager:
                 )
             )
 
-    def _update_speed_status(self) -> tuple[str, str] | None:
-        speed = self._raw_values.get(self._SPEED_KEY)
-        speed_limit = self._raw_values.get(self._SPEED_LIMIT_KEY)
-        if not isinstance(speed, (int, float)) or isinstance(speed, bool):
-            speed = None
-        if not isinstance(speed_limit, (int, float)) or isinstance(speed_limit, bool):
-            speed_limit = None
-
-        speed_metadata = self._knowledge_metadata("VehicleMotion", "speed") or {}
-        near_margin = speed_metadata.get("change_threshold")
-        if not isinstance(near_margin, (int, float)):
-            near_margin = 0.0
-
-        if speed is None or speed_limit is None:
-            status = "limit_unknown"
-            status_text = (
-                "Speed status is limit_unknown because no verified speed limit "
-                "is available."
-            )
-        elif speed > speed_limit and speed <= speed_limit + near_margin:
-            status = "slightly_above_limit"
-            status_text = (
-                f"Speed status is slightly_above_limit. Current speed is "
-                f"{self._format_value(speed)} km/h and the verified speed limit is "
-                f"{self._format_value(speed_limit)} km/h."
-            )
-        elif speed > speed_limit:
-            status = "above_limit"
-            status_text = (
-                f"Speed status is above_limit. Current speed is "
-                f"{self._format_value(speed)} km/h and the verified speed limit is "
-                f"{self._format_value(speed_limit)} km/h."
-            )
-        elif speed < speed_limit - near_margin:
-            status = "below_limit"
-            status_text = (
-                f"Speed status is below_limit. Current speed is "
-                f"{self._format_value(speed)} km/h and the verified speed limit is "
-                f"{self._format_value(speed_limit)} km/h."
-            )
-        elif speed > speed_limit - near_margin and speed <= speed_limit:
-            status = "slightly_below_limit"
-            status_text = (
-                f"Speed status is slightly_below_limit. Current speed is "
-                f"{self._format_value(speed)} km/h and the verified speed limit is "
-                f"{self._format_value(speed_limit)} km/h."
-            )
-
-        self.context[self._SPEED_STATUS_KEY] = status_text
-
-        entered_above_limit = (
-            status == "above_limit" and self._last_speed_status != "above_limit"
-        )
-        self._last_speed_status = status
-        if not entered_above_limit:
+    def _relative_knowledge(
+        self, measure: str, value: Any, metadata: Mapping[str, Any]
+    ) -> tuple[str, str] | None:
+        reference = self._raw_values.get(".".join(metadata["reference"]))
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not isinstance(reference, (int, float))
+            or isinstance(reference, bool)
+            or not math.isfinite(value)
+            or not math.isfinite(reference)
+        ):
             return None
-        return self._SPEED_STATUS_KEY, status
+        difference = value - reference
+        tolerance = metadata["reference_tolerance"]
+        extreme_threshold = metadata["reference_extreme_threshold"]
+        if abs(difference) <= tolerance:
+            level = "optimal"
+        elif difference > extreme_threshold:
+            level = "too high"
+        elif difference < -extreme_threshold:
+            level = "too low"
+        else:
+            level = "high" if difference > 0 else "low"
+        label = metadata.get("reference_label") or self._display_measure(measure).capitalize()
+        knowledge = f"{label} is {level}."
+        unit = metadata.get("reference_unit")
+        if unit:
+            knowledge += (
+                f" Current value is {self._format_value(value)} {unit}; "
+                f"reference value is {self._format_value(reference)} {unit}."
+            )
+        return knowledge, level
 
     @staticmethod
     def _generates_knowledge(name: str, measure: str) -> bool:
@@ -665,23 +685,102 @@ class KnowledgeManager:
             await self.process_pending(pending)
 
     async def run(self) -> None:
+        next_persistence_check = time.monotonic() + self.PERSISTENCE_CHECK_INTERVAL
         while True:
-            event = await self.event_queue.get()
             pending: dict[tuple[str, str], Any] = {}
-            self._collect_event(event, pending)
-
-            await asyncio.sleep(self.opt.knowledge_update_interval)
+            try:
+                event = await asyncio.wait_for(
+                    self.event_queue.get(),
+                    timeout=max(0.0, next_persistence_check - time.monotonic()),
+                )
+            except asyncio.TimeoutError:
+                pass
+            else:
+                self._collect_event(event, pending)
+                await asyncio.sleep(
+                    min(
+                        self.opt.knowledge_update_interval,
+                        max(0.0, next_persistence_check - time.monotonic()),
+                    )
+                )
             while True:
                 try:
                     self._collect_event(self.event_queue.get_nowait(), pending)
                 except asyncio.QueueEmpty:
                     break
 
-            await self.process_pending(pending)
+            if time.monotonic() >= next_persistence_check:
+                now = getattr(self, "monotonic_clock", time.monotonic)()
+                due_pending = self._due_persistence_updates(now)
+                pending = {**due_pending, **pending}
+                next_persistence_check = (
+                    time.monotonic() + self.PERSISTENCE_CHECK_INTERVAL
+                )
+            if pending:
+                await self.process_pending(pending)
+
+    def _due_persistence_updates(
+        self, now: float
+    ) -> dict[tuple[str, str], Any]:
+        persistence_since = getattr(self, "persistence_since", {})
+        persistence_notified: set[str] = getattr(
+            self, "persistence_notified", set()
+        )
+        raw_values = getattr(self, "_raw_values", {})
+        pending = {}
+        for key, started_at in persistence_since.items():
+            if key in persistence_notified or key not in raw_values:
+                continue
+            name, separator, measure = key.partition(".")
+            if not separator:
+                continue
+            metadata = self._knowledge_metadata(name, measure) or {}
+            duration = metadata.get("persistence_seconds", 30.0)
+            if isinstance(duration, (int, float)) and now - started_at >= duration:
+                pending[(name, measure)] = raw_values[key]
+        monitored_values = {}
+        for key, value in raw_values.items():
+            name, separator, measure = key.partition(".")
+            if separator:
+                metadata = self._knowledge_metadata(name, measure) or {}
+                if metadata.get("persistence_levels"):
+                    monitored_values[key] = value
+        self.logger.debug(
+            "periodic persistence check",
+            values=monitored_values,
+            elapsed_seconds={
+                key: round(now - started_at, 1)
+                for key, started_at in persistence_since.items()
+            },
+            notified_keys=sorted(persistence_notified),
+            due_keys=list(pending),
+        )
+        return pending
 
     async def process_pending(self, pending: dict[tuple[str, str], Any]) -> None:
         significant_changes: dict[str, dict[str, Any]] = {}
         window = "-10s"
+        if not hasattr(self, "persistence_since"):
+            self.persistence_since = {}
+        if not hasattr(self, "persistence_notified"):
+            self.persistence_notified = set()
+        now = getattr(self, "monotonic_clock", time.monotonic)()
+        pending = dict(pending)
+        updated_keys = {f"{name}.{measure}" for name, measure in pending}
+        for (name, measure), value in pending.items():
+            self._raw_values[f"{name}.{measure}"] = value
+        reference_keys: set[str] = set()
+        for key, value in self._raw_values.items():
+            name, separator, measure = key.partition(".")
+            if not separator:
+                continue
+            metadata = self._knowledge_metadata(name, measure) or {}
+            reference = metadata.get("reference")
+            if reference:
+                reference_key = ".".join(reference)
+                reference_keys.add(reference_key)
+                if reference_key in updated_keys:
+                    pending.setdefault((name, measure), value)
 
         for (name, measure), value in pending.items():
             key = f"{name}.{measure}"
@@ -690,7 +789,20 @@ class KnowledgeManager:
             if metadata.get("value_kind") == "presence":
                 value = bool(value)
             self._raw_values[key] = value
-            if (
+            if value is None and key in reference_keys:
+                self.context.pop(key, None)
+                self._last_evaluated.pop(key, None)
+                continue
+            relative_level: str | None = None
+            knowledge: str | None
+            if metadata.get("reference"):
+                relative = self._relative_knowledge(measure, value, metadata)
+                if relative is None:
+                    self.context.pop(key, None)
+                    self._last_evaluated.pop(key, None)
+                    continue
+                knowledge, relative_level = relative
+            elif (
                 isinstance(value, int)
                 and not isinstance(value, bool)
                 and metadata.get("value_kind") in {"count", "density"}
@@ -739,9 +851,14 @@ class KnowledgeManager:
             if knowledge is None:
                 continue
 
+            knowledge, persistence_notification = self.add_persistence_knowledge(
+                key, value, knowledge, metadata, now
+            )
             self.context[key] = knowledge
             change_value: Any = value
-            if metadata.get("value_kind") == "density":
+            if relative_level is not None:
+                change_value = relative_level
+            elif metadata.get("value_kind") == "density":
                 change_value = self._density_level(value)
             elif metadata.get("value_kind") == "category":
                 # Compare as a label, not a magnitude: any change is significant.
@@ -751,30 +868,24 @@ class KnowledgeManager:
                 # distinct so a zero-to-nonzero change is still flagged.
                 numeric_value = float(value)
                 change_value = "none" if numeric_value <= 0.0 else self._intensity_level(numeric_value)
+            significant_change = self._is_significant_change(
+                name, measure, key, change_value, trend
+            )
             if (
-                self._is_significant_change(name, measure, key, change_value, trend)
+                (significant_change or persistence_notification)
+                and metadata.get("notify_on_change", True)
             ):
-                if metadata.get("notify_on_change", True):
-                    self.logger.info(
-                        "significant change detected",
-                        name=name,
-                        measure=measure,
-                        value=change_value,
-                        trend=trend,
-                    )
-                    significant_changes[key] = change_value
+                self.logger.info(
+                    "significant change detected",
+                    name=name,
+                    measure=measure,
+                    value=change_value,
+                    trend=trend,
+                    persisted=persistence_notification,
+                )
+                significant_changes[key] = change_value
 
         self._is_first_batch = False
-
-        derived_change = None
-        if any(
-            key in self._raw_values
-            for key in (self._SPEED_KEY, self._SPEED_LIMIT_KEY)
-        ):
-            derived_change = self._update_speed_status()
-        if derived_change is not None:
-            key, value = derived_change
-            significant_changes[key] = value
 
         # Notify listeners (e.g. the UI) of the fresh knowledge base before the
         # agent, and therefore any LLM call, is triggered below.
@@ -782,6 +893,15 @@ class KnowledgeManager:
             self.on_context_updated()
 
         if significant_changes:
+            on_knowledge_changed = getattr(self, "on_knowledge_changed", None)
+            if on_knowledge_changed is not None:
+                changed_knowledge = [
+                    self.context[key]
+                    for key in significant_changes
+                    if key in self.context
+                ]
+                if changed_knowledge:
+                    on_knowledge_changed(changed_knowledge)
             await self._notify_agent(significant_changes)
 
     def dump_knowledge(self) -> str:

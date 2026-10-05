@@ -154,6 +154,20 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         )
         await socket.close()
 
+    async def test_websocket_forwards_transient_knowledge_changes(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+
+        changes = ["Attention level is low."]
+        cast(Any, self.web_ui.bridge).listeners["knowledgeChanged"](changes)
+        message = await socket.receive_json()
+
+        self.assertEqual(
+            message,
+            {"event": "knowledgeChanged", "data": [changes]},
+        )
+        await socket.close()
+
     async def test_websocket_forwards_detected_objects_state(self) -> None:
         socket = await self.client.ws_connect("/ws")
         await socket.receive_json()

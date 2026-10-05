@@ -39,6 +39,7 @@ class VehicleBridge:
         )
         self.knowledge_manager = knowledge_manager
         self.knowledge_manager.on_context_updated = self._on_knowledge_updated
+        self.knowledge_manager.on_knowledge_changed = self.on_knowledge_changed
         self.stt_manager = stt_manager
         self._listeners: DefaultDict[str, list[Callable[..., None]]] = defaultdict(list)
         self.agent.on_response = lambda message: self._emit("responseReceived", message)
@@ -94,6 +95,8 @@ class VehicleBridge:
             ActionType.CLOSE_SUNROOF: {"sunroof_open": False},
             ActionType.ENABLE_AIR_CONDITIONING: {"air_conditioning_on": True},
             ActionType.DISABLE_AIR_CONDITIONING: {"air_conditioning_on": False},
+            ActionType.ENABLE_HEATING: {"heating_on": True},
+            ActionType.DISABLE_HEATING: {"heating_on": False},
             ActionType.ENABLE_AIR_RECIRCULATION: {"air_recirculation_on": True},
             ActionType.DISABLE_AIR_RECIRCULATION: {"air_recirculation_on": False},
             ActionType.ENABLE_SEAT_HEATING: {"seat_heating_on": True},
@@ -167,21 +170,6 @@ class VehicleBridge:
             state_updates = {
                 "following_distance_level": min(
                     5, max(1, current_following_distance + following_distance_step)
-                )
-            }
-        elif action_type in {
-            ActionType.INCREASE_TEMPERATURE,
-            ActionType.DECREASE_TEMPERATURE,
-        }:
-            current_temperature = getattr(vehicle_state, "internal_temperature", None)
-            if current_temperature is None:
-                current_temperature = VehicleState().internal_temperature or 22.0
-            temperature_step = (
-                1.0 if action_type is ActionType.INCREASE_TEMPERATURE else -1.0
-            )
-            state_updates = {
-                "internal_temperature": min(
-                    40.0, max(10.0, current_temperature + temperature_step)
                 )
             }
         elif action_type in {
@@ -495,6 +483,9 @@ class VehicleBridge:
         """Called synchronously by KnowledgeManager right after its context changes."""
         self._emit("knowledgeUpdated", self.dumpKnowledgeData())
         self._emit("detectedObjectsStateChanged", self.dumpDetectedObjectsState())
+
+    def on_knowledge_changed(self, changes: list[str]) -> None:
+        self._emit("knowledgeChanged", changes)
 
     def dumpKnowledge(self) -> str:
         return self.knowledge_manager.dump_knowledge()

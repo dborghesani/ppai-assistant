@@ -6,14 +6,16 @@ vehicle capabilities. Select only actions present in `action_options`.
 
 ## Climate and airflow
 
-- `increase_temperature` / `decrease_temperature`: change the cabin temperature
-  setpoint by 1 degree per action, clamped to 10-40 C (default 22 C). "Warmer",
-  "cooler" and "raise/lower the temperature" refer to this setpoint.
+- `enable_heating` / `disable_heating`: toggle cabin heating. "Warmer", "warm
+  the cabin" and "raise the temperature" mean enable heating. "Turn off the
+  heating" means disable heating, not disable seat heating.
 - `increase_fan_speed` / `decrease_fan_speed`: change airflow intensity by one
   level, clamped to levels 0-7 (default 3). "More/less airflow", "fan up/down"
   and "blow harder/softer" refer to this action, not cabin temperature.
 - `enable_air_conditioning` / `disable_air_conditioning`: toggle AC on/off. This
-  is separate from changing the temperature setpoint or fan speed.
+  is separate from fan speed. "Cooler", "cool the cabin" and "lower the
+  temperature" mean enable air conditioning. Neither AC nor heating changes
+  the measured cabin temperature or the driver's preferred temperature.
 - `enable_air_recirculation` / `disable_air_recirculation`: toggle cabin air
   recirculation.
 - `enable_seat_heating` / `disable_seat_heating`: toggle seat heating.
@@ -76,4 +78,4 @@ commands are not supported.
 When the wording is polite or indirect (for example, "Could you open the
 windows?"), treat it as a command if it clearly requests a supported operation.
 Choose the action by intended effect, not by a single keyword: warmer means
-temperature; stronger airflow means fan speed; AC on/off means air conditioning.
+heating; cooler means air conditioning; stronger airflow means fan speed.

@@ -168,7 +168,7 @@ select { border: 1px solid var(--line); border-radius: 4px; background: var(--su
 .dashboard { min-height: 0; display: grid; grid-template-columns: minmax(290px, 23%) minmax(430px, 1fr) minmax(300px, 25%); }
 .control-panel, .knowledge-panel { min-width: 0; min-height: 0; padding: 20px; background: rgba(20, 25, 28, .9); }
 .control-panel { border-right: 1px solid var(--line); display: flex; flex-direction: column; }
-.knowledge-panel { border-left: 1px solid var(--line); }
+.knowledge-panel { border-left: 1px solid var(--line); display: flex; flex-direction: column; overflow: hidden; }
 .panel-heading { min-height: 48px; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .eyebrow { color: var(--accent); font: 700 10px var(--font-body); letter-spacing: 1.8px; }
 h1, h2 { margin: 3px 0 0; font-family: var(--font-display); letter-spacing: 0; }
@@ -236,7 +236,13 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .scenario-button:hover { border-color: var(--accent); color: var(--text); }
 .scenario-button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-deep); color: #d8e1ff; }
 
-.knowledge-content { height: calc(100% - 58px); margin-top: 14px; overflow-y: auto; padding-right: 3px; }
+.changed-context { flex: 0 0 auto; margin-top: 12px; padding: 0 0 12px; border-bottom: 1px solid var(--line); }
+.changed-context h3 { margin: 0 0 8px; color: var(--accent); font: 700 11px var(--font-body); text-transform: uppercase; }
+.changed-events { display: grid; gap: 6px; max-height: 120px; overflow: hidden; }
+.changed-empty { margin: 0; color: var(--muted); font-size: 12px; }
+.changed-event { padding-left: 9px; border-left: 2px solid var(--accent); color: var(--text); font: 500 12px var(--font-body); line-height: 1.4; overflow-wrap: anywhere; opacity: 1; transform: translateY(0); transition: opacity .2s ease, transform .2s ease; }
+.changed-event.is-expiring { opacity: 0; transform: translateY(-4px); }
+.knowledge-content { flex: 1 1 auto; min-height: 0; height: auto; margin-top: 12px; overflow-y: auto; padding-right: 3px; }
 .empty-knowledge { display: grid; place-items: center; height: 100%; color: var(--muted); text-align: center; }
 .knowledge-group { padding: 10px 12px; margin-bottom: 8px; border-left: 2px solid var(--brand-blue); background: rgba(41,63,133,.12); }
 .knowledge-group h3 { margin: 0 0 6px; color: #a9bcff; font: 700 15px var(--font-display); line-height: 1; text-transform: uppercase; }

@@ -112,8 +112,10 @@ def test_car_event_dataclass_preserves_context_copy_and_timestamp() -> None:
 
 
 VEHICLE_COMMANDS = [
-	("Could you raise the cabin temperature?", ActionType.INCREASE_TEMPERATURE),
-	("Could you lower the cabin temperature?", ActionType.DECREASE_TEMPERATURE),
+	("Could you raise the cabin temperature?", ActionType.ENABLE_HEATING),
+	("Could you lower the cabin temperature?", ActionType.ENABLE_AIR_CONDITIONING),
+	("Please turn on the cabin heating.", ActionType.ENABLE_HEATING),
+	("Please turn off the cabin heating.", ActionType.DISABLE_HEATING),
 	("Could you increase the fan speed?", ActionType.INCREASE_FAN_SPEED),
 	("Could you decrease the fan speed?", ActionType.DECREASE_FAN_SPEED),
 	("Could you open the windows?", ActionType.OPEN_WINDOWS),
@@ -233,7 +235,7 @@ def make_meeting_agent(confirmed: bool):
 	agent.action_manager.logger = Mock()
 	agent.conversation_history = []
 	agent.interpret_confirmation = AsyncMock(return_value=confirmed)
-	agent.assistant_status = AssistantStatus.IDLE
+	agent._assistant_status = AssistantStatus.IDLE
 	agent.set_assistant_status = Mock()
 	agent.speak = AsyncMock()
 	agent.llm_agent = SimpleNamespace(llm=object())

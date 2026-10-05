@@ -29,6 +29,12 @@ Consider the following situations:
   exceedance are present, or when an explicitly reported unsafe manoeuvre makes
   the current speed dangerous. Speed increases and fluctuations alone must
   remain silent.
+  The relative fact "Vehicle speed is too high." means the current speed is
+  more than 10 km/h above the detected speed limit: warn the driver. Its
+  reference value is the detected speed limit, not an ADAS target speed.
+  "Vehicle speed is high." means a smaller exceedance; remain silent for this
+  fact alone, as for optimal, low or too low relative speed. If no relative
+  speed fact is available, do not invent a speed limit or an exceedance.
 - Match explicitly detected security hazards to the relevant available protective
   action. To improve occupant security, lock the doors when a dangerous object is
   detected around the vehicle and the doors are unlocked. Do not infer the object's

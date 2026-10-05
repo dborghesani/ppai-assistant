@@ -49,6 +49,7 @@ const CONTROL_GROUPS = {
     ]},
     { title: "Climate controls", type: "toggles", cls: "VehicleState", controls: [
       ["Air conditioning", "air_conditioning_on", false, "On", "Off"],
+      ["Cabin heating", "heating_on", false, "On", "Off"],
       ["Air recirculation", "air_recirculation_on", false, "On", "Off"],
       ["Seat heating", "seat_heating_on", false, "On", "Off"]
     ]},
@@ -724,6 +725,27 @@ function renderKnowledge(rawKnowledge) {
   }).join("");
 }
 
+function renderChangedEvents(changes) {
+  const container = document.querySelector("#changed-events");
+  if (!Array.isArray(changes) || changes.length === 0) return;
+
+  container.querySelector(".changed-empty")?.remove();
+  [...changes].reverse().forEach(change => {
+    const item = document.createElement("div");
+    item.className = "changed-event";
+    item.textContent = String(change);
+    container.prepend(item);
+    setTimeout(() => {
+      item.classList.add("is-expiring");
+      setTimeout(() => item.remove(), 200);
+    }, 1800);
+  });
+
+  while (container.children.length > 6) {
+    container.lastElementChild?.remove();
+  }
+}
+
 bridge.on("ready", data => {
   renderKnowledge(data.knowledge);
   rememberControlState("DriverPreferences", data.driverPreferences);
@@ -747,6 +769,7 @@ bridge.on("assistantStatusChanged", data => setAssistantStatus(data[0]));
 bridge.on("friendMessageSimulationChanged", data => setFriendSimulation(Boolean(data[0])));
 bridge.on("userSpeechReceived", data => addMessage("user", data[0]));
 bridge.on("knowledgeUpdated", data => renderKnowledge(data[0]));
+bridge.on("knowledgeChanged", data => renderChangedEvents(data[0]));
 bridge.on("vehicleStateChanged", data => {
   const changed = rememberControlState("VehicleState", data[0]);
   if (changed) updateControlsInPlace("VehicleState", data[0]);

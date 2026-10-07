@@ -5,7 +5,7 @@ import json
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 import structlog
 from data.agents_dataclasses import (
     ActionType,
@@ -82,15 +82,6 @@ class NotificationDecision(BaseModel):
         """Derived, not model-provided: avoids the model setting notify inconsistently with urgency."""
         return self.urgency is not UrgencyType.NONE
 
-    @model_validator(mode="after")
-    def validate_message_delivery(self) -> NotificationDecision:
-        if self.action is ActionType.ASK_PERMISSION_TO_TALK and self.spoken_message is not None:
-            raise ValueError("ask_permission_to_talk requires spoken_message=null; announcing content requires announce_incoming_message")
-        if self.action is ActionType.ANNOUNCE_INCOMING_MESSAGE and not (self.spoken_message or "").strip():
-            raise ValueError("announce_incoming_message requires the message to relay in spoken_message")
-        if self.action is ActionType.ASK_FOR_MUSIC and not (self.spoken_message or "").strip():
-            raise ValueError("ask_for_music requires the permission question in spoken_message")
-        return self
 
 class LLMBackend:
     def __init__(self, opt: ConfigAssistant, registered_actions: frozenset[ActionType],
@@ -122,7 +113,7 @@ class LLMBackend:
                 ActionType.NONE,
                 ActionType.FIND_REST_AREA,
                 ActionType.ASK_ATTEND_MEETING,
-                ActionType.ASK_FOR_MUSIC,
+                ActionType.PROPOSE_MUSIC,
                 ActionType.ANNOUNCE_INCOMING_MESSAGE,
                 ActionType.ASK_PERMISSION_TO_TALK,
                 ActionType.READ_PENDING_MESSAGES,

@@ -99,9 +99,9 @@ class MusicManager:
             return
         self.close()
         self._selection = selection
-        self._task = asyncio.create_task(self._propose(json.loads(selection), ask_permission))
+        self._task = asyncio.create_task(self.propose(json.loads(selection), ask_permission))
 
-    async def _propose(self, context: dict[str, Any], ask_permission: Callable[..., Any]) -> None:
+    async def propose(self, context: dict[str, Any], ask_permission: Callable[..., Any]) -> None:
         generation = self._generation
         try:
             preferences = context.get("DriverPreferences", {}).get("preferred_music") or ""

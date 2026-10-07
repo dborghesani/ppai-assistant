@@ -120,7 +120,7 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
         agent.opt = ConfigAssistant()
         agent.conversation_history = []
         agent.skill_manager = SimpleNamespace(get_skill=Mock(return_value="Be concise."))
-        agent._classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
+        agent.classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
         agent.manual_manager = SimpleNamespace(context_for=AsyncMock(
             return_value="Source: manual.pdf; PDF page 1\nUse the steering wheel button."
         )) if rag_enabled else None
@@ -191,6 +191,6 @@ def test_tone_classification_falls_back_to_calm_on_backend_failure(content, expe
             agent.llm_backend.classify_conversation_tone = AsyncMock(return_value=ConversationTone(tone="serious").tone)
         else:
             agent.llm_backend.classify_conversation_tone = AsyncMock(side_effect=RuntimeError("crew failed"))
-        tone = await agent._classify_conversation_tone(event, "")
+        tone = await agent.classify_conversation_tone(event, "")
         assert tone.value == expected_tone
     asyncio.run(check())

@@ -262,7 +262,7 @@ def test_propose_music_decision_starts_proposal_through_the_agent():
             tone=ToneType.CALM,
             intervention_type=InterventionType.ACT,
             skill=SkillType.WELLBEING,
-            action=ActionType.ASK_FOR_MUSIC,
+            action=ActionType.PROPOSE_MUSIC,
             suggestion_type=SuggestionType.NONE,
             reason="Anger has persisted for a while; a calming playlist may help.",
             spoken_message="You've seemed tense for a while. Would you like some calming music?",
@@ -289,8 +289,8 @@ def test_ask_for_music_decision_requires_spoken_permission_question():
     payload = dict(
         urgency=UrgencyType.LOW.value, tone=ToneType.CALM.value,
         intervention_type=InterventionType.ACT.value, skill=SkillType.WELLBEING.value,
-        action=ActionType.ASK_FOR_MUSIC.value, suggestion_type=SuggestionType.NONE.value,
+        action=ActionType.PROPOSE_MUSIC.value, suggestion_type=SuggestionType.NONE.value,
         reason="Anger persisted for a while.", spoken_message=None,
     )
-    with pytest.raises(ValueError, match="ask_for_music requires"):
+    with pytest.raises(ValueError, match="propose_music requires"):
         NotificationDecision.model_validate(payload)

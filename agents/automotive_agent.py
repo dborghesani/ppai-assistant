@@ -304,7 +304,7 @@ class AutomotiveAgent:
         """Classify delivery tone, then stream and speak the conversational response."""
         conversation_instructions = self.skill_manager.get_skill(SkillType.CONVERSATION)
         context = "\n".join(event.context)
-        conversation_tone = await self._classify_conversation_tone(event, context)
+        conversation_tone = await self.classify_conversation_tone(event, context)
         reference_instructions, reference_text = response_context
         system_message = (
             "You are an in-vehicle assistant. Answer the driver directly and concisely. "
@@ -399,7 +399,7 @@ class AutomotiveAgent:
             if self.on_response is not None:
                 self.on_response(full_response + "\n")
 
-    async def _classify_conversation_tone(
+    async def classify_conversation_tone(
         self, event: CarEvent, context: str
     ) -> ToneType:
         """Delegate the delivery-tone choice to the backend's conversation tone crew."""
@@ -419,12 +419,34 @@ class AutomotiveAgent:
         if self.opt.use_laya:
             self.laya_backend.minimum_urgency = UrgencyType(urgency)
 
+    def is_duplicate_or_cooling_down(self, message: str, urgency: UrgencyType, measures: set[str],
+                                         cooldown_seconds: float = 60.0) -> tuple[bool, str]:
+            now = time.time()
+            current_rank = UrgencyType(urgency).rank
+            norm_message = message.strip().lower()
+            for previous in reversed(self.recent_notifications):
+                elapsed = now - previous.get("timestamp", 0)
+                if elapsed > cooldown_seconds:
+                    continue
+                previous_message = previous.get("message", "").strip().lower()
+                previous_rank = UrgencyType(previous.get("urgency", "none").lower()).rank
+                if (norm_message == previous_message or norm_message in previous_message or previous_message in norm_message) and current_rank <= previous_rank:
+                    return True, f"Identical/similar message spoken {int(elapsed)}s ago with same or higher urgency"
+                previous_measures = set(previous.get("measures") or [])
+                if (measures and measures & previous_measures and elapsed < cooldown_seconds / 2
+                        and current_rank <= previous_rank and current_rank < UrgencyType.HIGH.rank):
+                    shared = ", ".join(sorted(measures & previous_measures))
+                    return True, f"Recent notification for measure(s) '{shared}' already spoken {int(elapsed)}s ago"
+            return False, ""
+    
     async def process_event(self, event: CarEvent):
+        """
         if event.user_input:
             if self.action_manager.message_manager.submit_driver_reply(event.user_input):
                 return
             await self.process_event_llm(event)
             return
+        """
         if self.opt.use_laya:
             await self.process_event_laya(event)
         else:
@@ -439,10 +461,13 @@ class AutomotiveAgent:
         self.logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         self.logger.info(">>> generating...")
         if event.user_input:
-            if self.pending_confirmation is not None:
-                await self.handle_pending_confirmation(event.user_input)
-                self.pending_confirmation = None
-            return
+            self.logger.info(f"User input received: {event.user_input}")
+            await self.process_direct_user_input(event)
+        else:
+            self.logger.info("No direct user input received, processing event through LLM.")
+            await self.process_car_event(event)
+
+    async def process_car_event(self, event: CarEvent) -> None:
         try:
             instructions = self.skill_manager.get_skill(SkillType(event.skill))
         except ValueError:
@@ -456,9 +481,9 @@ class AutomotiveAgent:
             "skill_instructions": instructions,
             "vehicle_action_guidance": getattr(self.skill_manager, "vehicle_action_guidance", ""),
             "changed_facts": "\n".join(f"- {fact.removeprefix('Changed just now: ')}" for fact in event.context
-                                       if fact.startswith("Changed just now:")) or "No specific vehicle fact changed.",
+                                    if fact.startswith("Changed just now:")) or "No specific vehicle fact changed.",
             "context": "\n".join(f"- {fact}" for fact in event.context if not fact.startswith("Changed just now:"))
-                       or "No additional vehicle context is available.",
+                    or "No additional vehicle context is available.",
             "user_input": event.user_input,
             **self.llm_backend.decision_options,
             "silent_decision_guidance": self.llm_backend.silent_decision_guidance,
@@ -474,67 +499,13 @@ class AutomotiveAgent:
         self.logger.info(f">>> LLM generation took {time.time() - started:.2f}s")
         await self.handle_notification_decision(event, decision)
 
-    async def handle_notification_decision(self, event: CarEvent, decision: NotificationDecision) -> None:
-        if event.event_name is EventName.INCOMING_MESSAGE_RECEIVED:
-            self.remember_pending_message_classification(event.event_value, decision.tone, decision.urgency)
-            self.notify_incoming_message_classification(decision.tone, decision.urgency)
-        elif event.event_name is EventName.PENDING_MESSAGES_REMINDER:
-            classification = self.most_urgent_pending_message_classification()
-            if classification is not None:
-                decision.tone, decision.urgency = classification
-            self.notify_incoming_message_classification(decision.tone, decision.urgency)
-        if decision.action in {ActionType.ASK_PERMISSION_TO_TALK, ActionType.ANNOUNCE_INCOMING_MESSAGE}:
-            if decision.action is ActionType.ANNOUNCE_INCOMING_MESSAGE and decision.spoken_message:
-                await self.speak(decision.spoken_message, tone=decision.tone)
-            self.action_manager.handle_decision(decision.action, {})
-            return
-        if decision.action in {ActionType.ASK_ATTEND_MEETING, ActionType.ASK_FOR_MUSIC}:
-            if decision.spoken_message:
-                await self.speak(decision.spoken_message, tone=decision.tone)
-            self.action_manager.handle_decision(decision.action, {})
-            self.pending_confirmation = PendingConfirmation(action=decision.action)
-            return
-        if not decision.notify or not decision.spoken_message:
-            return
-        measures = set(event.event_value or [])
-        if self.duplicate_suppression_enabled:
-            suppressed, reason = self.is_duplicate_or_cooling_down(decision.spoken_message, decision.urgency, measures)
-            if suppressed:
-                self.logger.info(f">>> [suppressed duplicate] {reason}")
-                return
-        await self.speak(decision.spoken_message, tone=decision.tone)
-        self.recent_notifications.append({
-            "urgency": decision.urgency.value, "tone": decision.tone.value,
-            "intervention_type": decision.intervention_type.value, "skill": decision.skill.value,
-            "action": decision.action.value, "suggestion_type": decision.suggestion_type.value,
-            "message": decision.spoken_message, "event": event.event_name,
-            "measures": sorted(measures), "timestamp": time.time(),
-        })
-        self.recent_notifications = self.recent_notifications[-5:]
-        if decision.action is not ActionType.NONE:
-            self.action_manager.handle_decision(decision.action, {})
-
-    def is_duplicate_or_cooling_down(self, message: str, urgency: UrgencyType, measures: set[str],
-                                     cooldown_seconds: float = 60.0) -> tuple[bool, str]:
-        now = time.time()
-        current_rank = UrgencyType(urgency).rank
-        norm_message = message.strip().lower()
-        for previous in reversed(self.recent_notifications):
-            elapsed = now - previous.get("timestamp", 0)
-            if elapsed > cooldown_seconds:
-                continue
-            previous_message = previous.get("message", "").strip().lower()
-            previous_rank = UrgencyType(previous.get("urgency", "none").lower()).rank
-            if (norm_message == previous_message or norm_message in previous_message or previous_message in norm_message) and current_rank <= previous_rank:
-                return True, f"Identical/similar message spoken {int(elapsed)}s ago with same or higher urgency"
-            previous_measures = set(previous.get("measures") or [])
-            if (measures and measures & previous_measures and elapsed < cooldown_seconds / 2
-                    and current_rank <= previous_rank and current_rank < UrgencyType.HIGH.rank):
-                shared = ", ".join(sorted(measures & previous_measures))
-                return True, f"Recent notification for measure(s) '{shared}' already spoken {int(elapsed)}s ago"
-        return False, ""
-
     async def process_direct_user_input(self, event: CarEvent) -> None:
+        if self.pending_confirmation is not None:
+            await self.handle_pending_confirmation(event.user_input)
+        else:
+            await self.handle_direct_user_input(event)
+
+    async def handle_direct_user_input(self, event: CarEvent) -> None:
         backend = self.llm_backend
         pending_count = self.pending_message_count
         options = backend.direct_action_options + "\n" + self.action_manager.registered_action_options
@@ -560,12 +531,12 @@ class AutomotiveAgent:
             return
         if decision.intervention_type is InterventionType.ACT and decision.action in backend.direct_vehicle_actions:
             self.logger.info("Direct user request classified as vehicle action", user_input=event.user_input,
-                             action=decision.action.value, skill=decision.skill.value, reason=decision.reason)
+                            action=decision.action.value, skill=decision.skill.value, reason=decision.reason)
             self.action_manager.handle_decision(decision.action, {})
             await self.speak(decision.spoken_message or "I received the action request.", tone=decision.tone)
             return
         fallback_reason = (f"action={decision.action.value} is not a supported simulated vehicle action"
-                           if decision.action is not ActionType.NONE else "model selected action=none")
+                        if decision.action is not ActionType.NONE else "model selected action=none")
         self.logger.warning(
             "Direct user request was not classified as a vehicle action; falling back to conversation",
             user_input=event.user_input, fallback_reason=fallback_reason,
@@ -575,6 +546,52 @@ class AutomotiveAgent:
         )
         self.start_conversation_response(event, source=decision.response_source)
 
+    async def handle_notification_decision(self, event: CarEvent, decision: NotificationDecision) -> None:
+        if event.event_name is EventName.INCOMING_MESSAGE_RECEIVED:
+            self.remember_pending_message_classification(event.event_value, decision.tone, decision.urgency)
+            self.notify_incoming_message_classification(decision.tone, decision.urgency)
+        elif event.event_name is EventName.PENDING_MESSAGES_REMINDER:
+            classification = self.most_urgent_pending_message_classification()
+            if classification is not None:
+                decision.tone, decision.urgency = classification
+            self.notify_incoming_message_classification(decision.tone, decision.urgency)
+        if decision.action in {ActionType.ASK_PERMISSION_TO_TALK, ActionType.ANNOUNCE_INCOMING_MESSAGE}:
+            if decision.action is ActionType.ANNOUNCE_INCOMING_MESSAGE and decision.spoken_message:
+                await self.speak(decision.spoken_message, tone=decision.tone)
+            self.action_manager.handle_decision(decision.action, {})
+            return
+        if decision.action in ActionType.ASK_ATTEND_MEETING:
+            if decision.spoken_message:
+                await self.speak(decision.spoken_message, tone=decision.tone)
+            self.action_manager.handle_decision(decision.action, {})
+            self.pending_confirmation = PendingConfirmation(action=decision.action)
+            return
+        if decision.action in ActionType.PROPOSE_MUSIC:
+            if decision.spoken_message:
+                await self.speak(decision.spoken_message, tone=decision.tone)
+            self.action_manager.handle_decision(decision.action, {})
+            self.pending_confirmation = PendingConfirmation(action=decision.action)
+            return
+        if not decision.notify or not decision.spoken_message:
+            return
+        measures = set(event.event_value or [])
+        if self.duplicate_suppression_enabled:
+            suppressed, reason = self.is_duplicate_or_cooling_down(decision.spoken_message, decision.urgency, measures)
+            if suppressed:
+                self.logger.info(f">>> [suppressed duplicate] {reason}")
+                return
+        await self.speak(decision.spoken_message, tone=decision.tone)
+        self.recent_notifications.append({
+            "urgency": decision.urgency.value, "tone": decision.tone.value,
+            "intervention_type": decision.intervention_type.value, "skill": decision.skill.value,
+            "action": decision.action.value, "suggestion_type": decision.suggestion_type.value,
+            "message": decision.spoken_message, "event": event.event_name,
+            "measures": sorted(measures), "timestamp": time.time(),
+        })
+        self.recent_notifications = self.recent_notifications[-5:]
+        if decision.action is not ActionType.NONE:
+            self.action_manager.handle_decision(decision.action, {})
+    
     def start_conversation_response(self, event: CarEvent, action: ActionType | None = None,
                                      source: ResponseSource = ResponseSource.GENERAL) -> None:
         response = (self.action_manager.execute_registered_action(action, event.user_input) if action is not None
@@ -611,7 +628,7 @@ class AutomotiveAgent:
                 self.on_speaking_tone_changed(None)
             self.set_assistant_status(AssistantStatus.IDLE)
 
-    async def handle_pending_confirmation(self, user_input: str) -> bool:
+    async def handle_pending_confirmation(self, user_input: str) -> None:
         assert(self.pending_confirmation is not None)
         confirmed = await self.interpret_confirmation(user_input)
         event = CarEvent(
@@ -619,9 +636,18 @@ class AutomotiveAgent:
             event_value=user_input, context=self.knowledge_context(), user_input=user_input,
         )
         response_context: tuple[str, str] = ("", "")
+
         if self.pending_confirmation.action == ActionType.ASK_ATTEND_MEETING:
             response_context = self.llm_backend.meeting_reply_context(confirmed)
-        if self.pending_confirmation.action == ActionType.ASK_FOR_MUSIC:
+            await self.stream_user_response(event, response_context=response_context)
+            if confirmed is True:
+                self.action_manager.confirm_attend_meeting()
+            elif confirmed is False:
+                self.action_manager.decline_attend_meeting()
+            self.pending_confirmation = None
+            return
+
+        if self.pending_confirmation.action == ActionType.PROPOSE_MUSIC:
             self.cancel_voice_response()
             if confirmed:
                 # Generate and queue the music plan BEFORE the reply proposes it.
@@ -632,17 +658,20 @@ class AutomotiveAgent:
                 response_context = self.llm_backend.music_proposal_reply_context(confirmed, result)
             else:
                 response_context = self.llm_backend.music_proposal_reply_context(confirmed)
-        
-        await self.stream_user_response(event, response_context=response_context)
-        
-        if confirmed is True:
-            if self.pending_confirmation.action == ActionType.ASK_ATTEND_MEETING:
-                self.action_manager.confirm_attend_meeting()
-        elif confirmed is False:
-            if self.pending_confirmation.action == ActionType.ASK_ATTEND_MEETING:
-                self.action_manager.decline_attend_meeting()
+            await self.stream_user_response(event, response_context=response_context)
+            if confirmed:
+                self.pending_confirmation.action = ActionType.EVALUATE_MUSIC_PROPOSAL
+            else:
+                self.pending_confirmation.action = None
+            return
 
-        return True
+        if self.pending_confirmation.action == ActionType.EVALUATE_MUSIC_PROPOSAL:
+            self.cancel_voice_response()
+            if confirmed:
+                self.logger.info("enable music proposal")
+                #await self.action_manager.music_manager.evaluate_proposal()
+            self.pending_confirmation = None
+            return
 
     async def interpret_confirmation(self, user_input: str) -> bool | None:
         """Ask the conversational LLM, using the chat history, whether the driver just confirmed."""

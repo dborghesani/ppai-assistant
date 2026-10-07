@@ -126,6 +126,17 @@
             "console": "integratedTerminal"
         },
         {
+            "name": "test_genai_models",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tests/test_models.py",
+            "console": "integratedTerminal",
+            "args": [
+                //"--model", "atlas/glm-5.3-flash"
+                "--model", "atlas/qwen3.8-27b"
+            ],
+        },
+        {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",

@@ -96,6 +96,7 @@ class ActionType(str, Enum):
     DISABLE_FOG_LIGHTS = "disable_fog_lights"
     FIND_REST_AREA = "find_rest_area"
     ASK_ATTEND_MEETING = "ask_attend_meeting"
+    ASK_FOR_MUSIC = "ask_for_music"
 
     @property
     def description(self) -> str:
@@ -161,6 +162,10 @@ class ActionType(str, Enum):
             ActionType.ASK_ATTEND_MEETING: (
                 "Ask the driver whether the assistant should attend their upcoming "
                 "meeting on their behalf because they are running late."
+            ),
+            ActionType.ASK_FOR_MUSIC: (
+                "Ask the driver's permission to play a mood-matching playlist when a "
+                "non-neutral emotion has persisted for a while."
             ),
         }[self]
 

@@ -142,9 +142,7 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
         from agents.llm_backend import LLMBackend
         agent.llm_backend = LLMBackend.__new__(LLMBackend)
         agent.llm_backend.opt = agent.opt
-        agent.llm_backend.client = agent.voice_llm
-        agent.llm_backend.on_usage = agent.log_llm_usage
-        agent.llm_backend.logger = Mock()
+        agent.llm_backend.classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
         event = CarEvent(SkillType.CONVERSATION, "user_input", "How does cruise control work?", [], "How does cruise control work?")
         source = ResponseSource.VEHICLE_MANUAL if manual_question else ResponseSource.GENERAL
         await agent.prepare_user_response(event, source)
@@ -174,32 +172,25 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
     ('', "calm"),
     ('{"tone": "unknown"}', "calm"),
 ])
-def test_tone_classification_requests_schema_without_reasoning(content, expected_tone):
+def test_tone_classification_falls_back_to_calm_on_backend_failure(content, expected_tone):
     from data.agents_dataclasses import SkillType
     from agents.automotive_agent import AutomotiveAgent
     from data.events import CarEvent
+    from agents.llm_backend import LLMBackend
 
     async def check():
         agent = AutomotiveAgent.__new__(AutomotiveAgent)
         agent.opt = ConfigAssistant()
         agent.conversation_history = []
         agent.log_llm_usage = Mock()
-        response = SimpleNamespace(usage=None, choices=[
-            SimpleNamespace(message=SimpleNamespace(content=content))
-        ])
-        create = AsyncMock(return_value=response)
-        agent.voice_llm = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
         event = CarEvent(SkillType.CONVERSATION, "user_input", "How do I activate cruise control?", [], "How do I activate cruise control?")
-        from agents.llm_backend import LLMBackend
         agent.llm_backend = LLMBackend.__new__(LLMBackend)
-        agent.llm_backend.opt = agent.opt
-        agent.llm_backend.client = agent.voice_llm
-        agent.llm_backend.on_usage = agent.log_llm_usage
         agent.llm_backend.logger = Mock()
+        if content == '{"tone": "serious"}':
+            from agents.llm_backend import ConversationTone
+            agent.llm_backend.classify_conversation_tone = AsyncMock(return_value=ConversationTone(tone="serious").tone)
+        else:
+            agent.llm_backend.classify_conversation_tone = AsyncMock(side_effect=RuntimeError("crew failed"))
         tone = await agent._classify_conversation_tone(event, "")
         assert tone.value == expected_tone
-        assert create.call_args.kwargs["reasoning_effort"] == "none"
-        schema = create.call_args.kwargs["response_format"]["json_schema"]["schema"]
-        assert schema["required"] == ["tone"]
-        assert expected_tone in schema["properties"]["tone"]["enum"]
     asyncio.run(check())

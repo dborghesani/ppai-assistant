@@ -65,7 +65,7 @@ def make_agent(context: list[str] | None = None) -> AutomotiveAgent:
     agent.voice_llm = SimpleNamespace(
         chat=SimpleNamespace(completions=SimpleNamespace(create=summary_create))
     )
-    agent.knowledge_context_provider = lambda: list(context or [])
+    agent.knowledge_facts_provider = lambda: dict(context or {})
     agent.is_processing_event = False
     agent.event_queue = asyncio.Queue()
     agent._assistant_status = AssistantStatus.IDLE

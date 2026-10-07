@@ -3,7 +3,7 @@ import unittest
 from collections import defaultdict
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from aiohttp.test_utils import TestClient, TestServer
 from data.agents_dataclasses import AssistantStatus
@@ -313,11 +313,10 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
         )
         agent.opt = SimpleNamespace(ollama_model="ollama/test", max_tokens=1024)
         from agents.llm_backend import LLMBackend
+        from data.agents_dataclasses import ToneType
         agent.llm_backend = LLMBackend.__new__(LLMBackend)
         agent.llm_backend.opt = agent.opt
-        agent.llm_backend.client = agent.voice_llm
-        agent.llm_backend.on_usage = agent.log_llm_usage
-        agent.llm_backend.logger = Mock()
+        agent.llm_backend.classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
         agent.tts_manager = FakeTTS()
         agent.on_response_update = lambda text: order.append(("ui", text))
         agent.on_response = lambda text: order.append(("final", text.strip()))

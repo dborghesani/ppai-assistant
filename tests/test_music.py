@@ -1,11 +1,24 @@
 from data.assistant_dataclasses import DriverEmotionState, DriverPreferences
 from dataclasses import fields
 import asyncio
+from types import MethodType, SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, Mock
-from types import SimpleNamespace
 import json
 
+import pytest
+
 from config import ConfigAssistant
+from data.agents_dataclasses import (
+    ActionType,
+    InterventionType,
+    SkillType,
+    SuggestionType,
+    ToneType,
+    UrgencyType,
+)
+from agents.automotive_agent import AutomotiveAgent
+from agents.llm_backend import NotificationDecision
 from managers.music_manager import MusicManager, MusicSearchPlan, jamendo_url
 from managers.knowledge_manager import KnowledgeManager
 
@@ -222,3 +235,62 @@ def test_persistence_update_is_not_blocked_by_transient_silence_cooldown():
         manager.observe({**state, "DriverEmotionState": {"sad": "Sadness level is medium."}}, ask)
         assert manager.plan.await_count == 2
     asyncio.run(check())
+
+
+def test_propose_music_decision_starts_proposal_through_the_agent():
+    async def check():
+        agent = SimpleNamespace(
+            is_listening=True,
+            ask_music_permission=AsyncMock(return_value=True),
+            knowledge_facts_provider=lambda: {
+                "DriverEmotionState.angry": "Anger level is high. This condition has persisted for a while.",
+                "VehicleState.doors_locked": "The vehicle doors are locked.",
+            },
+            driver_preferences_provider=lambda: {"driver_name": "David", "preferred_music": "calm classical"},
+        )
+        manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
+        manager.plan = AsyncMock(return_value=MusicSearchPlan(
+            title="Calm piano", queries=["calm piano"], tags=["piano"],
+            permission_question="Would you like some calming music?",
+        ))
+        manager.search = AsyncMock(return_value={"title": "Calm piano", "tracks": []})
+        agent.action_manager = SimpleNamespace(music_manager=manager)
+        agent.start_music_proposal = MethodType(AutomotiveAgent.start_music_proposal, agent)
+
+        decision = NotificationDecision(
+            urgency=UrgencyType.LOW,
+            tone=ToneType.CALM,
+            intervention_type=InterventionType.ACT,
+            skill=SkillType.WELLBEING,
+            action=ActionType.ASK_FOR_MUSIC,
+            suggestion_type=SuggestionType.NONE,
+            reason="Anger has persisted for a while; a calming playlist may help.",
+            spoken_message="You've seemed tense for a while. Would you like some calming music?",
+        )
+        assert decision.spoken_message  # validator requires the permission question
+
+        agent.start_music_proposal()
+        await manager._task
+        assert manager.current["status"] == "proposal"
+        assert manager.current["permission_question"] == "Would you like some calming music?"
+        manager.plan.assert_awaited_once_with(
+            "calm classical",
+            {"angry": "Anger level is high. This condition has persisted for a while."},
+            "",
+            {
+                "DriverEmotionState": {"angry": "Anger level is high. This condition has persisted for a while."},
+                "DriverPreferences": {"driver_name": "David", "preferred_music": "calm classical"},
+            },
+        )
+    asyncio.run(check())
+
+
+def test_ask_for_music_decision_requires_spoken_permission_question():
+    payload = dict(
+        urgency=UrgencyType.LOW.value, tone=ToneType.CALM.value,
+        intervention_type=InterventionType.ACT.value, skill=SkillType.WELLBEING.value,
+        action=ActionType.ASK_FOR_MUSIC.value, suggestion_type=SuggestionType.NONE.value,
+        reason="Anger persisted for a while.", spoken_message=None,
+    )
+    with pytest.raises(ValueError, match="ask_for_music requires"):
+        NotificationDecision.model_validate(payload)

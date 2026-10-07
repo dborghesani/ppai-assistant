@@ -368,7 +368,7 @@ class DriverPreferences:
 
 @dataclass
 class DriverEmotionState:
-    angry: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
+    angry: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,)) # persistence_levels=("medium", "high", "very high"))
     disgust: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
     fear: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))
     happy: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,), persistence_levels=("medium", "high", "very high"))

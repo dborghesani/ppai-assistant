@@ -492,16 +492,6 @@ class VehicleBridge:
         """Called synchronously by KnowledgeManager right after its context changes."""
         self._emit("knowledgeUpdated", self.dumpKnowledgeData())
         self._emit("detectedObjectsStateChanged", self.dumpDetectedObjectsState())
-        music_manager = getattr(self.agent.action_manager, "music_manager", None)
-        if music_manager is not None and self.agent.is_listening:
-            state = {name: asdict(value) for name, value in self.database_manager.current_state.items()
-                     if is_dataclass(value) and not isinstance(value, type)}
-            state["DriverPreferences"] = self.dumpDriverPreferences()
-            state["DriverEmotionState"] = {
-                key.partition(".")[2]: fact for key, fact in self.knowledge_manager.context.items()
-                if key.startswith("DriverEmotionState.")
-            }
-            music_manager.observe(state, self.agent.ask_music_permission)
 
     def dumpMusicState(self) -> dict[str, Any]:
         manager = getattr(self.agent.action_manager, "music_manager", None)

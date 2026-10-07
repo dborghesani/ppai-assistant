@@ -189,9 +189,7 @@ async def main(opt: ConfigAssistant):
         knowledge_event_queue=agent.event_queue,
         opt=opt,
     )
-    agent.set_knowledge_context_provider(
-        lambda: list(knowledge_manager.context.values())
-    )
+    agent.set_knowledge_facts_provider(lambda: dict(knowledge_manager.context))
     # publish the known baseline (doors closed, lights off, ...) before any
     # real telemetry source starts feeding data
     await knowledge_manager.seed_default_knowledge()

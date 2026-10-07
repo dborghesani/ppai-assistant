@@ -12,7 +12,6 @@ from sim.meeting_sim import DEFAULT_TOPIC, build_crew
 if TYPE_CHECKING:
     from agents.automotive_agent import AutomotiveAgent
 
-
 class ActionManager:
     """Single dispatch point for decided actions (LLM or Laya): launches actuations and hands
     their outcome to the agent's output layer (speech/text). No LLM or conversational logic here."""
@@ -20,8 +19,8 @@ class ActionManager:
     def __init__(self, agent: "AutomotiveAgent"):
         self.agent = agent
         self.logger = structlog.get_logger()
-        self.awaiting_confirmation = False
         self._meeting_task: asyncio.Task | None = None
+        self._awaiting_meeting_confirmation = False
         self.on_action: Callable[[ActionType, dict[str, Any]], None] | None = None
         self._registered_handlers: dict[ActionType, Callable[[ActionType, str], Awaitable[None]]] = {}
         self._registered_guidance: list[str] = []
@@ -86,7 +85,9 @@ class ActionManager:
         }:
             self.message_manager.handle_action(action_type)
         elif action_type is ActionType.ASK_ATTEND_MEETING:
-            self._mark_awaiting_meeting_confirmation()
+            self.mark_awaiting_meeting_confirmation()
+        elif action_type is ActionType.PLAY_MUSIC:
+            self.agent.start_music_proposal()
         elif action_type is not ActionType.NONE:
             self.agent.set_assistant_status(AssistantStatus.ACT)
             try:
@@ -98,24 +99,29 @@ class ActionManager:
             finally:
                 self.agent.set_assistant_status(AssistantStatus.IDLE)
 
-    def _mark_awaiting_meeting_confirmation(self) -> None:
+    @property
+    def awaiting_confirmation(self) -> bool:
+        return self._awaiting_meeting_confirmation
+
+    def mark_awaiting_meeting_confirmation(self) -> None:
         if self._meeting_task is not None and not self._meeting_task.done():
             return
+        self._awaiting_meeting_confirmation = True
         self.logger.info(">>> [meeting] asked driver, awaiting confirmation reply")
-        self.awaiting_confirmation = True
 
     def confirm_attend_meeting(self) -> None:
         """Called by the agent once it has interpreted the driver's reply as a yes."""
-        self.awaiting_confirmation = False
+        self._awaiting_meeting_confirmation = False
         self.logger.info(">>> [meeting] confirmed by driver, launching simulation")
         self.agent.set_assistant_status(AssistantStatus.BACKGROUND_TASK_RUNNING)
-        self._meeting_task = asyncio.create_task(self._attend_meeting())
+        self._meeting_task = asyncio.create_task(self.attend_meeting())
 
     def decline_attend_meeting(self) -> None:
-        self.awaiting_confirmation = False
+        self._awaiting_meeting_confirmation = False
+        self.agent.set_assistant_status(AssistantStatus.IDLE)
         self.logger.info(">>> [meeting] declined by driver, no simulation launched")
 
-    async def _attend_meeting(self) -> None:
+    async def attend_meeting(self) -> None:
         """Run the simulated work meeting crew and hand its outcome to the agent to speak."""
         summary = ""
         try:

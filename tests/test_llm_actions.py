@@ -410,7 +410,7 @@ def test_duplicate_suppression_is_opt_in_and_defaults_off():
         spoken_message="Please continue driving smoothly.",
     )
     llm_agent, agent = make_llm_agent(decision)
-    agent._is_duplicate_or_cooling_down = Mock(
+    agent.is_duplicate_or_cooling_down = Mock(
         return_value=(True, "duplicate")
     )
     event = CarEvent(
@@ -427,14 +427,14 @@ def test_duplicate_suppression_is_opt_in_and_defaults_off():
     agent.speak.assert_awaited_once_with(
         "Please continue driving smoothly.", tone=ToneType.CALM
     )
-    agent._is_duplicate_or_cooling_down.assert_not_called()
+    agent.is_duplicate_or_cooling_down.assert_not_called()
 
     agent.speak.reset_mock()
     agent.duplicate_suppression_enabled = True
     asyncio.run(agent.process_event_llm(event))
 
     agent.speak.assert_not_awaited()
-    agent._is_duplicate_or_cooling_down.assert_called_once()
+    agent.is_duplicate_or_cooling_down.assert_called_once()
 
 
 def test_direct_command_fallback_logs_decision_and_reason():

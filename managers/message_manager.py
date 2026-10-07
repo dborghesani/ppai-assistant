@@ -47,7 +47,7 @@ class MessageManager:
 
     async def receive(self, message: IncomingMessage) -> None:
         self.pending_messages.append(message)
-        context = self.agent.knowledge_context_provider()
+        context = self.agent.knowledge_context()
         context.insert(0, f"Changed just now: New incoming message from {message.sender}: {message.text}")
         self.agent.event_queue.put_nowait(CarEvent(
             skill=SkillType.CONVERSATION, event_name=EventName.INCOMING_MESSAGE_RECEIVED,
@@ -127,7 +127,7 @@ class MessageManager:
                     AssistantStatus.IDLE, AssistantStatus.ASK_PERMISSION_TO_TALK
                 } or not self.agent.event_queue.empty()):
                     continue
-                context = self.agent.knowledge_context_provider()
+                context = self.agent.knowledge_context()
                 context.insert(0, f"There are {len(self.pending_messages)} incoming messages waiting for permission to be read.")
                 self.agent.event_queue.put_nowait(CarEvent(
                     skill=SkillType.CONVERSATION, event_name=EventName.PENDING_MESSAGES_REMINDER,

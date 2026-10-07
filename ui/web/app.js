@@ -211,7 +211,7 @@ function displayMusicTrack(track) {
 function syncMusicTransport() {
   const playing = !musicAudio.paused && Boolean(musicAudio.src);
   const button = document.querySelector("#music-play");
-  button.innerHTML = playing ? "&#10074;&#10074;" : "&#9654;";
+  button.classList.toggle("is-playing", playing);
   button.title = playing ? "Pause music" : "Play music";
   button.setAttribute("aria-label", button.title);
   document.querySelector("#music-next").disabled = musicTrackIndex + 1 >= musicQueue.length;
@@ -231,20 +231,28 @@ async function playMusicTrack(index) {
     if (muted) showToast("Increase Vehicle Audio volume to hear music");
   } catch (error) {
     const blocked = error?.name === "NotAllowedError";
-    const mediaError = musicAudio.error?.code;
+    const media = musicAudio.error;
+    const mediaError = media?.code;
     const volumeIsZero = musicAudio.volume === 0;
+    const audioUrl = new URL(track.audio);
     const status = blocked ? "Tap Play to start"
       : volumeIsZero ? "Vehicle Audio volume is 0"
-      : mediaError === 4 ? "Audio format or source unsupported"
+      : mediaError === 4 ? "Music stream unavailable or invalid"
       : "Audio source unavailable";
     document.querySelector("#music-status").textContent = status;
     showToast(blocked ? "Tap Play to start music" : status);
     console.warn("Music playback failed", {
       error: error?.name,
+      errorMessage: error?.message,
       mediaError,
+      mediaErrorMessage: media?.message,
       networkState: musicAudio.networkState,
       readyState: musicAudio.readyState,
-      audioHost: new URL(track.audio).host,
+      audioHost: audioUrl.host,
+      audioPath: audioUrl.pathname,
+      audioFormat: audioUrl.searchParams.get("format") || "unspecified",
+      canPlayOgg: musicAudio.canPlayType('audio/ogg; codecs="vorbis"'),
+      canPlayMp3: musicAudio.canPlayType("audio/mpeg"),
     });
   }
   syncMusicTransport();
@@ -304,7 +312,10 @@ musicAudio.addEventListener("ended", () => {
 });
 musicAudio.addEventListener("error", () => {
   if (musicAudio.getAttribute("src")) {
-    document.querySelector("#music-status").textContent = "Audio source unavailable";
+    const status = musicAudio.error?.code === 4
+      ? "Music stream unavailable or invalid"
+      : "Audio source unavailable";
+    document.querySelector("#music-status").textContent = status;
     showToast("This track could not be played");
   }
   syncMusicTransport();

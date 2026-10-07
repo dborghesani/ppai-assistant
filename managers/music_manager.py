@@ -94,7 +94,7 @@ class MusicManager:
         for field in schema["properties"].values():
             field.pop("default", None)
         response = await self.llm.chat.completions.create(
-            model=self.opt.ollama_model.removeprefix("ollama/"),
+            model=self.opt.ollama_model,
             messages=[
                 {"role": "system", "content": (
                     "The assistant has already decided that a music search is authorized. Select a "
@@ -152,13 +152,13 @@ class MusicManager:
                     if not playlist_id.isdigit():
                         continue
                     details = await self.get(session, "playlists/tracks", id=playlist_id,
-                                             limit=self.opt.music_track_limit, track_type="albumtrack+single", audioformat="mp32")
+                                             limit=self.opt.music_track_limit, track_type="albumtrack+single", audioformat="ogg")
                     tracks = self.tracks(details[0].get("tracks", [])) if details else []
                     if tracks:
                         return {"kind": "playlist", "title": str(playlist.get("name", plan.title)),
                                 "url": jamendo_url(playlist.get("shareurl")), "tracks": tracks}
             tracks = self.tracks(await self.get(session, "tracks", fuzzytags="+".join(tag[:40] for tag in plan.tags),
-                                                limit=self.opt.music_track_limit, type="albumtrack+single", audioformat="mp32", groupby="artist_id"))
+                                                limit=self.opt.music_track_limit, type="albumtrack+single", audioformat="ogg", groupby="artist_id"))
             return {"kind": "mix", "title": plan.title, "url": "", "tracks": tracks} if tracks else None
 
     async def find(self, preferences: str, emotion: str | dict[str, Any], request: str,

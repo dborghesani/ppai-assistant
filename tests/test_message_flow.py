@@ -49,7 +49,7 @@ def make_agent(context: list[str] | None = None) -> AutomotiveAgent:
     agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
     agent.logger = Mock()
     agent.opt = SimpleNamespace(
-        ollama_model="ollama/test-model", context_window_size=4096
+        ollama_model="test-model", context_window_size=4096
     )
     summary_create = AsyncMock(
         return_value=SimpleNamespace(
@@ -107,7 +107,7 @@ class MessageSimulatorTest(IsolatedAsyncioTestCase):
         logged_usage: list[tuple[str, Any | None]] = []
         simulator = FriendMessageAgent(
             llm_client=cast(Any, llm_client),
-            model="ollama/test-model",
+            model="test-model",
             on_message=AsyncMock(),
             on_usage=lambda name, value: logged_usage.append((name, value)),
         )
@@ -122,7 +122,7 @@ class MessageSimulatorTest(IsolatedAsyncioTestCase):
             ),
         )
         request = create.await_args.kwargs
-        self.assertEqual(request["model"], "ollama/test-model")
+        self.assertEqual(request["model"], "test-model")
         self.assertIn(
             "Return only the message text", request["messages"][0]["content"]
         )
@@ -236,7 +236,7 @@ class MessageSimulatorTest(IsolatedAsyncioTestCase):
                 Any,
                 SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),
             ),
-            model="ollama/test-model",
+            model="test-model",
             on_message=AsyncMock(),
             on_usage=Mock(),
         )
@@ -254,7 +254,7 @@ class MessageSimulatorTest(IsolatedAsyncioTestCase):
         self.assertEqual(create.await_count, 2)
         logger.warning.assert_called_once_with(
             "Message model returned empty content",
-            model="ollama/test-model",
+            model="test-model",
             attempt=1,
             finish_reason="stop",
         )

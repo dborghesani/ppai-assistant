@@ -96,7 +96,7 @@ def _open_browser_tab(url: str) -> None:
 def _load_ollama_model(opt: ConfigAssistant) -> str:
     """Resolve the model name to use (creating a custom-context-window variant on Ollama
     if needed) and warm it up so the first real request isn't slowed by a cold start."""
-    raw_model = opt.ollama_model.removeprefix("ollama/")
+    raw_model = opt.ollama_model
     if "-ctx" in raw_model or opt.context_window_size <= 4096:
         model_to_use = raw_model
     else:
@@ -132,28 +132,31 @@ def _load_ollama_model(opt: ConfigAssistant) -> str:
             )
             model_to_use = raw_model
 
-    request = Request(
-        url=f"http://{opt.ollama_host}:{opt.ollama_port}/api/generate",
-        data=json.dumps(
-            {
-                "model": model_to_use,
-                "prompt": "",
-                "stream": False,
-                "keep_alive": "30m",
-            }
-        ).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=opt.ollama_timeout):
-            logger.info("Ollama model loaded", model=model_to_use)
-    except (URLError, TimeoutError, OSError) as error:
-        logger.warning(
-            "Unable to warm up Ollama model", model=model_to_use, error=str(error)
+    candidates = [model_to_use]
+    if model_to_use != raw_model:
+        candidates.append(raw_model)
+    for candidate in candidates:
+        request = Request(
+            url=f"http://{opt.ollama_host}:{opt.ollama_port}/api/generate",
+            data=json.dumps(
+                {
+                    "model": candidate,
+                    "prompt": "",
+                    "stream": False,
+                    "keep_alive": "30m",
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
+        try:
+            with urlopen(request, timeout=opt.ollama_timeout):
+                logger.info("Ollama model loaded", model=candidate)
+            return candidate
+        except (URLError, TimeoutError, OSError) as error:
+            logger.warning("Unable to warm up Ollama model", model=candidate, error=str(error))
 
-    return f"ollama/{model_to_use}"
+    return raw_model
 
 
 async def main(opt: ConfigAssistant):

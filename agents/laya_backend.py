@@ -316,7 +316,7 @@ class LayaBackend:
             self.agent.on_speaking_tone_changed(output_tone.value)
         try:
             stream = await self.agent.voice_llm.chat.completions.create(
-                model=self.agent.opt.ollama_model.removeprefix("ollama/"),
+                model=self.agent.opt.ollama_model,
                 messages=messages,
                 stream=True,
                 temperature=0.3,

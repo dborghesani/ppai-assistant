@@ -23,7 +23,7 @@ class MessageManager:
         self.read_task: asyncio.Task[None] | None = None
         self.simulator = FriendMessageAgent(
             llm_client=agent.voice_llm,
-            model=agent.opt.ollama_model.removeprefix("ollama/"),
+            model=agent.opt.ollama_model,
             on_message=self.receive,
             on_usage=agent.log_llm_usage,
         )
@@ -103,7 +103,7 @@ class MessageManager:
         message_text = "\n".join(f"{message.sender}: {message.text}" for message in messages)
         try:
             response = await self.agent.voice_llm.chat.completions.create(
-                model=self.agent.opt.ollama_model.removeprefix("ollama/"),
+                model=self.agent.opt.ollama_model,
                 messages=[
                     {"role": "system", "content": (
                         "Interpret these messages lightly and relay their meaning naturally in English "

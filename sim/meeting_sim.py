@@ -8,7 +8,7 @@ produces a short summary to relay to the driver.
 This is a first prototype for multi-agent integration: it runs standalone,
 independent of the rest of the assistant pipeline (no telemetry, no TTS).
 
-Run: python sim/meeting_sim.py [--topic "..."] [--ollama-model ollama/qwen2.5:3b-instruct]
+Run: python sim/meeting_sim.py [--topic "..."] [--ollama-model qwen2.5:3b-instruct]
 """
 from __future__ import annotations
 
@@ -175,7 +175,7 @@ def main() -> None:
     parser.add_argument("--topic", default=DEFAULT_TOPIC)
     parser.add_argument("--ollama-host", default="localhost")
     parser.add_argument("--ollama-port", type=int, default=11434)
-    parser.add_argument("--ollama-model", default="ollama/qwen2.5:3b-instruct")
+    parser.add_argument("--ollama-model", default="qwen2.5:3b-instruct")
     parser.add_argument("--ollama-timeout", type=int, default=1200)
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--verbose", action="store_true")

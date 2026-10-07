@@ -82,9 +82,9 @@
           <div id="music-transport" class="music-transport" hidden>
             <img id="music-cover" alt="" width="40" height="40" hidden>
             <div class="music-track"><span id="music-track-title"></span><small id="music-artist"></small></div>
-            <button id="music-play" class="icon-button" type="button" title="Play or pause music" aria-label="Play music">&#9654;</button>
-            <button id="music-next" class="icon-button" type="button" title="Next track" aria-label="Next track">&#9197;</button>
-            <button id="music-stop" class="icon-button" type="button" title="Stop music" aria-label="Stop music">&#9632;</button>
+            <button id="music-play" class="icon-button music-control" type="button" title="Play or pause music" aria-label="Play music"><span class="music-icon music-icon--play" aria-hidden="true"></span></button>
+            <button id="music-next" class="icon-button music-control" type="button" title="Next track" aria-label="Next track"><span class="music-icon music-icon--next" aria-hidden="true"><i></i><i></i><b></b></span></button>
+            <button id="music-stop" class="icon-button music-control" type="button" title="Stop music" aria-label="Stop music"><span class="music-icon music-icon--stop" aria-hidden="true"></span></button>
           </div>
           <div class="music-attribution"><a id="music-source" target="_blank" rel="noopener noreferrer" hidden>Jamendo</a><a id="music-license" target="_blank" rel="noopener noreferrer" hidden>License</a></div>
           <audio id="music-audio" preload="none"></audio>

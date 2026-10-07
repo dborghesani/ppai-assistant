@@ -334,7 +334,7 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
         agent.voice_llm = SimpleNamespace(
             chat=SimpleNamespace(completions=SimpleNamespace(create=create))
         )
-        agent.opt = SimpleNamespace(ollama_model="ollama/test", max_tokens=1024)
+        agent.opt = SimpleNamespace(ollama_model="test", max_tokens=1024)
         from agents.llm_backend import LLMBackend
         from data.agents_dataclasses import ToneType
         agent.llm_backend = LLMBackend.__new__(LLMBackend)

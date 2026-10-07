@@ -28,7 +28,7 @@ def make_live_agent() -> AutomotiveAgent:
     return AutomotiveAgent(
         ConfigAssistant(
             ollama_model=os.environ.get(
-                "PPAI_OLLAMA_TEST_MODEL", "ollama/qwen3.5:4b-ctx16384"
+                "PPAI_OLLAMA_TEST_MODEL", "qwen3.5:4b"
             ),
             context_window_size=16384,
             tts_enabled=False,

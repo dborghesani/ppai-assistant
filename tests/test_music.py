@@ -119,10 +119,12 @@ def test_live_playlist_and_fallback():
         result = await manager.search(plan)
         assert result["kind"] == "playlist"
         assert manager.get.call_args_list[0].kwargs["namesearch"] == "downtempo"
+        assert manager.get.call_args_list[1].kwargs["audioformat"] == "ogg"
         manager.get = AsyncMock(side_effect=[[], [track]])
         result = await manager.search(plan)
         assert result["kind"] == "mix"
         assert manager.get.call_args.kwargs["fuzzytags"] == "chillout"
+        assert manager.get.call_args.kwargs["audioformat"] == "ogg"
     asyncio.run(check())
 
 
@@ -194,7 +196,7 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
         manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
         selection = {"kind": "playlist", "title": "Mellow Nights", "tracks": [{"id": "1"}]}
         manager.current = {"status": "ready", "autoplay": False, **selection}
-        manager.request = AsyncMock()
+        manager.request = AsyncMock(return_value=selection)
 
         agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
         agent.pending_confirmation = SimpleNamespace(action=ActionType.PROPOSE_MUSIC)
@@ -205,7 +207,7 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
         agent.music_preferences_provider = Mock(return_value="rock")
         agent.emotion_state = Mock(return_value={"sad": "Sadness level is medium."})
         agent.conversation_history = history
-        agent.pending_music_selection = selection
+        agent.pending_music_selection = None
         agent.pending_music_prompt = None
         agent.on_music_update = Mock()
         agent.action_manager = SimpleNamespace(music_manager=manager)
@@ -214,6 +216,11 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
         )
         async def generate_reply(_event, *, response_context):
             if response_context[1].find('"asking_selection_confirmation": true') >= 0:
+                assert agent.pending_confirmation.action is ActionType.EVALUATE_MUSIC_PROPOSAL
+                assert agent.pending_music_selection == selection
+                agent.on_music_update.assert_called_once_with({
+                    "status": "proposal", "autoplay": False, **selection,
+                })
                 reply = 'I found "Mellow Nights". Does this choice sound good? Shall I start it?'
             else:
                 reply = "I will start Mellow Nights."
@@ -223,6 +230,11 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
 
         await agent.handle_pending_confirmation("Yes, find me some music.")
 
+        manager.request.assert_awaited_once_with(
+            "rock", emotion={"sad": "Sadness level is medium."},
+            request="Prepare a mood-matching selection for confirmation", autoplay=False,
+            history=history,
+        )
         assert agent.pending_confirmation.action is ActionType.EVALUATE_MUSIC_PROPOSAL
         assert agent.pending_music_selection == selection
         assert manager.current["status"] == "ready"
@@ -231,7 +243,6 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
             "status": "proposal", "autoplay": False,
             **selection,
         })
-        manager.request.assert_not_awaited()
 
         await agent.handle_pending_confirmation("Yes, start it.")
 
@@ -240,7 +251,7 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
         assert manager.current["title"] == "Mellow Nights"
         assert agent.pending_music_selection is None
         assert agent.pending_music_prompt is None
-        manager.request.assert_not_awaited()
+        manager.request.assert_awaited_once()
         assert agent.pending_confirmation is None
         agent.stream_user_response.assert_awaited_once()
         assert '"queued_playlist_title": "Mellow Nights"' in (
@@ -331,15 +342,9 @@ def test_propose_music_decision_waits_for_confirmation_in_the_agent():
         )
         await agent.handle_notification_decision(event, decision)
         assert agent.pending_confirmation.action is ActionType.PROPOSE_MUSIC
-        assert agent.pending_music_selection == selection
-        manager.request.assert_awaited_once_with(
-            "calm classical", emotion={"angry": "persisted"},
-            request="Prepare a mood-matching selection for confirmation", autoplay=False,
-            history=[],
-        )
-        agent.on_music_update.assert_called_once_with({
-            "status": "proposal", "autoplay": False, **selection,
-        })
+        assert agent.pending_music_selection is None
+        manager.request.assert_not_awaited()
+        agent.on_music_update.assert_not_called()
         agent.action_manager.handle_decision.assert_not_called()
         agent.speak.assert_awaited_once_with(decision.spoken_message, tone=decision.tone)
     asyncio.run(check())

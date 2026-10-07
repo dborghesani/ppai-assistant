@@ -14,8 +14,8 @@
                 "OPENAI_API_KEY": "fake",
             },
             "args": [
-                //"ollama_llm=ollama/qwen3.5:4b",
-                //"ollama_llm=ollama/qwen2.5:7b-instruct",
+                //"ollama_llm=qwen3.5:4b",
+                //"ollama_llm=qwen2.5:7b-instruct",
                 //"data_replay_folder=${workspaceFolder}/../Dataset/assistant/json_output_20260310_113315",
                 "mqtt_enabled=True",
                 "mqtt_embedded_broker=True",
@@ -37,8 +37,9 @@
                 "JAMENDO_CLIENT_ID": "5f6703fc"
             },
             "args": [
-                "ollama_model=ollama/qwen3.5:4b",
-                //"ollama_model=ollama/qwen2.5:7b-instruct",
+                "ollama_model=qwen3.5:4b",
+                //"ollama_model=qwen2.5:7b-instruct",
+                //"ollama_model=SparkLLM/Spark-X2.5-4B",
                 "context_window_size=16384",
                 "rag_enabled=True",
                 "rag_manual_filename=9999_9999_441_en-GB.pdf",

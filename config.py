@@ -16,7 +16,7 @@ class ConfigAssistant:
     # custom LLM configuration (optional)
     ollama_host: str = "localhost"
     ollama_port: int = 11434
-    ollama_model: str = "ollama/qwen2.5:3b-instruct"
+    ollama_model: str = "qwen2.5:3b-instruct"
     ollama_timeout: int = 1200
 
     max_tokens: int = 1024

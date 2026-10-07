@@ -96,8 +96,9 @@ class LLMBackend:
         self.opt = opt
         self.on_usage = on_usage
         self._decision_lock = asyncio.Lock()
+        crewai_model = f"ollama/{opt.ollama_model.removeprefix('ollama/')}"
         self.llm = LLM(
-            model=opt.ollama_model,
+            model=crewai_model,
             base_url=f"http://{opt.ollama_host}:{opt.ollama_port}",
             timeout=opt.ollama_timeout,
             max_tokens=opt.max_tokens,

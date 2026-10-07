@@ -160,7 +160,7 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `web_ui_open_browser` | Open the dashboard in the default browser at startup | `True` |
 | `ollama_host` | Ollama server host | `localhost` |
 | `ollama_port` | Ollama server port | `11434` |
-| `ollama_llm` | LLM model to use | `ollama/qwen2.5:3b-instruct` |
+| `ollama_llm` | LLM model to use | `qwen2.5:3b-instruct` |
 | `ollama_timeout` | LLM timeout in seconds | `1200` |
 | `max_tokens` | Max tokens generated per LLM response | `1024` |
 | `context_window_size` | LLM context window size | `4096` |
@@ -200,7 +200,7 @@ The application supports command-line configuration via **OmegaConf**. You can o
 **Examples:**
 ```bash
 # Run with custom model and replay dataset
-python main.py ollama_llm="ollama/qwen2.5:7b-instruct" data_replay_folder="../Dataset/assistant/json_output"
+python main.py ollama_llm="qwen2.5:7b-instruct" data_replay_folder="../Dataset/assistant/json_output"
 
 # Run with embedded MQTT broker enabled
 python main.py mqtt_enabled=True mqtt_embedded_broker=True

@@ -20,7 +20,7 @@ Requirements: Python 3.9+, pandas, pyarrow
 Usage:
     python generate_automotive_dataset.py [--seed 42] [--out-dir build] [--n-samples 50000] [--skip-determinism]
     python generate_automotive_dataset.py --llm-description [--ollama-host localhost --ollama-port 11434
-        --ollama-model ollama/qwen2.5:3b-instruct]  # writes 'description' via Ollama (ensure `ollama serve`)
+        --ollama-model qwen2.5:3b-instruct]  # writes 'description' via Ollama (ensure `ollama serve`)
 """
 import argparse
 import hashlib
@@ -2300,7 +2300,7 @@ def main() -> None:
                           "running; much slower and disables the determinism check)")
     ap.add_argument("--ollama-host", default="localhost")
     ap.add_argument("--ollama-port", type=int, default=11434)
-    ap.add_argument("--ollama-model", default="ollama/qwen2.5:3b-instruct")
+    ap.add_argument("--ollama-model", default="qwen2.5:3b-instruct")
     ap.add_argument("--llm-description-retries", type=int, default=2,
                      help="attempts before falling back to the template description on invalid LLM output")
     args = ap.parse_args()

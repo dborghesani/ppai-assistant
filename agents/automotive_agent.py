@@ -380,7 +380,7 @@ class AutomotiveAgent:
         try:
             logger.info(">>> opening conversational LLM stream", model=self.opt.ollama_model)
             stream = await self.voice_llm.chat.completions.create(
-                model=self.opt.ollama_model.removeprefix("ollama/"),
+                model=self.opt.ollama_model,
                 messages=messages,
                 stream=True,
                 stream_options={"include_usage": True},
@@ -638,18 +638,8 @@ class AutomotiveAgent:
             if decision.spoken_message:
                 await self.speak(decision.spoken_message, tone=decision.tone)
             self.pending_confirmation = PendingConfirmation(action=decision.action)
-            selection = await self.action_manager.music_manager.request(
-                self.music_preferences_provider(), emotion=self.emotion_state(),
-                request="Prepare a mood-matching selection for confirmation", autoplay=False,
-                history=self.conversation_history,
-            )
-            if selection is None:
-                self.pending_confirmation = None
-                await self.speak("I couldn't find a suitable playlist right now.")
-                return
-            self.pending_music_selection = selection
+            self.pending_music_selection = None
             self.pending_music_prompt = None
-            self.publish_pending_music_selection()
             return
         if not decision.notify:
             return
@@ -738,7 +728,11 @@ class AutomotiveAgent:
                 self.pending_confirmation = None
                 return
 
-            result = self.pending_music_selection
+            result = await self.action_manager.music_manager.request(
+                self.music_preferences_provider(), emotion=self.emotion_state(),
+                request="Prepare a mood-matching selection for confirmation", autoplay=False,
+                history=self.conversation_history,
+            )
             if result is None:
                 response_context = self.llm_backend.music_proposal_reply_context(
                     True, None, asking_selection_confirmation=True,
@@ -750,11 +744,12 @@ class AutomotiveAgent:
                 True, result, asking_selection_confirmation=True,
             )
             if result:
-                prompt = await self.stream_user_response(event, response_context=response_context)
                 self.pending_music_selection = result
-                self.pending_music_prompt = prompt
                 self.publish_pending_music_selection()
                 self.pending_confirmation.action = ActionType.EVALUATE_MUSIC_PROPOSAL
+                self.pending_music_prompt = await self.stream_user_response(
+                    event, response_context=response_context,
+                )
             else:
                 await self.stream_user_response(event, response_context=response_context)
                 self.pending_confirmation = None

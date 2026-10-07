@@ -20,7 +20,7 @@ Requirements: Python 3.9+, pandas, pyarrow, a reachable Ollama server
 Usage:
     ollama serve &
     python generate_automotive_dataset_distill.py [--seed 42] [--out-dir build] [--n-samples 200]
-        [--ollama-host localhost --ollama-port 11434 --ollama-model ollama/qwen2.5:3b-instruct]
+        [--ollama-host localhost --ollama-port 11434 --ollama-model qwen2.5:3b-instruct]
         [--llm-retries 3]
 """
 import argparse
@@ -2069,7 +2069,7 @@ def main() -> None:
                           "one or more LLM calls, so this is far lower than the rule-based generator's default)")
     ap.add_argument("--ollama-host", default="localhost")
     ap.add_argument("--ollama-port", type=int, default=11434)
-    ap.add_argument("--ollama-model", default="ollama/qwen2.5:3b-instruct")
+    ap.add_argument("--ollama-model", default="qwen2.5:3b-instruct")
     ap.add_argument("--ollama-timeout", type=int, default=1200)
     ap.add_argument("--llm-retries", type=int, default=3,
                      help="attempts before falling back to a rule-based safe decision on non-compliant LLM output")

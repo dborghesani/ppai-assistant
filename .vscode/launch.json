@@ -42,7 +42,7 @@
                 //"ollama_model=SparkLLM/Spark-X2.5-4B",
                 "context_window_size=16384",
                 "rag_enabled=True",
-                "rag_manual_filename=9999_9999_441_en-GB.pdf",
+                //"rag_manual_filename=9999_9999_441_en-GB.pdf",
                 //"data_replay_folder=${workspaceFolder}/../Dataset/assistant/json_output_20260310_113315",
                 "mqtt_enabled=True",
                 "mqtt_embedded_broker=True",

@@ -184,6 +184,8 @@ async def main(opt: ConfigAssistant):
     database_manager.app_start_timestamp = datetime.now(timezone.utc).isoformat()  # type: ignore[assignment]
 
     agent = AutomotiveAgent(tts_manager=None, opt=opt)
+    if agent.manual_manager is not None:
+        await agent.manual_manager.prepare()
 
     # initialize knowledge manager to extract knowledge from data
     knowledge_manager = KnowledgeManager(

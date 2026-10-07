@@ -115,6 +115,7 @@ class VehicleManualManager:
         )
 
     async def prepare(self) -> None:
+        self.logger.info("Preparing vehicle manual index", source=self.manual_path.name)
         async with self._prepare_lock:
             if self._collection is not None:
                 return

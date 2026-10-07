@@ -5,7 +5,7 @@ import json
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 import structlog
 from data.agents_dataclasses import (
     ActionType,
@@ -77,6 +77,12 @@ class NotificationDecision(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def require_music_proposal_question(self) -> NotificationDecision:
+        if self.action is ActionType.PROPOSE_MUSIC and not (self.spoken_message or "").strip():
+            raise ValueError("propose_music requires a spoken permission question")
+        return self
+
     @property
     def notify(self) -> bool:
         """Derived, not model-provided: avoids the model setting notify inconsistently with urgency."""
@@ -114,8 +120,8 @@ class LLMBackend:
                 ActionType.FIND_REST_AREA,
                 ActionType.ASK_ATTEND_MEETING,
                 ActionType.PROPOSE_MUSIC,
-                ActionType.ANNOUNCE_INCOMING_MESSAGE,
                 ActionType.ASK_PERMISSION_TO_TALK,
+                ActionType.POSTPONE_NOTIFICATION_DELIVERY,
                 ActionType.READ_PENDING_MESSAGES,
                 *registered_actions,
             }
@@ -163,6 +169,8 @@ class LLMBackend:
                 {changed_facts}
                 Supporting current vehicle context (not a new trigger):
                 {context}
+                Messages currently pending delivery:
+                {pending_message_count}
                 Event name: {event_name}
                 Event details: {event_details}
                 user_input={user_input}
@@ -175,6 +183,23 @@ class LLMBackend:
                 silent_decision_guidance={silent_decision_guidance}
 
                 Rules:
+                - Mandatory pending-message recovery for knowledge_updated: when
+                    pending_message_count is greater than zero, supporting context
+                    explicitly says manual privacy mode is off and no more than one person
+                    is inside, and CURRENT FACTS report low/no
+                    fatigue or high/very high attention, choose read_pending_messages.
+                    The recovery state can be in changed_facts OR supporting context; it
+                    does not need to be the measure that triggered this event. For example,
+                    an optimal cabin-temperature change with current low fatigue and queued
+                    messages still requires reading them. Use urgency=low, tone=empathetic,
+                    intervention_type=act, skill=conversation, suggestion_type=none, and a
+                    short spoken_message that introduces the delivery, for example "Since now
+                    seems like a good time, I'll read your pending messages." Do not mention
+                    a specific fatigue/attention reason unless it is explicitly in the facts.
+                    This is a required useful action even though recovery is normally a
+                    routine state: do not choose action=none, cite absence of a safety risk,
+                    or wait for a user request. Read all pending messages. Manual privacy
+                    ON/unknown or more than one occupant is an absolute veto: do not read them.
                 - For knowledge_updated, an explicit changed fact that the driver is late for an
                     upcoming meeting requires ask_attend_meeting, intervention_type=act,
                     skill=conversation, urgency=high, suggestion_type=none, and a nonempty
@@ -187,11 +212,39 @@ class LLMBackend:
                     changed fact to a supported action. If so, choose that action before
                     applying the general silence rules. This includes comfort adjustments
                     while stationary, without a direct request or a safety hazard.
+                    Privacy is a communication state, not a vehicle action: treat it as
+                    active when the manual privacy mode is on OR current facts report more
+                    than one person inside. Never choose an action to enable or disable
+                    privacy mode. A count of zero or one does not activate occupancy-based
+                    privacy; never change the manual setting automatically.
                     For climate control, follow the skill's heating/cooling mapping and
                     read the matching control's current on/off state before choosing an
                     action. An already-enabled control requires no repeated activation.
                     A preferred temperature in supporting context is not a veto: the
                     changed relative fact already reflects that preference.
+                - Proactive music proposals are emotion-only. Choose propose_music only
+                    when a changed fact explicitly reports a non-neutral emotion at high
+                    or very high intensity. Fatigue, tiredness, low attention and driving
+                    tension are not emotions and never qualify, regardless of how severe
+                    or persistent they are. In particular, "Fatigue level is very high."
+                    must not produce "You seem very tired. Would you like some calming
+                    music?" Follow the wellbeing instruction instead: suggest a safe
+                    break for fatigue or attention, and apply the restrictive ADAS profile
+                    only when that condition is explicitly persistent and the vehicle is
+                    moving. Driving tension must follow driving guidance. Do not infer
+                    an emotion from words such as "tired" or "exhausted". This strict
+                    rule does not override an explicit direct user request for music.
+                - For changed high/very high fatigue or low/very low attention, use this
+                    exact decision table; high intensity alone is not persistence:
+                    (1) Without an explicit fact that the condition has persisted for a
+                    while, choose intervention_type=suggest, action=none,
+                    suggestion_type=take_break, skill=wellbeing, urgency=low. This is
+                    still the rule when the vehicle is moving. (2) Only when persistence
+                    is explicitly reported AND the vehicle is moving, choose
+                    action=apply_restrictive_adas_profile. (3) If persistent but
+                    stationary, suggest take_break and use action=none. Night, traffic,
+                    severity, or repeated readings do not satisfy the persistence
+                    requirement. Never infer persistence from the current context.
                 - Incoming message workflow has priority over the general silent/proactive
                     notification rules below. An incoming_message_received event is an
                     explicit message delivery event even when user_input is empty; never
@@ -207,37 +260,56 @@ class LLMBackend:
                     down on Highway 402 with a mechanical issue and needs help ASAP" is
                     serious/high; a ten-minute booking deadline can be calm/high; harmless
                     gossip is enthusiastic/none.
-                - For incoming_message_received, apply this strict priority. First, privacy
-                    mode ON or unknown is an absolute veto: choose ask_permission_to_talk
+                - For incoming_message_received, apply this strict priority. First, manual
+                    privacy mode ON/unknown OR more than one occupant is an absolute
+                    privacy condition: choose ask_permission_to_talk
                     regardless of attention, fatigue, or traffic. Never let favorable driver
-                    conditions override privacy mode. Second, if privacy mode is OFF but
-                    fatigue is high/very high, attention is low, or traffic is explicitly
-                    heavy, choose ask_permission_to_talk. In either ask case keep the
-                    message's classified tone and urgency; use intervention_type=act,
-                    skill=conversation, action=ask_permission_to_talk, suggestion_type=none
-                    and spoken_message=null. This action is conveyed
-                    only by the brief visual ASK_PERMISSION_TO_TALK animation. Do not speak,
-                    name the sender, or reveal any part of the message.
-                - Choose announce_incoming_message only when privacy mode is explicitly OFF,
-                    fatigue is not high/very high, attention is not low, and traffic is not
-                    explicitly heavy. Keep the message's classified tone and urgency; use
-                    intervention_type=act, skill=conversation, suggestion_type=none. Relay the message in third
-                    person and attribute it to its sender (for example, "Luca says that…").
-                    Retell every distinct detail, name, timeframe, qualifier, and question;
-                    keep roughly the same level of detail as the original instead of giving
-                    only its gist. Do not answer the message as if it were addressed to you,
-                    or speak in the sender's voice. Use up to three natural sentences if
-                    needed. Do not ask permission in this case.
+                    conditions override privacy mode. Use the message's classified tone and
+                    urgency, intervention_type=act, skill=conversation,
+                    action=ask_permission_to_talk, suggestion_type=none and
+                    spoken_message=null. Do not speak, name the sender, or reveal any part
+                    of the message.
+                - If manual privacy mode is explicitly OFF and no more than one person is
+                    inside, but fatigue is high/very high or
+                    attention is low/very low, choose postpone_notification_delivery.
+                    Keep the message's classified tone and urgency; use
+                    intervention_type=act, skill=conversation, suggestion_type=none and
+                    spoken_message=null. This keeps the message pending without asking
+                    permission or exposing its content. Heavy traffic without high fatigue
+                    or low attention still uses ask_permission_to_talk.
+                - Otherwise, choose read_pending_messages to deliver the queued incoming
+                    message. Keep the message's classified tone and urgency; use
+                    intervention_type=act, skill=conversation, suggestion_type=none and
+                    spoken_message=null. The message manager speaks and removes queued
+                    messages for this action. Message urgency never requires permission by
+                    itself when privacy is inactive and the driver is alert.
+                    This decision table is exhaustive and ordered: privacy-active =>
+                    ask_permission_to_talk; privacy-inactive with high fatigue/low attention
+                    => postpone_notification_delivery; otherwise => read_pending_messages.
+                    Do not choose ask_permission_to_talk for any other reason. In particular,
+                    serious/high/critical message content is not a privacy condition.
                 - Contrastive examples: privacy ON + high attention + no fatigue =>
-                    ask_permission_to_talk; privacy OFF + high attention + no fatigue +
-                    light traffic => announce_incoming_message. Use only explicit current
-                    facts for these checks.
-                - For pending_messages_reminder with pending_count greater than zero, choose
-                    ask_permission_to_talk, urgency=low, intervention_type=act,
-                    skill=conversation, action=ask_permission_to_talk,
-                    suggestion_type=none, spoken_message=null. Do not announce that messages
-                    are pending or ask verbally; use only the brief visual status animation.
-                    If pending_count is zero, remain silent.
+                    ask_permission_to_talk; privacy OFF + two or more occupants + low
+                    fatigue => ask_permission_to_talk; privacy OFF + one occupant + high
+                    fatigue => postpone_notification_delivery; privacy OFF + one occupant,
+                    low fatigue and high attention => read_pending_messages. Use only explicit
+                    current facts. Exact example: the message "My car has broken down on the
+                    highway shoulder with traffic passing close. Please call me ASAP." with
+                    manual privacy OFF, one person inside, high attention, low fatigue and
+                    light traffic => read_pending_messages, tone=serious, urgency=high. Do not
+                    replace this action with ask_permission_to_talk because the message is urgent.
+                - For pending_messages_reminder with permission-pending count greater than zero, choose
+                    ask_permission_to_talk when manual privacy is ON/unknown OR more than
+                    one occupant is detected. When manual privacy is explicitly OFF, no more
+                    than one occupant is detected, and current facts report high/very high fatigue
+                    or low/very low attention, choose postpone_notification_delivery instead;
+                    use urgency=low, tone=discreet, intervention_type=act,
+                    skill=conversation, suggestion_type=none, spoken_message=null. This
+                    postpones all permission-pending messages without exposing their content.
+                    With privacy inactive and no such fatigue/attention condition, choose
+                    read_pending_messages, urgency=low, tone=empathetic,
+                    intervention_type=act, skill=conversation, suggestion_type=none,
+                    spoken_message=null. If pending_count is zero, remain silent.
                 - For a knowledge_updated event, an empty user_input is expected: there was
                     no direct utterance. Do not call it unintelligible; decide from the
                     changed vehicle facts and skill instructions.
@@ -308,6 +380,13 @@ class LLMBackend:
                     actually needed to proceed (like ask_attend_meeting above).
 
                 Output:
+                - Final pending-message override: before returning action=none for a
+                    knowledge_updated event, check pending_message_count and current
+                    fatigue/attention facts. If the count is greater than zero, privacy is
+                    explicitly OFF, and fatigue is low/no or attention is high/very high,
+                    action=read_pending_messages is mandatory for the whole queue even if the triggering fact
+                    is unrelated or there is no safety risk. Never suppress this action as
+                    routine telemetry.
                 - Final climate-state check: inspect Supporting current vehicle context,
                     not examples in skill_instructions. If it says "The air conditioning
                     is on.", do not output enable_air_conditioning. If it says "Cabin
@@ -348,10 +427,25 @@ class LLMBackend:
                 below, not earlier tasks or statements in this policy, as the source of vehicle state.
 
                 POLICY (these are rules, not current facts):
-                For incoming_message_received, announce_incoming_message requires explicit privacy
-                OFF and no explicitly high/very high fatigue, low attention or heavy traffic.
-                Otherwise choose ask_permission_to_talk. Privacy ON or unknown always requires
-                permission, even with perfect attention and no fatigue. Attention never cancels privacy.
+                Privacy is active for message delivery when manual privacy mode is ON/unknown
+                OR more than one person is detected inside the vehicle. For incoming_message_received,
+                either condition always requires ask_permission_to_talk, regardless of fatigue,
+                attention or traffic. With manual privacy explicitly OFF and no more than one
+                occupant, high/very high fatigue or low/very low attention
+                requires postpone_notification_delivery; do not ask permission in this case.
+                Otherwise choose read_pending_messages to deliver the queued message. Preserve
+                tone and urgency from its content; use intervention_type=act, skill=conversation,
+                suggestion_type=none, spoken_message=null. The message manager reads and removes
+                queued messages for this action. Message urgency alone does not require permission
+                when privacy is inactive and the driver is alert. Never treat a fatigue/attention
+                postponement as a request for permission; it is an automatic delay until recovery.
+                Follow this ordered decision table exactly: privacy-active => ask permission;
+                privacy-inactive with high fatigue/low attention => postpone; otherwise => read.
+                Urgent or safety-related message content is not a privacy condition and does not
+                change this action table. Example: "My car has broken down on the highway shoulder
+                with traffic passing close. Please call me ASAP." + manual privacy OFF + one person
+                + high attention + low fatigue + light traffic => read_pending_messages with
+                tone=serious and urgency=high, never ask_permission_to_talk.
 
                 Tone and urgency describe MESSAGE CONTENT, not permission or silence. Urgent help,
                 road breakdowns and safety problems use serious tone; ASAP/immediate requests use
@@ -360,15 +454,21 @@ class LLMBackend:
 
                 ask_permission_to_talk: intervention_type=act, skill=conversation,
                 suggestion_type=none, spoken_message=null. Reveal neither sender nor content.
-                announce_incoming_message: same act/conversation/none fields; spoken_message is a
-                natural English interpretation addressed to the named driver. Mention the sender
-                naturally when needed, without "Luca says" or "the sender says". Preserve names,
-                details, qualifiers, timeframes and questions. Do not invent, impersonate the sender,
-                answer their questions or claim an action was executed. Announce even if urgency=none.
-
-                pending_messages_reminder is separate: pending_count>0 => ask_permission_to_talk,
-                tone=discreet, urgency=low, spoken_message=null; pending_count=0 => matching none
-                fields, tone=discreet, spoken_message=null. Do not apply this rule to a new message.
+                read_pending_messages: intervention_type=act, skill=conversation,
+                suggestion_type=none, spoken_message=null; the message manager delivers the queue.
+                pending_messages_reminder: if pending_count=0, use matching none fields,
+                tone=discreet, spoken_message=null. If pending_count>0 and manual privacy is
+                ON/unknown OR more than one occupant is detected, choose ask_permission_to_talk.
+                If manual privacy is explicitly OFF, no more than one occupant is detected,
+                and current facts report high/very high fatigue or low/very low attention, choose
+                postpone_notification_delivery. Otherwise choose read_pending_messages. For
+                ask_permission_to_talk or postpone_notification_delivery use urgency=low,
+                tone=discreet, intervention_type=act, skill=conversation,
+                suggestion_type=none, spoken_message=null. For read_pending_messages use
+                urgency=low, tone=empathetic, intervention_type=act, skill=conversation,
+                suggestion_type=none, spoken_message=null. A postponement defers all messages
+                still waiting for permission; it does not expose message content. Do not apply
+                this reminder rule to a new message.
 
                 response_source=general. reason briefly cites the actual current delivery fact.
                 Ensure reason, action and spoken_message agree. Return the JSON, not draft reasoning.
@@ -419,6 +519,9 @@ class LLMBackend:
                     correct source even if documentation is unavailable; never disguise it as general knowledge.
                 - Consider only the user's requested operation and the action reference.
                     Do not use telemetry, meeting guidance, or proactive notification rules.
+                - Privacy mode is a manual setting, not an assistant vehicle action. Do not
+                    classify requests to toggle it as supported vehicle actions. For message
+                    delivery, also treat more than one detected occupant as privacy-active.
                 - If pending private messages are available, choose read_pending_messages
                     only when the user explicitly asks to hear/read them or asks what the
                     pending message says (for example "what do you want to tell me?",
@@ -434,8 +537,9 @@ class LLMBackend:
                 - If the request is not a supported operation, use action=none,
                     intervention_type=none, urgency=none, skill=none,
                     suggestion_type=none, and spoken_message=null.
-                - Keep the spoken acknowledgement short and do not claim physical vehicle
-                    confirmation; this app updates simulated UI state only.
+                - When spoken_message is appropriate, keep the acknowledgement short and do
+                    not claim physical vehicle confirmation; this app updates simulated UI
+                    state only. A null spoken_message means perform the action silently.
                 - Fill every structured field using only the allowed enums.
                 """,
             expected_output=(
@@ -525,6 +629,7 @@ class LLMBackend:
         return await self._get_decision(self.direct_action_crew, inputs, "direct action classification")
 
     async def evaluate_event(self, inputs: dict) -> NotificationDecision:
+        inputs.setdefault("pending_message_count", 0)
         crew = self.message_delivery_crew if inputs.get("event_name") in {
             EventName.INCOMING_MESSAGE_RECEIVED, EventName.PENDING_MESSAGES_REMINDER
         } else self.crew
@@ -584,21 +689,36 @@ class LLMBackend:
 
     @staticmethod
     def music_proposal_reply_context(
-        confirmed: bool | None, result: dict[str, Any] | None = None
+        confirmed: bool | None, result: dict[str, Any] | None = None,
+        *, asking_selection_confirmation: bool = False,
     ) -> tuple[str, str]:
+        if asking_selection_confirmation:
+            instructions = (
+                "The driver agreed to a music proposal and the selected playlist is now ready for review. "
+                "When a title is supplied, start with a neutral factual presentation using the exact title: "
+                "'I found the playlist <title>.' Then ask one concise question: 'Does this selection work "
+                "for you, and would you like me to start it?' Do not praise the choice, call it a perfect "
+                "match, infer the driver's current mood, or address the driver by name. This is a second, "
+                "separate confirmation; do not imply playback has started. If no title is supplied, explain "
+                "briefly that no suitable selection was found and do not ask approval for a nonexistent "
+                "playlist. Never invent music details."
+            )
+        else:
+            instructions = (
+                "This response is to the driver's reply to a pending music selection confirmation. "
+                "Use the supplied confirmation result as authoritative. If confirmed is true and a "
+                "playlist title is supplied, acknowledge the accepted choice by name without asking "
+                "again or claiming the tracks are already playing. If false, acknowledge the refusal "
+                "and, when a playlist title is supplied, explicitly confirm it was removed from the "
+                "queue. Do not offer to play again. Never invent music details or completed actions."
+            )
         return (
-            "This response is to the driver's reply to a pending music proposal. "
-            "Use the supplied confirmation result as authoritative. Generate a brief, natural reply "
-            "from the actual conversation and vehicle context, not a canned acknowledgement. "
-            "If confirmed is true and a playlist title is supplied, it is already queued: acknowledge "
-            "and name it without claiming the tracks are already playing. If confirmed is true but no "
-            "playlist title is supplied, acknowledge the request without promising playback or a "
-            "playlist. If false, acknowledge the refusal without offering to play again. If null, "
-            "request clarification without treating it as acceptance or refusal. Never invent music "
-            "details or completed actions.",
+            "Generate a brief, natural reply from the actual conversation and vehicle context, not a "
+            "canned acknowledgement. " + instructions,
             "Music proposal confirmation result: " + json.dumps({
                 "confirmed": confirmed,
                 "queued_playlist_title": (result or {}).get("title"),
+                "asking_selection_confirmation": asking_selection_confirmation,
             }),
         )
 

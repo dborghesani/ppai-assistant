@@ -290,7 +290,7 @@ class DetectedObjects:
         skills=(SkillType.WELLBEING,),
     )
     people_inside: int | None = knowledge_field(
-        default=0,
+        default=1,
         change_threshold=1.0,
         value_kind="count",
         skills=(SkillType.WELLBEING, SkillType.DRIVING),

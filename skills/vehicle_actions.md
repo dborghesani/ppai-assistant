@@ -59,7 +59,10 @@ commands are not supported.
   lane keeping state.
 - `enable_blind_spot_monitor` / `disable_blind_spot_monitor`: toggle the
   simulated blind-spot monitoring state.
-- `enable_privacy_mode` / `disable_privacy_mode`: toggle the simulated privacy mode.
+- Privacy mode is a manual setting, not an assistant vehicle action. For message
+  delivery, treat privacy as active when the manual setting is on or more than one
+  person is detected inside the vehicle. Zero or one occupant does not activate
+  occupancy-based privacy.
 - `apply_restrictive_adas_profile`: lower target speed by 10 km/h, increase
   following distance by one step, and enable ACC, lane keeping and blind-spot
   monitoring. Values are bounded by the corresponding controls.

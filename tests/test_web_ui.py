@@ -15,6 +15,9 @@ from ui.web_server import WebUIServer
 class FakeBridge:
     stt_manager = None
 
+    def dumpAssistantStatus(self) -> str:
+        return AssistantStatus.IDLE.value
+
     def __init__(self) -> None:
         self.listeners = {}
         self.friend_simulation_running = False
@@ -40,7 +43,7 @@ class FakeBridge:
         return {
             "dangerous_objects_around": 0,
             "children_inside": 0,
-            "people_inside": 0,
+            "people_inside": 1,
         }
 
     def dumpDriverPreferences(self) -> dict:
@@ -77,6 +80,13 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status, 200)
             self.assertTrue(response.content_type.startswith(content_type))
 
+        app_response = await self.client.get("/static/app.js")
+        app_script = await app_response.text()
+        self.assertIn(
+            '["People inside", "people_inside", 0, 5, 1, 1, "integer"]',
+            app_script,
+        )
+
         response = await self.client.get("/health")
         self.assertEqual(await response.json(), {"status": "ok", "clients": 0})
 
@@ -84,6 +94,7 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         socket = await self.client.ws_connect("/ws")
         ready = await socket.receive_json()
         self.assertEqual(ready["event"], "ready")
+        self.assertEqual(ready["data"]["assistantStatus"], AssistantStatus.IDLE.value)
         self.assertFalse(ready["data"]["sttEnabled"])
         self.assertFalse(ready["data"]["duplicateSuppressionEnabled"])
         self.assertEqual(
@@ -95,7 +106,7 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
             {
                 "dangerous_objects_around": 0,
                 "children_inside": 0,
-                "people_inside": 0,
+                "people_inside": 1,
             },
         )
         self.assertEqual(
@@ -111,6 +122,18 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         response = await socket.receive_json()
         self.assertEqual(response["id"], 1)
         self.assertIn("VehicleState", response["result"])
+        await socket.close()
+
+    async def test_websocket_ready_restores_pending_permission_status(self) -> None:
+        self.web_ui.bridge.dumpAssistantStatus = lambda: AssistantStatus.ASK_PERMISSION_TO_TALK.value
+
+        socket = await self.client.ws_connect("/ws")
+        ready = await socket.receive_json()
+
+        self.assertEqual(
+            ready["data"]["assistantStatus"],
+            AssistantStatus.ASK_PERMISSION_TO_TALK.value,
+        )
         await socket.close()
 
     async def test_websocket_updates_duplicate_suppression(self) -> None:

@@ -18,7 +18,7 @@ from data.agents_dataclasses import (
 )
 from agents.llm_backend import LLMBackend, NotificationDecision
 from agents.automotive_agent import AutomotiveAgent
-from data.events import CarEvent
+from data.events import CarEvent, EventName
 
 
 class FakeCrew:
@@ -80,7 +80,7 @@ def test_aggressive_driving_style_warns_driver() -> None:
 	agent.llm_backend = llm_agent
 	event = CarEvent(
 		SkillType.DRIVING,
-		"knowledge_updated",
+		EventName.KNOWLEDGE_UPDATED,
 		{"DriverDrivingStyle.driving_tension": 0.9},
 		[
 			"Changed just now: The driving style shows a very high level of tension."
@@ -91,8 +91,10 @@ def test_aggressive_driving_style_warns_driver() -> None:
 
 	crew = cast(Any, llm_agent.crew)
 	assert "excessively aggressive" in crew.inputs["skill_instructions"]
+	assert "Treat reported driving tension as a driving-style signal" in crew.inputs["skill_instructions"]
 	assert crew.inputs["changed_facts"] == (
 		"- The driving style shows a very high level of tension."
 	)
+	assert decision.suggestion_type is SuggestionType.CALM_DRIVING
 	agent.speak.assert_awaited_once_with(warning, tone=ToneType.SERIOUS)
 	agent.action_manager.handle_decision.assert_not_called()

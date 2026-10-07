@@ -210,16 +210,6 @@ def test_restrictive_adas_profile_updates_simulated_controls():
     assert state.blind_spot_monitor is True
 
 
-def test_privacy_mode_actions_update_simulated_state():
-    bridge = make_bridge(VehicleState(privacy_mode=False))
-
-    bridge.apply_vehicle_action(ActionType.ENABLE_PRIVACY_MODE, {})
-    assert bridge.database_manager.current_state["VehicleState"].privacy_mode is True
-
-    bridge.apply_vehicle_action(ActionType.DISABLE_PRIVACY_MODE, {})
-    assert bridge.database_manager.current_state["VehicleState"].privacy_mode is False
-
-
 def test_vehicle_state_snapshot_fills_unreported_fields_from_defaults():
     bridge = make_bridge(VehicleState(window_open_front_left=True, sunroof_open=None))
 
@@ -230,7 +220,7 @@ def test_vehicle_state_snapshot_fills_unreported_fields_from_defaults():
     assert snapshot["privacy_mode"] is False
     assert snapshot["fan_speed"] == 3
     assert snapshot["audio_volume"] == 20
-    assert bridge.dumpDetectedObjectsState()["people_inside"] == 0
+    assert bridge.dumpDetectedObjectsState()["people_inside"] == 1
 
 
 def test_dangerous_object_slider_keeps_integer_in_detected_objects():

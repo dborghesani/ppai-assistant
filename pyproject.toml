@@ -28,6 +28,11 @@ dependencies = [
     "laya>=0.3.5",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

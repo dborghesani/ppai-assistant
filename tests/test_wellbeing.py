@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -126,7 +127,10 @@ def test_high_fatigue_or_low_attention_suggests_a_break(
 		spoken_message=suggestion,
 	)
 	llm_agent, agent = make_llm_agent(decision)
-	agent.skill_manager.get_skill.return_value = "wellbeing instructions"
+	wellbeing_instructions = (
+		Path(__file__).resolve().parents[1] / "skills" / "wellbeing.md"
+	).read_text(encoding="utf-8")
+	agent.skill_manager.get_skill.return_value = wellbeing_instructions
 	event = CarEvent(
 		SkillType.WELLBEING,
 		EventName.KNOWLEDGE_UPDATED,
@@ -136,9 +140,12 @@ def test_high_fatigue_or_low_attention_suggests_a_break(
 
 	asyncio.run(agent.process_event_llm(event))
 
-	assert llm_agent.crew.inputs["skill_instructions"] == "wellbeing instructions"
+	assert llm_agent.crew.inputs["skill_instructions"] == wellbeing_instructions
 	assert llm_agent.crew.inputs["changed_facts"] == f"- {changed_fact}"
 	assert llm_agent.crew.inputs["context"] == f"- {supporting_context}"
+	assert "never select `propose_music`" in llm_agent.crew.inputs["skill_instructions"]
+	assert "Fatigue level is very high." in llm_agent.crew.inputs["skill_instructions"]
+	assert "not \"You seem very tired. Would you like some calming music?\"" in llm_agent.crew.inputs["skill_instructions"]
 	agent.speak.assert_awaited_once_with(suggestion, tone=ToneType.CALM)
 	agent.action_manager.handle_decision.assert_not_called()
 
@@ -193,24 +200,24 @@ def test_adas_profile_requires_persistent_attention_or_fatigue_while_moving(
 		if persisted
 		else fact
 	)
-	warning = "Your attention or fatigue needs attention. Please take a break when safe."
+	message = "Please take a break at the next safe opportunity."
 	decision = NotificationDecision(
-		urgency=UrgencyType.HIGH,
-		tone=ToneType.SERIOUS,
+		urgency=UrgencyType.HIGH if expected_action is not ActionType.NONE else UrgencyType.LOW,
+		tone=ToneType.SERIOUS if expected_action is not ActionType.NONE else ToneType.CALM,
 		intervention_type=(
 			InterventionType.ACT
-			if vehicle_moving
+			if expected_action is not ActionType.NONE
 			else InterventionType.SUGGEST
 		),
 		skill=SkillType.WELLBEING,
 		action=expected_action,
 		suggestion_type=(
 			SuggestionType.NONE
-			if vehicle_moving
+			if expected_action is not ActionType.NONE
 			else SuggestionType.TAKE_BREAK
 		),
 		reason="The reported wellbeing condition requires a response.",
-		spoken_message=warning,
+		spoken_message=message,
 	)
 	llm_agent, agent = make_llm_agent(decision)
 	agent.skill_manager.get_skill.return_value = "wellbeing instructions"
@@ -226,7 +233,7 @@ def test_adas_profile_requires_persistent_attention_or_fatigue_while_moving(
 
 	asyncio.run(agent.process_event_llm(event))
 
-	agent.speak.assert_awaited_once_with(warning, tone=ToneType.SERIOUS)
+	agent.speak.assert_awaited_once_with(message, tone=decision.tone)
 	if expected_action is ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE:
 		agent.action_manager.handle_decision.assert_called_once_with(
 			ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE, {}

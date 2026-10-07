@@ -182,7 +182,10 @@ def test_non_command_user_input_falls_back_to_conversation():
 
 @pytest.mark.parametrize(
     "action",
-    [ActionType.ANNOUNCE_INCOMING_MESSAGE, ActionType.ASK_PERMISSION_TO_TALK],
+    [
+        ActionType.ASK_PERMISSION_TO_TALK,
+        ActionType.POSTPONE_NOTIFICATION_DELIVERY,
+    ],
 )
 def test_friend_message_event_dispatches_reasoner_selected_action(action):
     decision = NotificationDecision(
@@ -193,11 +196,7 @@ def test_friend_message_event_dispatches_reasoner_selected_action(action):
         action=action,
         suggestion_type=SuggestionType.NONE,
         reason="The message event requires a privacy-aware response.",
-        spoken_message=(
-            "Luca says that he heard a harmless rumor."
-            if action is ActionType.ANNOUNCE_INCOMING_MESSAGE
-            else None
-        ),
+        spoken_message=None,
     )
     llm_agent, agent = make_llm_agent(decision)
     event = CarEvent(
@@ -211,13 +210,13 @@ def test_friend_message_event_dispatches_reasoner_selected_action(action):
 
     asyncio.run(agent.process_event_llm(event))
 
-    if action is ActionType.ANNOUNCE_INCOMING_MESSAGE:
-        agent.speak.assert_awaited_once_with(
-            "Luca says that he heard a harmless rumor.", tone=ToneType.DISCREET
-        )
-    else:
-        agent.speak.assert_not_awaited()
-    agent.action_manager.handle_decision.assert_called_once_with(action, {})
+    agent.speak.assert_not_awaited()
+    parameters = (
+        {"event_value": event.event_value, "context": event.context}
+        if action is ActionType.POSTPONE_NOTIFICATION_DELIVERY
+        else {}
+    )
+    agent.action_manager.handle_decision.assert_called_once_with(action, parameters)
     agent.notify_incoming_message_classification.assert_called_once_with(
         decision.tone, decision.urgency
     )
@@ -233,16 +232,16 @@ def test_permission_decision_cannot_include_private_spoken_content():
         NotificationDecision.model_validate(payload)
 
 
-def test_incoming_notification_classification_reaches_ui_and_speech():
+def test_incoming_notification_classification_reaches_ui_without_speech():
     decision = NotificationDecision(
         urgency=UrgencyType.HIGH,
         tone=ToneType.SERIOUS,
         intervention_type=InterventionType.ACT,
         skill=SkillType.CONVERSATION,
-        action=ActionType.ANNOUNCE_INCOMING_MESSAGE,
+        action=ActionType.ASK_PERMISSION_TO_TALK,
         suggestion_type=SuggestionType.NONE,
-        reason="The driver can hear the message.",
-        spoken_message="Luca says Giulia needs help on the highway ASAP.",
+        reason="The incoming message awaits explicit permission.",
+        spoken_message=None,
     )
     llm_agent, agent = make_llm_agent(decision)
     event = CarEvent(
@@ -261,8 +260,9 @@ def test_incoming_notification_classification_reaches_ui_and_speech():
 
     assert decision.tone is ToneType.SERIOUS
     assert decision.urgency is UrgencyType.HIGH
-    agent.speak.assert_awaited_once_with(
-        "Luca says Giulia needs help on the highway ASAP.", tone=ToneType.SERIOUS
+    agent.speak.assert_not_awaited()
+    agent.action_manager.handle_decision.assert_called_once_with(
+        ActionType.ASK_PERMISSION_TO_TALK, {}
     )
     agent.notify_incoming_message_classification.assert_called_once_with(
         ToneType.SERIOUS, UrgencyType.HIGH
@@ -308,16 +308,115 @@ def test_pending_reminder_reuses_classification_of_waiting_message():
     agent.speak.assert_not_awaited()
 
 
+def test_fatigued_pending_reminder_dispatches_postpone_for_entire_queue():
+    decision = NotificationDecision(
+        urgency=UrgencyType.LOW,
+        tone=ToneType.DISCREET,
+        intervention_type=InterventionType.ACT,
+        skill=SkillType.CONVERSATION,
+        action=ActionType.POSTPONE_NOTIFICATION_DELIVERY,
+        suggestion_type=SuggestionType.NONE,
+        reason="Fatigue is high while messages are waiting.",
+        spoken_message=None,
+    )
+    llm_agent, agent = make_llm_agent(decision)
+    agent.action_manager.message_manager.pending_count = 2
+    context = ["Privacy mode is off.", "Fatigue level is high."]
+    event = CarEvent(
+        SkillType.CONVERSATION,
+        EventName.PENDING_MESSAGES_REMINDER,
+        {"pending_count": 2},
+        context,
+    )
+
+    import asyncio
+
+    asyncio.run(agent.process_event_llm(event))
+
+    agent.action_manager.handle_decision.assert_called_once_with(
+        ActionType.POSTPONE_NOTIFICATION_DELIVERY,
+        {"postpone_pending": True, "context": context},
+    )
+    agent.speak.assert_not_awaited()
+
+
+def test_recovered_attention_reads_pending_messages_with_acknowledgement():
+    acknowledgement = "Visto che ora è un buon momento, ti leggo i messaggi in sospeso."
+    decision = NotificationDecision(
+        urgency=UrgencyType.LOW,
+        tone=ToneType.EMPATHETIC,
+        intervention_type=InterventionType.ACT,
+        skill=SkillType.CONVERSATION,
+        action=ActionType.READ_PENDING_MESSAGES,
+        suggestion_type=SuggestionType.NONE,
+        reason="Attention recovered while postponed messages are waiting.",
+        spoken_message=acknowledgement,
+    )
+    llm_agent, agent = make_llm_agent(decision)
+    agent.action_manager.message_manager.pending_count = 1
+    event = CarEvent(
+        SkillType.WELLBEING,
+        EventName.KNOWLEDGE_UPDATED,
+        {"DriverPhysicalState.attention_level": 0.9},
+        ["Changed just now: Attention level is high.", "Privacy mode is off."],
+    )
+
+    import asyncio
+
+    asyncio.run(agent.process_event_llm(event))
+
+    assert "1 incoming message(s) are pending delivery." in llm_agent.crew.inputs["context"]
+    agent.speak.assert_not_awaited()
+    agent.action_manager.handle_decision.assert_called_once_with(
+        ActionType.READ_PENDING_MESSAGES,
+        {"acknowledgement": acknowledgement},
+    )
+
+
+def test_multiple_people_require_permission_for_incoming_message():
+    decision = NotificationDecision(
+        urgency=UrgencyType.LOW,
+        tone=ToneType.DISCREET,
+        intervention_type=InterventionType.ACT,
+        skill=SkillType.CONVERSATION,
+        action=ActionType.ASK_PERMISSION_TO_TALK,
+        suggestion_type=SuggestionType.NONE,
+        reason="Multiple occupants make delivery privacy-sensitive.",
+        spoken_message=None,
+    )
+    llm_agent, agent = make_llm_agent(decision)
+    event = CarEvent(
+        SkillType.CONVERSATION,
+        EventName.INCOMING_MESSAGE_RECEIVED,
+        {"sender": "Luca", "text": "A private message"},
+        [
+            "Changed just now: New incoming message from Luca: A private message.",
+            "Multiple people are detected inside the vehicle.",
+            "Privacy mode is off.",
+        ],
+    )
+
+    import asyncio
+
+    asyncio.run(agent.process_event_llm(event))
+
+    assert "Multiple people are detected inside the vehicle." in llm_agent.crew.inputs["context"]
+    agent.action_manager.handle_decision.assert_called_once_with(
+        ActionType.ASK_PERMISSION_TO_TALK, {}
+    )
+    agent.speak.assert_not_awaited()
+
+
 def test_stopping_friend_simulation_during_classification_keeps_message_pending():
     decision = NotificationDecision(
         urgency=UrgencyType.LOW,
         tone=ToneType.DISCREET,
         intervention_type=InterventionType.ACT,
         skill=SkillType.CONVERSATION,
-        action=ActionType.ANNOUNCE_INCOMING_MESSAGE,
+        action=ActionType.ASK_PERMISSION_TO_TALK,
         suggestion_type=SuggestionType.NONE,
-        reason="The message can be announced.",
-        spoken_message="Luca says that Giulia named her plant Roberto.",
+        reason="The message awaits explicit permission.",
+        spoken_message=None,
     )
     llm_agent, agent = make_llm_agent(decision)
     agent.action_manager.message_manager.pending_count = 1

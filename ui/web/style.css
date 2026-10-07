@@ -110,7 +110,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .status-dot.permission-returning::before {
   border-radius: var(--permission-return-radius, 50%);
-  transition: border-radius .28s ease-out;
+  opacity: 0;
+  transition: border-radius .28s ease-out, opacity .28s ease-out;
 }
 .status-dot.assistant-act { animation: action-bloom .76s ease-out both; }
 .status-dot.assistant-background { animation: background-wobble 1.4s ease-in-out infinite; }
@@ -224,8 +225,6 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 .music-heading { display: flex; flex-wrap: wrap; gap: 6px 12px; justify-content: space-between; font-size: 13px; }
 .music-heading strong { overflow-wrap: anywhere; }
 .music-heading span, .music-track small { color: var(--muted); font-size: 11px; }
-.music-proposal { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; }
-.music-proposal button { border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; background: transparent; color: inherit; cursor: pointer; }
 .music-transport { display: grid; grid-template-columns: 40px minmax(0, 1fr) repeat(3, 36px); align-items: center; gap: 6px; margin-top: 10px; }
 .music-track { grid-column: 2; min-width: 0; display: grid; gap: 3px; font-size: 12px; overflow-wrap: anywhere; }
 .music-transport img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }

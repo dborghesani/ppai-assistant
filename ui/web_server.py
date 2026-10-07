@@ -21,7 +21,6 @@ class WebUIServer:
         "stopFriendMessageSimulation",
         "intChanged",
         "minimumUrgencyChanged",
-        "musicConsent",
         "musicControl",
         "setScenario",
         "setDriverPreference",
@@ -127,6 +126,7 @@ class WebUIServer:
                     "detectedObjectsState": self.bridge.dumpDetectedObjectsState(),
                     "driverPreferences": self.bridge.dumpDriverPreferences(),
                     "musicState": getattr(self.bridge, "dumpMusicState", lambda: {"status": "disabled"})(),
+                    "assistantStatus": getattr(self.bridge, "dumpAssistantStatus", lambda: "idle")(),
                     "musicDuckingFactor": getattr(getattr(self.bridge, "opt", None), "music_ducking_factor", 0.25),
                     "sttEnabled": bool(
                         self.bridge.stt_manager is not None

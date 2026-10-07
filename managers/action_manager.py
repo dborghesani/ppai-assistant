@@ -26,19 +26,15 @@ class ActionManager:
         self._registered_guidance: list[str] = []
         self._music_manager: MusicManager | None = None
         self._message_manager: MessageManager | None = None
-        self.register_actions(MUSIC_ACTIONS, self._execute_music_action, MusicManager.ACTION_GUIDANCE)
+        self.register_actions(MUSIC_ACTIONS, self.agent.execute_music_action, MusicManager.ACTION_GUIDANCE)
 
     @property
     def music_manager(self) -> MusicManager:
         if self._music_manager is None:
             self._music_manager = MusicManager(
                 self.agent.opt, self.agent.voice_llm, self.agent._notify_music_update,
-                history_provider=lambda: self.agent.conversation_history,
             )
         return self._music_manager
-
-    async def _execute_music_action(self, action: ActionType, request: str) -> None:
-        await self.music_manager.execute(action, request, agent=self.agent)
 
     def close(self) -> None:
         if self._music_manager is not None:
@@ -80,14 +76,12 @@ class ActionManager:
         if action_type is ActionType.ASK_PERMISSION_TO_TALK:
             self.agent.set_assistant_status(AssistantStatus.ASK_PERMISSION_TO_TALK)
         elif action_type in {
-            ActionType.ANNOUNCE_INCOMING_MESSAGE,
             ActionType.READ_PENDING_MESSAGES,
+            ActionType.POSTPONE_NOTIFICATION_DELIVERY,
         }:
-            self.message_manager.handle_action(action_type)
+            self.message_manager.handle_action(action_type, parameters)
         elif action_type is ActionType.ASK_ATTEND_MEETING:
             self.mark_awaiting_meeting_confirmation()
-        elif action_type is ActionType.PLAY_MUSIC:
-            self.agent.start_music_proposal()
         elif action_type is not ActionType.NONE:
             self.agent.set_assistant_status(AssistantStatus.ACT)
             try:

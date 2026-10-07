@@ -67,6 +67,7 @@ def make_llm_agent(decision: NotificationDecision):
 		),
 	)))
 	agent.opt = ConfigAssistant()
+	agent.pending_confirmation = None
 	agent.voice_llm = SimpleNamespace()
 	agent.conversation_history = []
 	agent.knowledge_facts_provider = lambda: {}
@@ -227,8 +228,6 @@ VEHICLE_COMMANDS = [
 	("Please disable lane keep assist.", ActionType.DISABLE_LANE_KEEP_ASSIST),
 	("Please enable blind spot monitoring.", ActionType.ENABLE_BLIND_SPOT_MONITOR),
 	("Please disable blind spot monitoring.", ActionType.DISABLE_BLIND_SPOT_MONITOR),
-	("Please enable privacy mode.", ActionType.ENABLE_PRIVACY_MODE),
-	("Please disable privacy mode.", ActionType.DISABLE_PRIVACY_MODE),
 	("Please turn on the sidelights.", ActionType.ENABLE_SIDELIGHTS),
 	("Please turn off the sidelights.", ActionType.DISABLE_SIDELIGHTS),
 	(
@@ -272,9 +271,11 @@ def test_vehicle_command_matrix_covers_all_direct_actions() -> None:
 		ActionType.NONE,
 		ActionType.FIND_REST_AREA,
 		ActionType.ASK_ATTEND_MEETING,
-		ActionType.ANNOUNCE_INCOMING_MESSAGE,
 		ActionType.ASK_PERMISSION_TO_TALK,
+		ActionType.POSTPONE_NOTIFICATION_DELIVERY,
 		ActionType.READ_PENDING_MESSAGES,
+		ActionType.PROPOSE_MUSIC,
+		ActionType.EVALUATE_MUSIC_PROPOSAL,
 		*MUSIC_ACTIONS,
 	}
 
@@ -309,28 +310,6 @@ def test_explicit_vehicle_command_dispatches_matching_action(
 	agent.speak.assert_awaited_once_with(
 		"I received your request.", tone=ToneType.CALM
 	)
-
-
-def test_music_permission_waits_until_assistant_is_free():
-	async def check():
-		agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
-		agent.opt = ConfigAssistant(music_timeout=1)
-		agent.is_listening = True
-		agent.is_processing_event = True
-		agent.voice_response_task = None
-		agent._assistant_status = AssistantStatus.IDLE
-		agent.action_manager = SimpleNamespace(awaiting_confirmation=False,
-			message_manager=SimpleNamespace(pending_count=0))
-		agent.speak = AsyncMock()
-		prompt = "Would you like some mellow downtempo?"
-		task = asyncio.create_task(agent.ask_music_permission(prompt))
-		await asyncio.sleep(0)
-		assert not task.done()
-		agent.speak.assert_not_awaited()
-		agent.is_processing_event = False
-		assert await asyncio.wait_for(task, timeout=1)
-		agent.speak.assert_awaited_once_with(prompt)
-	asyncio.run(check())
 
 
 def make_meeting_agent(confirmed: bool):
@@ -438,13 +417,14 @@ def test_music_commands_use_music_handler_not_vehicle_controls(action) -> None:
 			action=action, suggestion_type=SuggestionType.NONE, reason="Explicit music request",
 		)
 		llm_agent, agent = make_llm_agent(decision)
-		agent.handle_music_action = AsyncMock()
-		agent.action_manager._music_manager = cast(Any, SimpleNamespace(execute=agent.handle_music_action))
+		agent.execute_music_action = AsyncMock()
+		for music_action in MUSIC_ACTIONS:
+			agent.action_manager._registered_handlers[music_action] = agent.execute_music_action
 		event = CarEvent(SkillType.CONVERSATION, "user_input", "Music command", [], "Music command")
 		await agent.process_direct_user_input(event)
 		if agent.voice_response_task is not None:
 			await agent.voice_response_task
-		agent.handle_music_action.assert_awaited_once_with(action, event.user_input, agent=agent)
+		agent.execute_music_action.assert_awaited_once_with(action, event.user_input)
 		agent.action_manager.handle_decision.assert_not_called()
 		assert "play_music" in llm_agent.direct_action_crew.inputs["action_options"]
 	asyncio.run(check())

@@ -24,7 +24,7 @@ class ConfigAssistant:
 
     rag_enabled: bool = False
     rag_manual_directory: str = "user_manual"
-    rag_manual_filename: str = "9999_9999_441_en-GB.pdf"
+    rag_manual_filename: str = "P3508CO2511en-1_preview.pdf"
     rag_index_directory: str = ".cache/vehicle_manual"
     rag_embedding_model: str = "bge-m3"
     rag_top_k: int = 3

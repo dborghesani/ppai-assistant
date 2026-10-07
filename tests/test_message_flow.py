@@ -7,13 +7,17 @@ from unittest.mock import AsyncMock, Mock, patch
 from data.agents_dataclasses import (
     ActionType,
     AssistantStatus,
+    InterventionType,
     SkillType,
+    SuggestionType,
     ToneType,
     UrgencyType,
 )
 from agents.automotive_agent import AutomotiveAgent
+from agents.llm_backend import NotificationDecision
 from data.events import CarEvent, IncomingMessage
 from managers.action_manager import ActionManager
+from managers.message_manager import PendingMessage
 from data.assistant_dataclasses import DriverPreferences
 from sim.friend_message_agent import FriendMessageAgent
 
@@ -341,7 +345,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         agent = make_agent()
         serious = IncomingMessage(sender="Luca", text="Call me urgently")
         casual = IncomingMessage(sender="Luca", text="A harmless rumor")
-        agent.action_manager.message_manager.pending_messages.extend((serious, casual))
+        agent.action_manager.message_manager.pending_messages.extend((PendingMessage(serious), PendingMessage(casual)))
         agent.remember_pending_message_classification(
             {"sender": serious.sender, "text": serious.text},
             ToneType.SERIOUS,
@@ -357,18 +361,13 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
             agent.most_urgent_pending_message_classification(),
             (ToneType.SERIOUS, UrgencyType.HIGH),
         )
-        agent.handle_pending_message_action(ActionType.ANNOUNCE_INCOMING_MESSAGE)
-        self.assertEqual(
-            agent.most_urgent_pending_message_classification(),
-            (ToneType.ENTHUSIASTIC, UrgencyType.NONE),
-        )
         agent.handle_pending_message_action(ActionType.READ_PENDING_MESSAGES)
         self.assertIsNone(agent.most_urgent_pending_message_classification())
 
     async def test_stopping_simulation_discards_queued_luca_events_only(self):
         agent = make_agent()
         pending_message = IncomingMessage(sender="Luca", text="Call me soon")
-        agent.action_manager.message_manager.pending_messages.append(pending_message)
+        agent.action_manager.message_manager.pending_messages.append(PendingMessage(pending_message))
         agent.message_simulator.stop = AsyncMock(return_value=True)
         luca_event = CarEvent(
             SkillType.CONVERSATION,
@@ -393,7 +392,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
 
         self.assertTrue(await agent.stop_message_simulation())
 
-        self.assertEqual(list(agent.action_manager.message_manager.pending_messages), [pending_message])
+        self.assertEqual(list(agent.action_manager.message_manager.pending_messages), [PendingMessage(pending_message)])
         self.assertEqual(
             [agent.event_queue.get_nowait(), agent.event_queue.get_nowait()],
             [other_event, reminder_event],
@@ -419,7 +418,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
 
             await agent._receive_incoming_message(message)
 
-            self.assertEqual(list(agent.action_manager.message_manager.pending_messages), [message])
+            self.assertEqual(list(agent.action_manager.message_manager.pending_messages), [PendingMessage(message)])
             event = agent.event_queue.get_nowait()
             self.assertEqual(event.event_name, "incoming_message_received")
             self.assertEqual(
@@ -430,19 +429,27 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
             agent.cancel_message_tasks()
             await asyncio.sleep(0)
 
-    async def test_reasoner_actions_announce_or_read_pending_messages(self):
+    async def test_permission_keeps_pending_messages_until_read_action(self):
         agent = make_agent()
         first = IncomingMessage(sender="Luca", text="First private message")
         second = IncomingMessage(sender="Luca", text="Second private message")
-        agent.action_manager.message_manager.pending_messages.extend((first, second))
+        agent.action_manager.message_manager.pending_messages.extend((PendingMessage(first), PendingMessage(second)))
 
         agent.action_manager.handle_decision(ActionType.ASK_PERMISSION_TO_TALK)
         self.assertEqual(
             agent.assistant_status, AssistantStatus.ASK_PERMISSION_TO_TALK
         )
 
-        agent.action_manager.handle_decision(ActionType.ANNOUNCE_INCOMING_MESSAGE)
-        self.assertEqual(list(agent.action_manager.message_manager.pending_messages), [second])
+        self.assertEqual(
+            list(agent.action_manager.message_manager.pending_messages),
+            [PendingMessage(first), PendingMessage(second)],
+        )
+        agent.action_manager.handle_decision(ActionType.READ_PENDING_MESSAGES)
+        read_task = agent.action_manager.message_manager.read_task
+        self.assertIsNotNone(read_task)
+        self.assertEqual(agent.action_manager.message_manager.pending_count, 2)
+        await read_task
+        self.assertFalse(agent.action_manager.message_manager.pending_messages)
 
 
     async def test_read_action_interprets_messages_for_named_driver(self):
@@ -455,14 +462,16 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
             sender="Luca",
             text="Marco is planning a surprise party for Sara.",
         )
-        agent.action_manager.message_manager.pending_messages.extend((first, second))
+        agent.action_manager.message_manager.pending_messages.extend((PendingMessage(first), PendingMessage(second)))
 
         agent.action_manager.handle_decision(ActionType.READ_PENDING_MESSAGES)
-        self.assertFalse(agent.action_manager.message_manager.pending_messages)
         read_task = agent.action_manager.message_manager.read_task
+        self.assertIsNotNone(read_task)
+        self.assertEqual(agent.action_manager.message_manager.pending_count, 2)
         agent.action_manager.handle_decision(ActionType.READ_PENDING_MESSAGES)
         self.assertIs(agent.action_manager.message_manager.read_task, read_task)
         await read_task
+        self.assertFalse(agent.action_manager.message_manager.pending_messages)
         self.assertEqual(agent.voice_llm.chat.completions.create.await_count, 1)
         summary_request = agent.voice_llm.chat.completions.create.await_args.kwargs
         self.assertIn("Do not use report formulas", summary_request["messages"][0]["content"])
@@ -482,11 +491,66 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_postponed_delivery_acknowledges_delay_and_leaves_private_message_queued(self):
+        agent = make_agent()
+        private_message = IncomingMessage(sender="Luca", text="A private message")
+        postponed_message = IncomingMessage(sender="Mara", text="A message sent while tired")
+        manager = agent.action_manager.message_manager
+        manager.pending_messages.extend((PendingMessage(private_message), PendingMessage(postponed_message)))
+
+        agent.action_manager.handle_decision(
+            ActionType.POSTPONE_NOTIFICATION_DELIVERY,
+            {
+                "event_value": {"sender": postponed_message.sender, "text": postponed_message.text},
+                "context": ["Fatigue level is high."],
+            },
+        )
+
+        self.assertEqual(manager.postponed_count, 1)
+        self.assertEqual(manager.permission_pending_count, 1)
+        self.assertEqual(manager.postponed_reason_summary, "fatigue")
+        self.assertEqual(manager.pending_messages[1].postponed_reason, "fatigue")
+        acknowledgement = "I delayed this message because you were tired."
+        agent.action_manager.handle_decision(
+            ActionType.READ_PENDING_MESSAGES,
+            {"postponed_only": True, "acknowledgement": acknowledgement},
+        )
+
+        self.assertEqual(manager.pending_count, 2)
+        self.assertEqual(manager.postponed_count, 0)
+        await manager.read_task
+        self.assertEqual(list(manager.pending_messages), [PendingMessage(private_message)])
+        self.assertEqual(manager.postponed_count, 0)
+        self.assertTrue(agent.conversation_history[-1]["content"].startswith(acknowledgement))
+        self.assertEqual(agent.conversation_history[-1]["content"].count(acknowledgement), 1)
+        self.assertIn("Giulia left dinner early", agent.conversation_history[-1]["content"])
+
+    async def test_fatigued_pending_reminder_postpones_all_waiting_messages(self):
+        agent = make_agent()
+        messages = [
+            IncomingMessage(sender="Luca", text="First pending message"),
+            IncomingMessage(sender="Mara", text="Second pending message"),
+        ]
+        manager = agent.action_manager.message_manager
+        manager.pending_messages.extend(PendingMessage(message) for message in messages)
+
+        agent.action_manager.handle_decision(
+            ActionType.POSTPONE_NOTIFICATION_DELIVERY,
+            {
+                "postpone_pending": True,
+                "context": ["Privacy mode is off.", "Fatigue level is high."],
+            },
+        )
+
+        self.assertEqual(manager.postponed_count, 2)
+        self.assertEqual(manager.permission_pending_count, 0)
+        self.assertEqual(manager.postponed_reason_summary, "fatigue")
+
     async def test_pending_message_prompt_uses_custom_driver_name(self):
         agent = make_agent()
         agent.driver_preferences_provider = lambda: {"driver_name": "Alex"}
         manager = agent.action_manager.message_manager
-        manager.pending_messages.append(IncomingMessage(sender="Luca", text="Can you call me now?"))
+        manager.pending_messages.append(PendingMessage(IncomingMessage(sender="Luca", text="Can you call me now?")))
         manager.handle_action(ActionType.READ_PENDING_MESSAGES)
         await manager.read_task
         request = agent.voice_llm.chat.completions.create.await_args.kwargs
@@ -497,7 +561,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
     async def test_read_action_speaks_original_messages_when_summary_is_empty(self):
         agent = make_agent()
         message = IncomingMessage(sender="Luca", text="Giulia has a new ride.")
-        agent.action_manager.message_manager.pending_messages.append(message)
+        agent.action_manager.message_manager.pending_messages.append(PendingMessage(message))
         agent.voice_llm.chat.completions.create.return_value.choices[
             0
         ].message.content = ""
@@ -510,6 +574,18 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Message from Luca: Giulia has a new ride."},
         )
         self.assertEqual(agent.pending_message_count, 0)
+
+    async def test_failed_message_speech_keeps_queue_pending(self):
+        agent = make_agent()
+        message = IncomingMessage(sender="Luca", text="A message to deliver")
+        manager = agent.action_manager.message_manager
+        manager.pending_messages.append(PendingMessage(message))
+        agent.speak = AsyncMock(side_effect=RuntimeError("speech unavailable"))
+
+        agent.action_manager.handle_decision(ActionType.READ_PENDING_MESSAGES)
+        await manager.read_task
+
+        self.assertEqual(list(manager.pending_messages), [PendingMessage(message)])
 
     async def test_user_reply_goes_to_simulator_only_without_pending_messages(self):
         agent = make_agent()
@@ -527,7 +603,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         agent.process_event_llm.assert_not_awaited()
 
         agent.action_manager.message_manager.pending_messages.append(
-            IncomingMessage(sender="Luca", text="Private rumor")
+            PendingMessage(IncomingMessage(sender="Luca", text="Private rumor"))
         )
         await agent.process_event(reply)
         agent.process_event_llm.assert_awaited_once_with(reply)
@@ -536,7 +612,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         agent = make_agent(["Privacy mode is on."])
         agent.action_manager.message_manager.reminder_interval = 0.01
         agent.action_manager.message_manager.pending_messages.append(
-            IncomingMessage(sender="Luca", text="Do not leak this text")
+            PendingMessage(IncomingMessage(sender="Luca", text="Do not leak this text"))
         )
         agent.is_processing_event = True
         task = asyncio.create_task(agent.action_manager.message_manager.remind())

@@ -60,7 +60,7 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "args": [
-                "rag_manual_filename=9999_9999_441_en-GB.pdf"
+                "rag_manual_filename=P3508CO2511en-1_preview.pdf"
             ]
         },
         {

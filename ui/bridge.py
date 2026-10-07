@@ -116,8 +116,6 @@ class VehicleBridge:
             ActionType.DISABLE_LANE_KEEP_ASSIST: {"lane_keep_assist_enabled": False},
             ActionType.ENABLE_BLIND_SPOT_MONITOR: {"blind_spot_monitor": True},
             ActionType.DISABLE_BLIND_SPOT_MONITOR: {"blind_spot_monitor": False},
-            ActionType.ENABLE_PRIVACY_MODE: {"privacy_mode": True},
-            ActionType.DISABLE_PRIVACY_MODE: {"privacy_mode": False},
             ActionType.ENABLE_SIDELIGHTS: {"lights_on_sidelights": True},
             ActionType.DISABLE_SIDELIGHTS: {"lights_on_sidelights": False},
             ActionType.ENABLE_LOW_BEAM_HEADLIGHTS: {"lights_on_low_beams": True},
@@ -494,15 +492,20 @@ class VehicleBridge:
         self._emit("detectedObjectsStateChanged", self.dumpDetectedObjectsState())
 
     def dumpMusicState(self) -> dict[str, Any]:
+        if self.agent.pending_music_selection is not None:
+            return {
+                "status": "proposal", "autoplay": False,
+                **self.agent.pending_music_selection,
+            }
         manager = getattr(self.agent.action_manager, "music_manager", None)
         return {**manager.current, "autoplay": False} if manager is not None else {"status": "disabled"}
 
-    def musicConsent(self, accepted: bool) -> bool:
-        if not isinstance(accepted, bool):
-            raise ValueError("Music consent must be a boolean")
-        return self.agent.action_manager.music_manager.consent(accepted)
+    def dumpAssistantStatus(self) -> str:
+        return self.agent.assistant_status.value
 
     def musicControl(self, command: str) -> None:
+        if command == "stop":
+            self.agent.clear_pending_music_selection()
         self.agent.action_manager.music_manager.control(command)
 
     def on_knowledge_changed(self, changes: list[str]) -> None:

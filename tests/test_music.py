@@ -1,8 +1,8 @@
 from data.assistant_dataclasses import DriverEmotionState, DriverPreferences
 from dataclasses import fields
 import asyncio
-from types import MethodType, SimpleNamespace
-from typing import cast
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 import json
 
@@ -17,8 +17,9 @@ from data.agents_dataclasses import (
     ToneType,
     UrgencyType,
 )
+from data.events import EventName
 from agents.automotive_agent import AutomotiveAgent
-from agents.llm_backend import NotificationDecision
+from agents.llm_backend import LLMBackend, NotificationDecision
 from managers.music_manager import MusicManager, MusicSearchPlan, jamendo_url
 from managers.knowledge_manager import KnowledgeManager
 
@@ -90,21 +91,22 @@ def test_music_plan_receives_all_emotions_preferences_and_history():
     async def check():
         history = [{"role": "user", "content": "I prefer gentle jazz today."}]
         create = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps({
-            "should_propose": False, "title": "", "queries": [], "tags": [], "permission_question": ""
+            "title": "Gentle jazz", "queries": ["gentle jazz"], "tags": ["jazz"]
         })))]))
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-        manager = MusicManager(ConfigAssistant(), client, Mock(), history_provider=lambda: history)
+        manager = MusicManager(ConfigAssistant(), client, Mock())
         emotions = {"sad": 0.7, "happy": 0.5, "neutral": 0.1}
-        plan = await manager.plan("When reflective I enjoy jazz.", emotions, "", {"traffic": "Heavy"})
-        assert not plan.should_propose
+        plan = await manager.plan(
+            "When reflective I enjoy jazz.", emotions, "", {"traffic": "Heavy"}, history=history
+        )
+        assert plan.title == "Gentle jazz"
         payload = json.loads(create.call_args.kwargs["messages"][1]["content"])
         assert payload["emotions"] == emotions
         assert payload["history"] == history
         assert payload["context"] == {"traffic": "Heavy"}
         assert payload["preferences"] == "When reflective I enjoy jazz."
-        assert payload["request_kind"] == "automatic_proposal"
         schema = create.call_args.kwargs["response_format"]["json_schema"]["schema"]
-        assert set(schema["required"]) == {"title", "queries", "tags", "should_propose", "permission_question"}
+        assert set(schema["required"]) == {"title", "queries", "tags"}
     asyncio.run(check())
 
 
@@ -140,122 +142,178 @@ def test_music_failures_do_not_start_playback_and_controls_emit_events(monkeypat
     asyncio.run(check())
 
 
-def test_consent_is_single_use_and_stop_clears_it():
-    manager = MusicManager(ConfigAssistant(), None, Mock())
-    manager.pending = {"tracks": [], "title": "Mellow"}
-    assert manager.consent(True)
+def test_manager_plays_a_selection_and_stop_interrupts_it():
+    manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
+    selection = {"tracks": [{"id": "1"}], "title": "Mellow"}
+    assert manager.play(selection)
     assert manager.current["autoplay"] is True
-    assert not manager.consent(True)
-    manager.pending = {"tracks": []}
-    assert manager.consent(False)
-    assert manager.current["status"] == "idle"
-    manager.pending = {"tracks": []}
     manager.control("stop")
-    assert manager.pending is None
+    assert manager.current["status"] == "idle"
     assert jamendo_url("javascript:alert(1)") == ""
 
 
-def test_consent_cannot_bypass_a_newer_assistant_question():
+def test_agent_rejects_music_confirmation_after_a_newer_assistant_question():
     history = [{"role": "assistant", "content": "Would you like music?"}]
-    manager = MusicManager(ConfigAssistant(), None, Mock(), history_provider=lambda: history)
-    manager.pending = {"title": "Mellow", "tracks": []}
-    manager.permission_prompt = "Would you like music?"
+    manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
+    manager.play = Mock(return_value=True)
+    agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+    agent.pending_music_selection = {"title": "Mellow", "tracks": [{"id": "1"}]}
+    agent.pending_music_prompt = "Would you like music?"
+    agent.pending_confirmation = SimpleNamespace(action=ActionType.EVALUATE_MUSIC_PROPOSAL)
+    agent.conversation_history = history
+    agent.action_manager = SimpleNamespace(music_manager=manager)
+    agent.on_music_update = Mock()
     history.append({"role": "assistant", "content": "Should I join your meeting?"})
-    assert not manager.consent(True)
-    assert manager.pending is None
-    assert manager.current["status"] == "idle"
+    assert not agent.confirm_pending_music_selection(True)
+    assert agent.pending_music_selection is None
+    assert manager.play.call_count == 0
+    assert agent.pending_confirmation is None
 
 
-def test_emotional_proposal_waits_for_answer():
+def test_music_proposal_reply_acknowledges_selection_without_asking_again():
+    instructions, reference = LLMBackend.music_proposal_reply_context(
+        True, {"title": "Mellow piano"}
+    )
+    assert "without asking again" in instructions
+    assert '"queued_playlist_title": "Mellow piano"' in reference
+
+
+def test_music_proposal_reply_asks_for_selection_confirmation_after_first_yes():
+    instructions, reference = LLMBackend.music_proposal_reply_context(
+        True, {"title": "Mellow Nights"}, asking_selection_confirmation=True,
+    )
+    assert "second, separate confirmation" in instructions
+    assert "I found the playlist <title>." in instructions
+    assert "Do not praise the choice" in instructions
+    assert '"queued_playlist_title": "Mellow Nights"' in reference
+
+
+def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
     async def check():
+        history = [{"role": "assistant", "content": "Would you like a mood-matching playlist?"}]
         manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
-        manager.plan = AsyncMock(return_value=MusicSearchPlan(
-            title="Mellow", queries=["mellow rock"], tags=["rock"],
-            permission_question="Would you enjoy some mellow rock right now?",
-        ))
-        manager.search = AsyncMock(return_value={"title": "Mellow", "tracks": []})
-        ask = AsyncMock(return_value=True)
-        state = {"DriverEmotionState": {"happy": 0.5}, "DriverPreferences": {"preferred_music": "rock"}}
-        manager.observe(state, ask)
-        await manager._task
-        assert manager.current["status"] == "proposal"
-        assert manager.current["autoplay"] is False
-        assert manager.current["permission_question"] == "Would you enjoy some mellow rock right now?"
-        assert manager.pending is not None
-        ask.assert_awaited_once_with("Would you enjoy some mellow rock right now?")
-        manager.observe(state, ask)
-        assert manager.plan.await_count == 1
-        assert manager.consent(True)
-        assert manager.current["autoplay"] is True
-        assert not hasattr(MusicManager, "select_emotion")
-    asyncio.run(check())
+        selection = {"kind": "playlist", "title": "Mellow Nights", "tracks": [{"id": "1"}]}
+        manager.current = {"status": "ready", "autoplay": False, **selection}
+        manager.request = AsyncMock()
 
-
-def test_llm_can_decline_music_without_search_or_permission():
-    async def check():
-        manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
-        manager.plan = AsyncMock(return_value=MusicSearchPlan(should_propose=False))
-        manager.search = AsyncMock()
-        ask = AsyncMock()
-        state = {"DriverEmotionState": {"happy": 0.9, "sad": 0.6},
-                 "DriverPreferences": {"preferred_music": "jazz"}, "EnvironmentState": {"traffic": "Heavy"}}
-        manager.observe(state, ask)
-        await manager._task
-        manager.plan.assert_awaited_once_with("jazz", {"happy": 0.9, "sad": 0.6}, "", state | {
-            "DriverPhysicalState": {}, "DetectedObjects": {}
-        })
-        manager.search.assert_not_awaited()
-        ask.assert_not_awaited()
-        assert manager.current["status"] == "idle"
-    asyncio.run(check())
-
-
-def test_persistence_update_is_not_blocked_by_transient_silence_cooldown():
-    async def check():
-        manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
-        manager.plan = AsyncMock(side_effect=[MusicSearchPlan(should_propose=False), MusicSearchPlan(
-            title="Mellow rock", queries=["mellow rock"], tags=["rock"],
-            permission_question="Would you like some mellow rock?",
-        )])
-        manager.search = AsyncMock(return_value={"title": "Mellow rock", "tracks": []})
-        ask = AsyncMock(return_value=True)
-        state = {"DriverEmotionState": {"happy": "Happiness level is medium."},
-             "DriverPreferences": {"preferred_music": "rock"}}
-        manager.observe(state, ask)
-        await manager._task
-        assert manager.current["status"] == "idle"
-        assert manager._last_attempt == float("-inf")
-        state["DriverEmotionState"]["happy"] += " This condition has persisted for a while."
-        manager.observe(state, ask)
-        await manager._task
-        assert manager.plan.await_count == 2
-        assert manager.current["status"] == "proposal"
-        assert not manager.current["autoplay"]
-        ask.assert_awaited_once()
-        manager.observe({**state, "DriverEmotionState": {"sad": "Sadness level is medium."}}, ask)
-        assert manager.plan.await_count == 2
-    asyncio.run(check())
-
-
-def test_propose_music_decision_starts_proposal_through_the_agent():
-    async def check():
-        agent = SimpleNamespace(
-            is_listening=True,
-            ask_music_permission=AsyncMock(return_value=True),
-            knowledge_facts_provider=lambda: {
-                "DriverEmotionState.angry": "Anger level is high. This condition has persisted for a while.",
-                "VehicleState.doors_locked": "The vehicle doors are locked.",
-            },
-            driver_preferences_provider=lambda: {"driver_name": "David", "preferred_music": "calm classical"},
-        )
-        manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
-        manager.plan = AsyncMock(return_value=MusicSearchPlan(
-            title="Calm piano", queries=["calm piano"], tags=["piano"],
-            permission_question="Would you like some calming music?",
-        ))
-        manager.search = AsyncMock(return_value={"title": "Calm piano", "tracks": []})
+        agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+        agent.pending_confirmation = SimpleNamespace(action=ActionType.PROPOSE_MUSIC)
+        agent.interpret_confirmation = AsyncMock(side_effect=[True, True])
+        agent.voice_response_task = None
+        agent.cancel_voice_response = Mock()
+        agent.knowledge_context = Mock(return_value=[])
+        agent.music_preferences_provider = Mock(return_value="rock")
+        agent.emotion_state = Mock(return_value={"sad": "Sadness level is medium."})
+        agent.conversation_history = history
+        agent.pending_music_selection = selection
+        agent.pending_music_prompt = None
+        agent.on_music_update = Mock()
         agent.action_manager = SimpleNamespace(music_manager=manager)
-        agent.start_music_proposal = MethodType(AutomotiveAgent.start_music_proposal, agent)
+        agent.llm_backend = SimpleNamespace(
+            music_proposal_reply_context=LLMBackend.music_proposal_reply_context,
+        )
+        async def generate_reply(_event, *, response_context):
+            if response_context[1].find('"asking_selection_confirmation": true') >= 0:
+                reply = 'I found "Mellow Nights". Does this choice sound good? Shall I start it?'
+            else:
+                reply = "I will start Mellow Nights."
+            history.append({"role": "assistant", "content": reply})
+            return reply
+        agent.stream_user_response = AsyncMock(side_effect=generate_reply)
+
+        await agent.handle_pending_confirmation("Yes, find me some music.")
+
+        assert agent.pending_confirmation.action is ActionType.EVALUATE_MUSIC_PROPOSAL
+        assert agent.pending_music_selection == selection
+        assert manager.current["status"] == "ready"
+        assert manager.current["autoplay"] is False
+        agent.on_music_update.assert_called_with({
+            "status": "proposal", "autoplay": False,
+            **selection,
+        })
+        manager.request.assert_not_awaited()
+
+        await agent.handle_pending_confirmation("Yes, start it.")
+
+        assert manager.current["status"] == "ready"
+        assert manager.current["autoplay"] is True
+        assert manager.current["title"] == "Mellow Nights"
+        assert agent.pending_music_selection is None
+        assert agent.pending_music_prompt is None
+        manager.request.assert_not_awaited()
+        assert agent.pending_confirmation is None
+        agent.stream_user_response.assert_awaited_once()
+        assert '"queued_playlist_title": "Mellow Nights"' in (
+            agent.stream_user_response.call_args.kwargs["response_context"][1]
+        )
+
+    asyncio.run(check())
+
+
+def test_unclassified_music_confirmation_is_treated_as_decline_in_both_stages():
+    async def check():
+        manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
+        manager.request = AsyncMock()
+        manager.play = Mock(return_value=True)
+        agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+        agent.pending_confirmation = SimpleNamespace(action=ActionType.PROPOSE_MUSIC)
+        agent.interpret_confirmation = AsyncMock(side_effect=[None, None])
+        agent.voice_response_task = None
+        agent.cancel_voice_response = Mock()
+        agent.knowledge_context = Mock(return_value=[])
+        agent.conversation_history = [{"role": "assistant", "content": "Would you like music?"}]
+        agent.pending_music_selection = {"title": "Mellow Nights", "tracks": [{"id": "1"}]}
+        agent.pending_music_prompt = None
+        agent.on_music_update = Mock()
+        agent.action_manager = SimpleNamespace(music_manager=manager)
+        agent.llm_backend = SimpleNamespace(
+            music_proposal_reply_context=LLMBackend.music_proposal_reply_context,
+        )
+        agent.stream_user_response = AsyncMock()
+
+        await agent.handle_pending_confirmation("Maybe.")
+        assert agent.pending_confirmation is None
+        assert agent.pending_music_selection is None
+        manager.request.assert_not_awaited()
+        assert "removed from the" in agent.stream_user_response.call_args.kwargs[
+            "response_context"
+        ][0]
+        assert '"confirmed": false' in agent.stream_user_response.call_args.kwargs["response_context"][1]
+
+        agent.pending_confirmation = SimpleNamespace(action=ActionType.EVALUATE_MUSIC_PROPOSAL)
+        agent.pending_music_selection = {"title": "Mellow Nights", "tracks": [{"id": "1"}]}
+        agent.pending_music_prompt = "Should I start Mellow Nights?"
+        agent.conversation_history.append({"role": "assistant", "content": agent.pending_music_prompt})
+        await agent.handle_pending_confirmation("Maybe.")
+        assert agent.pending_confirmation is None
+        assert agent.pending_music_selection is None
+        manager.play.assert_not_called()
+        assert "removed from the" in agent.stream_user_response.call_args.kwargs[
+            "response_context"
+        ][0]
+        assert '"confirmed": false' in agent.stream_user_response.call_args.kwargs["response_context"][1]
+
+    asyncio.run(check())
+
+
+def test_propose_music_decision_waits_for_confirmation_in_the_agent():
+    async def check():
+        agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+        agent.should_offer_music_proposal = Mock(return_value=True)
+        agent.speak = AsyncMock()
+        agent.pending_confirmation = None
+        selection = {"kind": "playlist", "title": "Calm piano", "tracks": [{"id": "1"}]}
+        manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
+        manager.request = AsyncMock(return_value=selection)
+        agent.action_manager = SimpleNamespace(handle_decision=Mock(), music_manager=manager)
+        agent.music_preferences_provider = Mock(return_value="calm classical")
+        agent.emotion_state = Mock(return_value={"angry": "persisted"})
+        agent.conversation_history = []
+        agent.pending_music_selection = None
+        agent.pending_music_prompt = None
+        agent.on_music_update = Mock()
+        agent.recent_notifications = []
+        agent.duplicate_suppression_enabled = False
 
         decision = NotificationDecision(
             urgency=UrgencyType.LOW,
@@ -267,21 +325,23 @@ def test_propose_music_decision_starts_proposal_through_the_agent():
             reason="Anger has persisted for a while; a calming playlist may help.",
             spoken_message="You've seemed tense for a while. Would you like some calming music?",
         )
-        assert decision.spoken_message  # validator requires the permission question
-
-        agent.start_music_proposal()
-        await manager._task
-        assert manager.current["status"] == "proposal"
-        assert manager.current["permission_question"] == "Would you like some calming music?"
-        manager.plan.assert_awaited_once_with(
-            "calm classical",
-            {"angry": "Anger level is high. This condition has persisted for a while."},
-            "",
-            {
-                "DriverEmotionState": {"angry": "Anger level is high. This condition has persisted for a while."},
-                "DriverPreferences": {"driver_name": "David", "preferred_music": "calm classical"},
-            },
+        event = SimpleNamespace(
+            event_name=EventName.KNOWLEDGE_UPDATED,
+            event_value={"DriverEmotionState.angry": 0.9},
         )
+        await agent.handle_notification_decision(event, decision)
+        assert agent.pending_confirmation.action is ActionType.PROPOSE_MUSIC
+        assert agent.pending_music_selection == selection
+        manager.request.assert_awaited_once_with(
+            "calm classical", emotion={"angry": "persisted"},
+            request="Prepare a mood-matching selection for confirmation", autoplay=False,
+            history=[],
+        )
+        agent.on_music_update.assert_called_once_with({
+            "status": "proposal", "autoplay": False, **selection,
+        })
+        agent.action_manager.handle_decision.assert_not_called()
+        agent.speak.assert_awaited_once_with(decision.spoken_message, tone=decision.tone)
     asyncio.run(check())
 
 

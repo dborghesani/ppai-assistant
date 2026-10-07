@@ -85,7 +85,7 @@ const CONTROL_GROUPS = {
       ["Dangerous objects", "dangerous_objects_around", 0, 10, 0, 1, "integer"]
     ]},
     { title: "Interior object detection", type: "ranges", cls: "DetectedObjects", integer: true, controls: [
-      ["People inside", "people_inside", 0, 8, 0, 1, "integer"],
+      ["People inside", "people_inside", 0, 5, 1, 1, "integer"],
       ["Children inside", "children_inside", 0, 4, 0, 1, "integer"]
     ]},
     { title: "Interior animal detection", type: "toggles", cls: "DetectedObjects", controls: [
@@ -196,6 +196,18 @@ function musicLink(selector, url) {
   else link.removeAttribute("href");
 }
 
+function displayMusicTrack(track) {
+  document.querySelector("#music-track-title").textContent = track.title;
+  document.querySelector("#music-artist").textContent = track.artist;
+  const cover = document.querySelector("#music-cover");
+  cover.hidden = !track.image;
+  if (track.image) cover.src = track.image;
+  else cover.removeAttribute("src");
+  musicLink("#music-source", track.url);
+  musicLink("#music-license", track.license);
+  updateMusicVolume();
+}
+
 function syncMusicTransport() {
   const playing = !musicAudio.paused && Boolean(musicAudio.src);
   const button = document.querySelector("#music-play");
@@ -210,21 +222,30 @@ async function playMusicTrack(index) {
   musicTrackIndex = index;
   const track = musicQueue[index];
   musicAudio.src = track.audio;
-  document.querySelector("#music-track-title").textContent = track.title;
-  document.querySelector("#music-artist").textContent = track.artist;
-  const cover = document.querySelector("#music-cover");
-  cover.hidden = !track.image;
-  if (track.image) cover.src = track.image;
-  else cover.removeAttribute("src");
-  musicLink("#music-source", track.url);
-  musicLink("#music-license", track.license);
-  updateMusicVolume();
+  musicAudio.load();
+  displayMusicTrack(track);
   try {
     await musicAudio.play();
-    document.querySelector("#music-status").textContent = "Playing";
-  } catch (_) {
-    document.querySelector("#music-status").textContent = "Ready";
-    showToast("Tap play to start music");
+    const muted = musicAudio.volume === 0;
+    document.querySelector("#music-status").textContent = muted ? "Playing silently: volume is 0" : "Playing";
+    if (muted) showToast("Increase Vehicle Audio volume to hear music");
+  } catch (error) {
+    const blocked = error?.name === "NotAllowedError";
+    const mediaError = musicAudio.error?.code;
+    const volumeIsZero = musicAudio.volume === 0;
+    const status = blocked ? "Tap Play to start"
+      : volumeIsZero ? "Vehicle Audio volume is 0"
+      : mediaError === 4 ? "Audio format or source unsupported"
+      : "Audio source unavailable";
+    document.querySelector("#music-status").textContent = status;
+    showToast(blocked ? "Tap Play to start music" : status);
+    console.warn("Music playback failed", {
+      error: error?.name,
+      mediaError,
+      networkState: musicAudio.networkState,
+      readyState: musicAudio.readyState,
+      audioHost: new URL(track.audio).host,
+    });
   }
   syncMusicTransport();
 }
@@ -235,7 +256,6 @@ async function controlMusic(command) {
     musicAudio.removeAttribute("src");
     musicAudio.load();
     musicQueue = [];
-    document.querySelector("#music-proposal").hidden = true;
     document.querySelector("#music-transport").hidden = true;
     document.querySelector("#music-status").textContent = "Stopped";
     musicLink("#music-source", "");
@@ -244,8 +264,7 @@ async function controlMusic(command) {
     musicAudio.pause();
     document.querySelector("#music-status").textContent = "Paused";
   } else if (command === "resume" && musicQueue.length) {
-    if (!musicAudio.getAttribute("src")) return playMusicTrack(musicTrackIndex);
-    try { await musicAudio.play(); } catch (_) { showToast("Tap play to resume music"); }
+    await playMusicTrack(musicTrackIndex);
   } else if (command === "next") {
     await playMusicTrack(musicTrackIndex + 1);
   }
@@ -259,19 +278,23 @@ function renderMusic(state) {
     return;
   }
   document.querySelector("#music-panel").hidden = state.status === "disabled";
-  document.querySelector("#music-proposal").hidden = state.status !== "proposal";
-  if (state.status === "proposal") {
-    document.querySelector("#music-proposal span").textContent = state.permission_question ?? "";
+  if (state.status === "proposal" && (musicAudio.paused || !musicAudio.src)) {
+    document.querySelector("#music-transport").hidden = true;
   }
-  const statuses = {not_configured: "Not configured", loading: "Finding a playlist", empty: "No matching music", error: "Music unavailable", idle: "", ready: "Ready", proposal: "Awaiting your reply"};
+  const statuses = {not_configured: "Not configured", loading: "Finding a playlist", empty: "No matching music", error: "Music unavailable", idle: "", ready: "Ready", proposal: "Selection found"};
   document.querySelector("#music-status").textContent = statuses[state.status] ?? "";
   if (state.title) document.querySelector("#music-title").textContent = state.title;
   else document.querySelector("#music-title").textContent = musicPlaylistTitle;
-  if (state.status === "ready" && state.autoplay && state.tracks?.length) {
+  if (state.status === "ready" && state.tracks?.length) {
     musicQueue = state.tracks;
     musicPlaylistTitle = state.title;
     document.querySelector("#music-transport").hidden = false;
-    playMusicTrack(0);
+    musicTrackIndex = 0;
+    if (state.autoplay) playMusicTrack(0);
+    else {
+      displayMusicTrack(musicQueue[0]);
+      syncMusicTransport();
+    }
   }
 }
 
@@ -280,13 +303,14 @@ musicAudio.addEventListener("ended", () => {
   else { document.querySelector("#music-status").textContent = "Finished"; syncMusicTransport(); }
 });
 musicAudio.addEventListener("error", () => {
-  if (musicAudio.getAttribute("src")) showToast("This track could not be played");
+  if (musicAudio.getAttribute("src")) {
+    document.querySelector("#music-status").textContent = "Audio source unavailable";
+    showToast("This track could not be played");
+  }
   syncMusicTransport();
 });
 musicAudio.addEventListener("play", syncMusicTransport);
 musicAudio.addEventListener("pause", syncMusicTransport);
-document.querySelector("#music-accept").addEventListener("click", () => bridge.call("musicConsent", true).catch(() => showToast("Music permission could not be sent")));
-document.querySelector("#music-decline").addEventListener("click", () => bridge.call("musicConsent", false).catch(() => {}));
 document.querySelector("#music-play").addEventListener("click", () => controlMusic(musicAudio.paused ? "resume" : "pause"));
 document.querySelector("#music-next").addEventListener("click", () => controlMusic("next"));
 document.querySelector("#music-stop").addEventListener("click", () => {
@@ -322,6 +346,9 @@ function setConnection(state) {
     connectionTimer = setTimeout(() => {
       connectionState = "connected";
       renderDriveStatus();
+      if (assistantStatus === "ask_permission_to_talk") {
+        restartPermissionPulse(document.querySelector("#connection-dot"));
+      }
     }, 2500);
     return;
   }
@@ -873,6 +900,7 @@ function renderChangedEvents(changes) {
 }
 
 bridge.on("ready", data => {
+  if (data.assistantStatus) setAssistantStatus(data.assistantStatus);
   renderKnowledge(data.knowledge);
   rememberControlState("DriverPreferences", data.driverPreferences);
   rememberControlState("VehicleState", data.vehicleState);

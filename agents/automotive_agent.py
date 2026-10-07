@@ -31,6 +31,8 @@ class AutomotiveAgent:
     def __init__(
         self, opt: ConfigAssistant, tts_manager: TTSManager | None = None
     ):
+        if opt.music_cooldown_seconds < 0:
+            raise ValueError("Music cooldown must be non-negative")
         self.logger = logger
         self.opt = opt
         self.is_active = True
@@ -43,6 +45,10 @@ class AutomotiveAgent:
         self.minimum_urgency = UrgencyType.MEDIUM
         self.duplicate_suppression_enabled = False
         self.pending_confirmation: PendingConfirmation | None = None
+        self.pending_music_selection: dict[str, Any] | None = None
+        self.pending_music_prompt: str | None = None
+        self._last_music_proposal_selection: str | None = None
+        self._last_music_proposal_attempt = float("-inf")
         self.conversation_history: list[dict[str, str]] = []
         self.manual_manager = VehicleManualManager(opt) if opt.rag_enabled else None
         self.response_context_providers: dict[ResponseSource, Callable[[str, list[dict[str, str]]], Awaitable[tuple[str, str]]]] = {
@@ -78,20 +84,61 @@ class AutomotiveAgent:
         if self.on_music_update is not None:
             self.on_music_update(value)
 
-    async def ask_music_permission(self, prompt: str) -> bool:
-        deadline = asyncio.get_running_loop().time() + self.opt.music_timeout
-        while self.is_listening:
-            response_finished = self.voice_response_task is None or self.voice_response_task.done()
-            if (not self.is_processing_event and response_finished
-                    and self.assistant_status is AssistantStatus.IDLE and not self.pending_message_count
-                    and not self.action_manager.awaiting_confirmation):
-                await self.speak(prompt)
-                return True
-            if asyncio.get_running_loop().time() >= deadline:
-                self.logger.info("Music permission deferred: assistant remained busy")
+    def publish_pending_music_selection(self) -> None:
+        if self.pending_music_selection is None:
+            return
+        self._notify_music_update({
+            "status": "proposal", "autoplay": False,
+            **self.pending_music_selection,
+        })
+
+    def clear_pending_music_selection(self, *, publish: bool = True) -> None:
+        had_selection = self.pending_music_selection is not None
+        self.pending_music_selection = None
+        self.pending_music_prompt = None
+        if (self.pending_confirmation is not None
+                and self.pending_confirmation.action is ActionType.EVALUATE_MUSIC_PROPOSAL):
+            self.pending_confirmation = None
+        if publish and had_selection:
+            self._notify_music_update({"status": "idle"})
+
+    def confirm_pending_music_selection(self, accepted: bool) -> bool:
+        selection = self.pending_music_selection
+        if selection is None:
+            return False
+        if accepted:
+            last_assistant = next((item["content"] for item in reversed(self.conversation_history)
+                                   if item["role"] == "assistant"), None)
+            if last_assistant != self.pending_music_prompt:
+                self.clear_pending_music_selection()
                 return False
-            await asyncio.sleep(0.1)
-        return False
+        self.clear_pending_music_selection(publish=not accepted)
+        if accepted and not self.action_manager.music_manager.play(selection):
+            self._notify_music_update({"status": "error"})
+            return False
+        return True
+
+    async def execute_music_action(self, action: ActionType, request: str) -> None:
+        music_manager = self.action_manager.music_manager
+        if action is ActionType.STOP_MUSIC:
+            self.clear_pending_music_selection()
+        if action is ActionType.PLAY_MUSIC:
+            music_manager.close()
+            if not self.opt.music_enabled or not music_manager.client_id:
+                message = "Music playback isn't configured yet."
+            else:
+                result = await music_manager.request(
+                    self.music_preferences_provider(), request=request, autoplay=True,
+                    history=self.conversation_history,
+                )
+                message = "I've queued a themed playlist for you." if result else "I couldn't find music right now."
+        else:
+            commands = {ActionType.PAUSE_MUSIC: "pause", ActionType.RESUME_MUSIC: "resume",
+                        ActionType.NEXT_MUSIC: "next", ActionType.STOP_MUSIC: "stop"}
+            music_manager.control(commands[action])
+            message = {"pause": "I've requested a music pause.", "resume": "I'll resume the music.",
+                       "next": "I'll skip to the next track.", "stop": "I've stopped the music."}[commands[action]]
+        await self.speak(message)
 
     def notify_incoming_message_classification(
         self, tone: ToneType, urgency: UrgencyType
@@ -166,18 +213,18 @@ class AutomotiveAgent:
                 emotion_state[measure] = fact
         return emotion_state
 
-    def start_music_proposal(self) -> None:
-        """Delegate the emotion-driven music proposal to the music manager.
-
-        The notification gate selects propose_music only when the knowledge base
-        reports a relevant non-neutral emotion as persisted; the music manager
-        still owns deduplication, cooldown and the permission question.
-        """
-        state = {
-            "DriverEmotionState": self.emotion_state(),
-            "DriverPreferences": self.driver_preferences_provider(),
-        }
-        self.action_manager.music_manager.observe(state, self.ask_music_permission)
+    def should_offer_music_proposal(self) -> bool:
+        selection = json.dumps({
+            "emotion": self.emotion_state(),
+            "preferences": self.driver_preferences_provider(),
+        }, sort_keys=True, default=str)
+        now = time.monotonic()
+        if (selection == self._last_music_proposal_selection
+                or now - self._last_music_proposal_attempt < self.opt.music_cooldown_seconds):
+            return False
+        self._last_music_proposal_selection = selection
+        self._last_music_proposal_attempt = now
+        return True
 
     def start_message_simulation(self) -> bool:
         return self.message_simulator.start()
@@ -300,7 +347,7 @@ class AutomotiveAgent:
     async def _empty_response_context(question: str, history: list[dict[str, str]]) -> tuple[str, str]:
         return "", ""
 
-    async def stream_user_response(self, event: CarEvent, *, response_context: tuple[str, str] = ("", "")) -> None:
+    async def stream_user_response(self, event: CarEvent, *, response_context: tuple[str, str] = ("", "")) -> str:
         """Classify delivery tone, then stream and speak the conversational response."""
         conversation_instructions = self.skill_manager.get_skill(SkillType.CONVERSATION)
         context = "\n".join(event.context)
@@ -398,6 +445,7 @@ class AutomotiveAgent:
             self.conversation_history = self.conversation_history[-8:]
             if self.on_response is not None:
                 self.on_response(full_response + "\n")
+        return full_response
 
     async def classify_conversation_tone(
         self, event: CarEvent, context: str
@@ -456,7 +504,10 @@ class AutomotiveAgent:
         await self.laya_backend.process_event(event)
 
     async def process_event_llm(self, event: CarEvent):
-        if event.event_name is EventName.PENDING_MESSAGES_REMINDER and self.pending_message_count == 0:
+        if (
+            event.event_name is EventName.PENDING_MESSAGES_REMINDER
+            and self.pending_message_count == 0
+        ):
             return
         self.logger.info(f">>> received {event.event_name} event with value: {event.event_value}")
         self.logger.info(">>> generating...")
@@ -472,9 +523,14 @@ class AutomotiveAgent:
             instructions = self.skill_manager.get_skill(SkillType(event.skill))
         except ValueError:
             instructions = "No additional skill-specific instructions."
+        context_facts = [fact for fact in event.context if not fact.startswith("Changed just now:")]
+        pending_count = self.pending_message_count
+        if pending_count:
+            context_facts.insert(0, f"{pending_count} incoming message(s) are pending delivery.")
         inputs = {
             "event_name": event.event_name,
             "driver_name": self.driver_name,
+            "pending_message_count": pending_count,
             "event_details": str(event.event_value) if event.event_name in {
                 EventName.INCOMING_MESSAGE_RECEIVED, EventName.PENDING_MESSAGES_REMINDER
             } else "No additional event-specific details.",
@@ -482,7 +538,7 @@ class AutomotiveAgent:
             "vehicle_action_guidance": getattr(self.skill_manager, "vehicle_action_guidance", ""),
             "changed_facts": "\n".join(f"- {fact.removeprefix('Changed just now: ')}" for fact in event.context
                                     if fact.startswith("Changed just now:")) or "No specific vehicle fact changed.",
-            "context": "\n".join(f"- {fact}" for fact in event.context if not fact.startswith("Changed just now:"))
+                "context": "\n".join(f"- {fact}" for fact in context_facts)
                     or "No additional vehicle context is available.",
             "user_input": event.user_input,
             **self.llm_backend.decision_options,
@@ -527,13 +583,14 @@ class AutomotiveAgent:
             self.action_manager.handle_decision(decision.action, {})
             return
         if decision.action is ActionType.PLAY_MUSIC:
-            self.action_manager.handle_decision(decision.action, {})
+            self.start_conversation_response(event, action=decision.action)
             return
         if decision.intervention_type is InterventionType.ACT and decision.action in backend.direct_vehicle_actions:
             self.logger.info("Direct user request classified as vehicle action", user_input=event.user_input,
                             action=decision.action.value, skill=decision.skill.value, reason=decision.reason)
             self.action_manager.handle_decision(decision.action, {})
-            await self.speak(decision.spoken_message or "I received the action request.", tone=decision.tone)
+            if decision.spoken_message:
+                await self.speak(decision.spoken_message, tone=decision.tone)
             return
         fallback_reason = (f"action={decision.action.value} is not a supported simulated vehicle action"
                         if decision.action is not ActionType.NONE else "model selected action=none")
@@ -555,9 +612,18 @@ class AutomotiveAgent:
             if classification is not None:
                 decision.tone, decision.urgency = classification
             self.notify_incoming_message_classification(decision.tone, decision.urgency)
-        if decision.action in {ActionType.ASK_PERMISSION_TO_TALK, ActionType.ANNOUNCE_INCOMING_MESSAGE}:
-            if decision.action is ActionType.ANNOUNCE_INCOMING_MESSAGE and decision.spoken_message:
-                await self.speak(decision.spoken_message, tone=decision.tone)
+        if decision.action is ActionType.POSTPONE_NOTIFICATION_DELIVERY:
+            self.action_manager.handle_decision(decision.action, {})
+            return
+        if decision.action is ActionType.READ_PENDING_MESSAGES:
+            parameters = {}
+            if event.event_name is EventName.KNOWLEDGE_UPDATED:
+                parameters = {
+                    "acknowledgement": decision.spoken_message or "",
+                }
+            self.action_manager.handle_decision(decision.action, parameters)
+            return
+        if decision.action is ActionType.ASK_PERMISSION_TO_TALK:
             self.action_manager.handle_decision(decision.action, {})
             return
         if decision.action in ActionType.ASK_ATTEND_MEETING:
@@ -567,31 +633,45 @@ class AutomotiveAgent:
             self.pending_confirmation = PendingConfirmation(action=decision.action)
             return
         if decision.action in ActionType.PROPOSE_MUSIC:
+            if not self.should_offer_music_proposal():
+                return
             if decision.spoken_message:
                 await self.speak(decision.spoken_message, tone=decision.tone)
-            self.action_manager.handle_decision(decision.action, {})
             self.pending_confirmation = PendingConfirmation(action=decision.action)
+            selection = await self.action_manager.music_manager.request(
+                self.music_preferences_provider(), emotion=self.emotion_state(),
+                request="Prepare a mood-matching selection for confirmation", autoplay=False,
+                history=self.conversation_history,
+            )
+            if selection is None:
+                self.pending_confirmation = None
+                await self.speak("I couldn't find a suitable playlist right now.")
+                return
+            self.pending_music_selection = selection
+            self.pending_music_prompt = None
+            self.publish_pending_music_selection()
             return
-        if not decision.notify or not decision.spoken_message:
+        if not decision.notify:
             return
         measures = set(event.event_value or [])
-        if self.duplicate_suppression_enabled:
+        if decision.spoken_message and self.duplicate_suppression_enabled:
             suppressed, reason = self.is_duplicate_or_cooling_down(decision.spoken_message, decision.urgency, measures)
             if suppressed:
                 self.logger.info(f">>> [suppressed duplicate] {reason}")
                 return
-        await self.speak(decision.spoken_message, tone=decision.tone)
-        self.recent_notifications.append({
-            "urgency": decision.urgency.value, "tone": decision.tone.value,
-            "intervention_type": decision.intervention_type.value, "skill": decision.skill.value,
-            "action": decision.action.value, "suggestion_type": decision.suggestion_type.value,
-            "message": decision.spoken_message, "event": event.event_name,
-            "measures": sorted(measures), "timestamp": time.time(),
-        })
-        self.recent_notifications = self.recent_notifications[-5:]
+        if decision.spoken_message:
+            await self.speak(decision.spoken_message, tone=decision.tone)
+            self.recent_notifications.append({
+                "urgency": decision.urgency.value, "tone": decision.tone.value,
+                "intervention_type": decision.intervention_type.value, "skill": decision.skill.value,
+                "action": decision.action.value, "suggestion_type": decision.suggestion_type.value,
+                "message": decision.spoken_message, "event": event.event_name,
+                "measures": sorted(measures), "timestamp": time.time(),
+            })
+            self.recent_notifications = self.recent_notifications[-5:]
         if decision.action is not ActionType.NONE:
             self.action_manager.handle_decision(decision.action, {})
-    
+
     def start_conversation_response(self, event: CarEvent, action: ActionType | None = None,
                                      source: ResponseSource = ResponseSource.GENERAL) -> None:
         response = (self.action_manager.execute_registered_action(action, event.user_input) if action is not None
@@ -649,27 +729,47 @@ class AutomotiveAgent:
 
         if self.pending_confirmation.action == ActionType.PROPOSE_MUSIC:
             self.cancel_voice_response()
-            if confirmed:
-                # Generate and queue the music plan BEFORE the reply proposes it.
-                result = await self.action_manager.music_manager.request(
-                    self.music_preferences_provider(), emotion=self.emotion_state(),
-                    request="Continue the accepted mood-matching music proposal", autoplay=True,
+            if confirmed is not True:
+                result = self.pending_music_selection
+                self.clear_pending_music_selection()
+                self._notify_music_update({"status": "idle"})
+                response_context = self.llm_backend.music_proposal_reply_context(False, result)
+                await self.stream_user_response(event, response_context=response_context)
+                self.pending_confirmation = None
+                return
+
+            result = self.pending_music_selection
+            if result is None:
+                response_context = self.llm_backend.music_proposal_reply_context(
+                    True, None, asking_selection_confirmation=True,
                 )
-                response_context = self.llm_backend.music_proposal_reply_context(confirmed, result)
-            else:
-                response_context = self.llm_backend.music_proposal_reply_context(confirmed)
-            await self.stream_user_response(event, response_context=response_context)
-            if confirmed:
+                await self.stream_user_response(event, response_context=response_context)
+                self.pending_confirmation = None
+                return
+            response_context = self.llm_backend.music_proposal_reply_context(
+                True, result, asking_selection_confirmation=True,
+            )
+            if result:
+                prompt = await self.stream_user_response(event, response_context=response_context)
+                self.pending_music_selection = result
+                self.pending_music_prompt = prompt
+                self.publish_pending_music_selection()
                 self.pending_confirmation.action = ActionType.EVALUATE_MUSIC_PROPOSAL
             else:
-                self.pending_confirmation.action = None
+                await self.stream_user_response(event, response_context=response_context)
+                self.pending_confirmation = None
             return
 
         if self.pending_confirmation.action == ActionType.EVALUATE_MUSIC_PROPOSAL:
-            self.cancel_voice_response()
-            if confirmed:
-                self.logger.info("enable music proposal")
-                #await self.action_manager.music_manager.evaluate_proposal()
+            result = self.pending_music_selection
+            if confirmed is not True:
+                self.confirm_pending_music_selection(False)
+                response_context = self.llm_backend.music_proposal_reply_context(False, result)
+                await self.stream_user_response(event, response_context=response_context)
+                self.pending_confirmation = None
+                return
+
+            self.confirm_pending_music_selection(True)
             self.pending_confirmation = None
             return
 

@@ -64,8 +64,6 @@ class ActionType(str, Enum):
     RESUME_MUSIC = "resume_music"
     NEXT_MUSIC = "next_music"
     STOP_MUSIC = "stop_music"
-    ACCEPT_MUSIC = "accept_music"
-    DECLINE_MUSIC = "decline_music"
     INCREASE_AUDIO_VOLUME = "increase_audio_volume"
     DECREASE_AUDIO_VOLUME = "decrease_audio_volume"
     START_NAVIGATION = "start_navigation"
@@ -80,10 +78,8 @@ class ActionType(str, Enum):
     DISABLE_LANE_KEEP_ASSIST = "disable_lane_keep_assist"
     ENABLE_BLIND_SPOT_MONITOR = "enable_blind_spot_monitor"
     DISABLE_BLIND_SPOT_MONITOR = "disable_blind_spot_monitor"
-    ENABLE_PRIVACY_MODE = "enable_privacy_mode"
-    DISABLE_PRIVACY_MODE = "disable_privacy_mode"
-    ANNOUNCE_INCOMING_MESSAGE = "announce_incoming_message"
     ASK_PERMISSION_TO_TALK = "ask_permission_to_talk"
+    POSTPONE_NOTIFICATION_DELIVERY = "postpone_notification_delivery"
     READ_PENDING_MESSAGES = "read_pending_messages"
     APPLY_RESTRICTIVE_ADAS_PROFILE = "apply_restrictive_adas_profile"
     ENABLE_SIDELIGHTS = "enable_sidelights"
@@ -126,8 +122,6 @@ class ActionType(str, Enum):
             ActionType.RESUME_MUSIC: "resume music playback",
             ActionType.NEXT_MUSIC: "skip to the next music track",
             ActionType.STOP_MUSIC: "stop music playback and cancel pending music proposals",
-            ActionType.ACCEPT_MUSIC: "accept the assistant's pending music proposal",
-            ActionType.DECLINE_MUSIC: "decline the assistant's pending music proposal",
             ActionType.INCREASE_AUDIO_VOLUME: "increase audio volume by one step",
             ActionType.DECREASE_AUDIO_VOLUME: "decrease audio volume by one step",
             ActionType.START_NAVIGATION: "start navigation",
@@ -142,11 +136,15 @@ class ActionType(str, Enum):
             ActionType.DISABLE_LANE_KEEP_ASSIST: "disable lane keeping assistance",
             ActionType.ENABLE_BLIND_SPOT_MONITOR: "enable blind spot monitoring",
             ActionType.DISABLE_BLIND_SPOT_MONITOR: "disable blind spot monitoring",
-            ActionType.ENABLE_PRIVACY_MODE: "enable privacy mode",
-            ActionType.DISABLE_PRIVACY_MODE: "disable privacy mode",
-            ActionType.ANNOUNCE_INCOMING_MESSAGE: "announce an incoming message",
             ActionType.ASK_PERMISSION_TO_TALK: "ask permission to read queued messages",
-            ActionType.READ_PENDING_MESSAGES: "read the queued messages after explicit permission",
+            ActionType.POSTPONE_NOTIFICATION_DELIVERY: (
+                "defer an incoming message because fatigue is high or attention is low"
+            ),
+            ActionType.READ_PENDING_MESSAGES: (
+                "deliver queued messages when manual privacy is off, no more than one person "
+                "is inside, and fatigue/attention allow delivery; also read postponed messages "
+                "when the driver has recovered"
+            ),
             ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE: (
                 "apply the restrictive ADAS safety profile: lower target speed, "
                 "increase following distance, and enable available assistance"
@@ -165,12 +163,13 @@ class ActionType(str, Enum):
                 "meeting on their behalf because they are running late."
             ),
             ActionType.PROPOSE_MUSIC: (
-                "Ask the driver's permission to play a mood-matching playlist when a "
-                "non-neutral emotion has persisted for a while."
+                "Ask the driver's permission to play a mood-matching playlist only "
+                "when changed facts report a non-neutral emotion at high or very high "
+                "intensity. Fatigue, attention and driving tension do not qualify."
             ),
             ActionType.EVALUATE_MUSIC_PROPOSAL: (
-                "Ask the driver to evaluate the previously proposed mood-matching playlist."
-            )
+                "Ask the driver whether the selected mood-matching playlist is acceptable."
+            ),
         }[self]
 
 class SkillType(str, Enum):

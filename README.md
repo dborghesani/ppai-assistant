@@ -247,7 +247,7 @@ references, not promises of catalog availability.
 Register an application at https://devportal.jamendo.com/ and configure its client ID locally:
 
 ```bash
-export JAMENDO_CLIENT_ID="your-client-id"
+export JAMENDO_CLIENT_ID="5f6703fc"
 uv run python main.py music_enabled=True
 ```
 

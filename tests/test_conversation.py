@@ -9,6 +9,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import structlog
+import httpx
+from crewai import LLM, Agent, Crew, Task
+from openai import OpenAI
 
 from agents.automotive_agent import AutomotiveAgent
 from data.agents_dataclasses import (
@@ -20,7 +23,11 @@ from data.agents_dataclasses import (
 	ToneType,
 	UrgencyType,
 )
-from agents.llm_backend import ConfirmationReply, LLMBackend, NotificationDecision
+from agents.llm_backend import (
+	ConfirmationReply, LLMBackend, NotificationDecision,
+	_before_timed_llm_call, _after_timed_llm_call, _crew_llm_timings,
+)
+from crewai.hooks.llm_hooks import LLMCallHookContext
 from managers.action_manager import ActionManager
 from managers.music_manager import MUSIC_ACTIONS
 from config import ConfigAssistant
@@ -35,6 +42,152 @@ class FakeCrew:
 	async def kickoff_async(self, *, inputs):
 		self.inputs = inputs
 		return SimpleNamespace(raw="structured decision", pydantic=self.decision)
+
+
+def test_crewai_logs_full_response_generation_time():
+	async def check():
+		backend = LLMBackend.__new__(LLMBackend)
+		backend.opt = ConfigAssistant(ollama_model="test-model")
+		backend.logger = Mock()
+		result = object()
+		crew = SimpleNamespace(kickoff_async=AsyncMock(return_value=result))
+		with patch("agents.llm_backend.time.perf_counter", side_effect=[10.0, 10.25]):
+			assert await backend._kickoff_timed(crew, {"user_input": "Hi"}, "test call") is result
+		crew.kickoff_async.assert_awaited_once_with(inputs={"user_input": "Hi"})
+		backend.logger.info.assert_called_once_with(
+			"LLM response generation time", llm_call="test call",
+			model="test-model", duration_ms=250.0,
+			llm_calls=0, completed_llm_calls=0, llm_duration_ms=0.0,
+			crew_overhead_ms=None, success=True,
+		)
+	asyncio.run(check())
+
+
+def test_crewai_counts_individual_calls_and_residual_time():
+	async def check():
+		backend = LLMBackend.__new__(LLMBackend)
+		backend.opt = ConfigAssistant(ollama_model="test-model")
+		backend.logger = Mock()
+		context = LLMCallHookContext(llm=SimpleNamespace(model="test-model"), response="Done")
+		result = object()
+
+		def generate():
+			for _ in range(2):
+				_before_timed_llm_call(context)
+				_after_timed_llm_call(context)
+			return result
+
+		async def kickoff(*, inputs):
+			return await asyncio.to_thread(generate)
+
+		crew = SimpleNamespace(kickoff_async=kickoff)
+		with patch("agents.llm_backend.time.perf_counter", side_effect=[10.0, 10.1, 10.3, 10.4, 10.7, 11.0]):
+			assert await backend._kickoff_timed(crew, {}, "notification decision") is result
+		assert _crew_llm_timings.get() is None
+		calls = backend.logger.info.call_args_list
+		assert [call.kwargs["duration_ms"] for call in calls] == [200.0, 300.0, 1000.0]
+		assert [call.kwargs["call_index"] for call in calls[:-1]] == [1, 2]
+		assert calls[-1].kwargs["llm_calls"] == 2
+		assert calls[-1].kwargs["completed_llm_calls"] == 2
+		assert calls[-1].kwargs["llm_duration_ms"] == 500.0
+		assert calls[-1].kwargs["crew_overhead_ms"] == 500.0
+	asyncio.run(check())
+
+
+def test_crewai_timing_preserves_errors_and_reports_unfinished_calls():
+	async def check():
+		backend = LLMBackend.__new__(LLMBackend)
+		backend.opt = ConfigAssistant()
+		backend.logger = Mock()
+		context = LLMCallHookContext(llm=SimpleNamespace(model="test-model"))
+
+		async def kickoff(*, inputs):
+			_before_timed_llm_call(context)
+			raise RuntimeError("Model failed")
+
+		with pytest.raises(RuntimeError, match="Model failed"):
+			await backend._kickoff_timed(SimpleNamespace(kickoff_async=kickoff), {}, "test call")
+		assert _crew_llm_timings.get() is None
+		fields = backend.logger.info.call_args.kwargs
+		assert fields["llm_calls"] == 1
+		assert fields["completed_llm_calls"] == 0
+		assert fields["crew_overhead_ms"] is None
+		assert fields["success"] is False
+	asyncio.run(check())
+
+
+def test_crewai_timing_observes_real_executor_without_duplicate_calls():
+	async def check():
+		def respond(request):
+			payload = json.loads(request.content)
+			assert not payload.get("stream", False)
+			return httpx.Response(200, json={
+				"id": "test", "object": "chat.completion", "created": 1, "model": "test-model",
+				"choices": [{"index": 0, "message": {
+					"role": "assistant", "content": "Thought: Ready.\nFinal Answer: Done",
+				}, "finish_reason": "stop"}],
+				"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			})
+
+		backend = LLMBackend.__new__(LLMBackend)
+		backend.opt = ConfigAssistant(ollama_model="test-model")
+		backend.logger = Mock()
+		llm = LLM(model="ollama/test-model")
+		with OpenAI(api_key="test", http_client=httpx.Client(transport=httpx.MockTransport(respond))) as client:
+			llm._client = client
+			agent = Agent(role="Test agent", goal="Reply", backstory="Test", llm=llm, verbose=False)
+			task = Task(description="Reply Done", expected_output="Done", agent=agent)
+			crew = Crew(agents=[agent], tasks=[task], verbose=False, tracing=False)
+			result = await backend._kickoff_timed(crew, {}, "test call")
+		assert result.raw == "Done"
+		calls = backend.logger.info.call_args_list
+		assert len(calls) == 2
+		assert calls[0].args[0] == "CrewAI LLM call completed"
+		assert calls[0].kwargs["call_index"] == 1
+		assert calls[-1].kwargs["llm_calls"] == 1
+		assert calls[-1].kwargs["completed_llm_calls"] == 1
+		assert calls[-1].kwargs["crew_overhead_ms"] is not None
+	asyncio.run(check())
+
+
+def test_conversation_logs_time_to_first_nonempty_token_once():
+	async def check():
+		class Stream:
+			async def __aiter__(self):
+				for text in [None, "", "Hello", " world"]:
+					yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
+
+			async def close(self):
+				pass
+
+		agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+		agent.opt = ConfigAssistant(ollama_model="test-model")
+		agent.skill_manager = SimpleNamespace(get_skill=Mock(return_value="Conversation"))
+		agent.classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
+		agent.conversation_history = []
+		agent.voice_llm = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+			create=AsyncMock(return_value=Stream()),
+		)))
+		agent.set_assistant_status = Mock()
+		agent.on_speaking_tone_changed = None
+		agent.on_response_update = None
+		agent.on_response = None
+		agent.tts_manager = None
+		agent.log_llm_usage = Mock()
+		logger = Mock()
+		with patch("agents.automotive_agent.logger", logger), patch(
+			"agents.automotive_agent.time.perf_counter", side_effect=[10.0, 10.125]
+		):
+			response = await agent.stream_user_response(
+				CarEvent(SkillType.CONVERSATION, "user_input", "Hi", [], "Hi"),
+			)
+		assert response == "Hello world"
+		ttft_calls = [call for call in logger.info.call_args_list if call.args[0] == "LLM time to first token"]
+		assert len(ttft_calls) == 1
+		assert ttft_calls[0].kwargs == {
+			"llm_call": "conversation response", "model": "test-model", "ttft_ms": 125.0,
+		}
+	asyncio.run(check())
 
 
 def make_llm_agent(decision: NotificationDecision):

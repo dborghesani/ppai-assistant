@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from enum import Enum
+from threading import Lock, get_ident
 from typing import Any, AsyncIterator, Callable, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -17,7 +21,64 @@ from data.agents_dataclasses import (
 )
 from data.events import CarEvent, EventName
 from crewai import LLM, Agent, Crew, Process, Task
+from crewai.hooks.llm_hooks import (
+    LLMCallHookContext,
+    register_after_llm_call_hook,
+    register_before_llm_call_hook,
+)
 from config import ConfigAssistant
+
+
+@dataclass
+class _CrewLLMTimings:
+    call_name: str
+    logger: Any
+    calls: int = 0
+    completed: int = 0
+    duration: float = 0.0
+    pending: dict[tuple[int, int, int], tuple[int, float]] = field(default_factory=dict)
+    lock: Any = field(default_factory=Lock)
+
+
+_crew_llm_timings: ContextVar[_CrewLLMTimings | None] = ContextVar("crew_llm_timings", default=None)
+
+
+def _before_timed_llm_call(context: LLMCallHookContext) -> None:
+    timings = _crew_llm_timings.get()
+    if timings is None:
+        return
+    key = (get_ident(), id(context.llm), id(context.executor))
+    with timings.lock:
+        timings.calls += 1
+        timings.pending[key] = (timings.calls, time.perf_counter())
+
+
+def _after_timed_llm_call(context: LLMCallHookContext) -> None:
+    timings = _crew_llm_timings.get()
+    if timings is None:
+        return
+    finished = time.perf_counter()
+    key = (get_ident(), id(context.llm), id(context.executor))
+    with timings.lock:
+        pending = timings.pending.pop(key, None)
+        if pending is None:
+            return
+        call_index, started = pending
+        duration = finished - started
+        timings.completed += 1
+        timings.duration += duration
+    timings.logger.info(
+        "CrewAI LLM call completed",
+        llm_call=timings.call_name,
+        call_index=call_index,
+        model=getattr(context.llm, "model", None),
+        duration_ms=round(duration * 1000, 2),
+        response_chars=len(context.response or ""),
+    )
+
+
+register_before_llm_call_hook(_before_timed_llm_call)
+register_after_llm_call_hook(_after_timed_llm_call)
 
 
 def _enum_options(enum_type: type[ActionType | InterventionType | SkillType | SuggestionType | ToneType | UrgencyType]) -> str:
@@ -655,12 +716,37 @@ class LLMBackend:
             values[name] = value
         return values
 
+    async def _kickoff_timed(self, crew: Crew, inputs: dict, call_name: str) -> Any:
+        started = time.perf_counter()
+        timings = _CrewLLMTimings(call_name, self.logger)
+        token = _crew_llm_timings.set(timings)
+        success = False
+        try:
+            result = await crew.kickoff_async(inputs=inputs)
+            success = True
+            return result
+        finally:
+            duration = time.perf_counter() - started
+            _crew_llm_timings.reset(token)
+            complete = timings.calls > 0 and timings.calls == timings.completed
+            self.logger.info(
+                "LLM response generation time",
+                llm_call=call_name,
+                model=self.opt.ollama_model if hasattr(self, "opt") else None,
+                duration_ms=round(duration * 1000, 2),
+                llm_calls=timings.calls,
+                completed_llm_calls=timings.completed,
+                llm_duration_ms=round(timings.duration * 1000, 2),
+                crew_overhead_ms=round(max(0.0, duration - timings.duration) * 1000, 2) if complete else None,
+                success=success,
+            )
+
     async def _run_decision(self, crew: Crew, inputs: dict, call_name: str) -> NotificationDecision:
         before = self._usage_snapshot()
         default_temperature = self.llm.temperature
         self.llm.temperature = 0.1
         try:
-            result = await crew.kickoff_async(inputs=inputs)
+            result = await self._kickoff_timed(crew, inputs, call_name)
         finally:
             self.llm.temperature = default_temperature
             after = self._usage_snapshot()
@@ -727,12 +813,12 @@ class LLMBackend:
         self, user_input: str, context: str, history: list[dict[str, str]]
     ) -> ToneType:
         try:
-            result = await self.conversation_tone_crew.kickoff_async(inputs={
+            result = await self._kickoff_timed(self.conversation_tone_crew, {
                 "conversation_history": json.dumps(history[-8:]),
                 "context": context or "No additional vehicle context is available.",
                 "user_input": user_input,
                 "tone_options": self.decision_options["tone_options"],
-            })
+            }, "conversation tone")
             tone = getattr(result, "pydantic", None)
             if not isinstance(tone, ConversationTone):
                 raise ValueError("Conversation tone classification did not return a ConversationTone")
@@ -743,10 +829,10 @@ class LLMBackend:
 
     async def interpret_confirmation(self, user_input: str, history: list[dict[str, str]]) -> bool | None:
         try:
-            result = await self.confirmation_crew.kickoff_async(inputs={
+            result = await self._kickoff_timed(self.confirmation_crew, {
                 "conversation_history": json.dumps(history[-8:]),
                 "user_input": user_input,
-            })
+            }, "confirmation interpretation")
             reply = getattr(result, "pydantic", None)
             if not isinstance(reply, ConfirmationReply):
                 raise ValueError("Meeting confirmation did not return a ConfirmationReply")

@@ -379,6 +379,7 @@ class AutomotiveAgent:
             self.on_speaking_tone_changed(conversation_tone.value)
         try:
             logger.info(">>> opening conversational LLM stream", model=self.opt.ollama_model)
+            llm_started = time.perf_counter()
             stream = await self.voice_llm.chat.completions.create(
                 model=self.opt.ollama_model,
                 messages=messages,
@@ -397,7 +398,12 @@ class AutomotiveAgent:
                 if not token:
                     continue
                 if not full_response:
-                    logger.info(">>> conversational LLM first response token received")
+                    logger.info(
+                        "LLM time to first token",
+                        llm_call="conversation response",
+                        model=self.opt.ollama_model,
+                        ttft_ms=round((time.perf_counter() - llm_started) * 1000, 2),
+                    )
                 full_response += token
                 sentence_buffer += token
 

@@ -315,6 +315,7 @@ class LayaBackend:
         if self.agent.on_speaking_tone_changed is not None:
             self.agent.on_speaking_tone_changed(output_tone.value)
         try:
+            llm_started = time.perf_counter()
             stream = await self.agent.voice_llm.chat.completions.create(
                 model=self.agent.opt.ollama_model,
                 messages=messages,
@@ -327,6 +328,13 @@ class LayaBackend:
                 token = chunk.choices[0].delta.content or ""
                 if not token:
                     continue
+                if not full_response:
+                    self.logger.info(
+                        "LLM time to first token",
+                        llm_call="laya response",
+                        model=self.agent.opt.ollama_model,
+                        ttft_ms=round((time.perf_counter() - llm_started) * 1000, 2),
+                    )
                 full_response += token
                 sentence_buffer += token
 

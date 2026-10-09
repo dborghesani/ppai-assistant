@@ -27,6 +27,14 @@ from crewai.hooks.llm_hooks import (
     register_before_llm_call_hook,
 )
 from config import ConfigAssistant
+from agents.tasks.pre_classify import (
+    LLMTask,
+    PreClassification,
+    PreClassificationInput,
+    PreClassificationUpdate,
+    ResponseSource,
+    RequestPreClassifier,
+)
 
 
 @dataclass
@@ -68,7 +76,7 @@ def _after_timed_llm_call(context: LLMCallHookContext) -> None:
         timings.completed += 1
         timings.duration += duration
     timings.logger.info(
-        "CrewAI LLM call completed",
+        "[LLM] CrewAI call completed",
         llm_call=timings.call_name,
         call_index=call_index,
         model=getattr(context.llm, "model", None),
@@ -85,12 +93,6 @@ def _enum_options(enum_type: type[ActionType | InterventionType | SkillType | Su
     return "\n".join(
         f"- {member.value}: {member.description}" for member in enum_type
     )
-
-
-class ResponseSource(str, Enum):
-    GENERAL = "general"
-    VEHICLE_STATE = "vehicle_state"
-    VEHICLE_MANUAL = "vehicle_manual"
 
 
 class ConversationTone(BaseModel):
@@ -687,8 +689,25 @@ class LLMBackend:
             memory=None,
         )
 
+        self.request_pre_classifier: LLMTask[
+            PreClassificationInput, PreClassification, PreClassificationUpdate
+        ] = RequestPreClassifier(opt, on_usage)
+
     async def classify_request(self, inputs: dict) -> NotificationDecision:
         return await self._get_decision(self.direct_action_crew, inputs, "direct action classification")
+
+    async def pre_classify_request(
+        self,
+        user_input: str,
+        history: list[dict[str, str]],
+        pending_message_count: int,
+        *,
+        on_update: Callable[[PreClassificationUpdate], None] | None = None,
+    ) -> PreClassification:
+        return await self.request_pre_classifier.execute(
+            PreClassificationInput(user_input, history, pending_message_count),
+            on_update=on_update,
+        )
 
     async def evaluate_event(self, inputs: dict) -> NotificationDecision:
         inputs.setdefault("pending_message_count", 0)
@@ -703,8 +722,8 @@ class LLMBackend:
         async with self._decision_lock:
             return await self._run_decision(crew, inputs, call_name)
 
-    def _usage_snapshot(self) -> dict[str, int] | None:
-        getter = getattr(self.llm, "get_token_usage_summary", None)
+    def _usage_snapshot(self, llm: Any | None = None) -> dict[str, int] | None:
+        getter = getattr(llm or self.llm, "get_token_usage_summary", None)
         if getter is None:
             return None
         usage = getter()
@@ -716,7 +735,8 @@ class LLMBackend:
             values[name] = value
         return values
 
-    async def _kickoff_timed(self, crew: Crew, inputs: dict, call_name: str) -> Any:
+    async def _kickoff_timed(self, crew: Crew, inputs: dict, call_name: str,
+                             *, model_name: str | None = None) -> Any:
         started = time.perf_counter()
         timings = _CrewLLMTimings(call_name, self.logger)
         token = _crew_llm_timings.set(timings)
@@ -730,9 +750,9 @@ class LLMBackend:
             _crew_llm_timings.reset(token)
             complete = timings.calls > 0 and timings.calls == timings.completed
             self.logger.info(
-                "LLM response generation time",
+                "[LLM] Response generation time",
                 llm_call=call_name,
-                model=self.opt.ollama_model if hasattr(self, "opt") else None,
+                model=model_name or (self.opt.ollama_model if hasattr(self, "opt") else None),
                 duration_ms=round(duration * 1000, 2),
                 llm_calls=timings.calls,
                 completed_llm_calls=timings.completed,
@@ -824,7 +844,7 @@ class LLMBackend:
                 raise ValueError("Conversation tone classification did not return a ConversationTone")
             return tone.tone
         except Exception as error:
-            self.logger.warning(f"Conversation tone classification failed; using calm tone: {error}")
+            self.logger.warning(f"[LLM] Conversation tone classification failed; using calm tone: {error}")
             return ToneType.CALM
 
     async def interpret_confirmation(self, user_input: str, history: list[dict[str, str]]) -> bool | None:
@@ -838,5 +858,5 @@ class LLMBackend:
                 raise ValueError("Meeting confirmation did not return a ConfirmationReply")
             return reply.confirmed
         except Exception as error:
-            self.logger.error(f"Confirmation interpretation failed: {error}")
+            self.logger.error(f"[LLM] Confirmation interpretation failed: {error}")
             return None

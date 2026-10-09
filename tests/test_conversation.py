@@ -24,8 +24,13 @@ from data.agents_dataclasses import (
 	UrgencyType,
 )
 from agents.llm_backend import (
-	ConfirmationReply, LLMBackend, NotificationDecision,
+	ConfirmationReply, LLMBackend, NotificationDecision, PreClassification, ResponseSource,
 	_before_timed_llm_call, _after_timed_llm_call, _crew_llm_timings,
+)
+from agents.tasks.pre_classify import (
+	PreClassificationInput,
+	PreClassificationUpdate,
+	RequestPreClassifier,
 )
 from crewai.hooks.llm_hooks import LLMCallHookContext
 from managers.action_manager import ActionManager
@@ -55,11 +60,353 @@ def test_crewai_logs_full_response_generation_time():
 			assert await backend._kickoff_timed(crew, {"user_input": "Hi"}, "test call") is result
 		crew.kickoff_async.assert_awaited_once_with(inputs={"user_input": "Hi"})
 		backend.logger.info.assert_called_once_with(
-			"LLM response generation time", llm_call="test call",
+			"[LLM] Response generation time", llm_call="test call",
 			model="test-model", duration_ms=250.0,
 			llm_calls=0, completed_llm_calls=0, llm_duration_ms=0.0,
 			crew_overhead_ms=None, success=True,
 		)
+	asyncio.run(check())
+
+
+def test_pre_classify_request_uses_short_history_and_returns_route():
+	async def check():
+		classifier = RequestPreClassifier.__new__(RequestPreClassifier)
+		classifier.streaming = True
+		classifier.model = "fast-model"
+		classifier.on_usage = Mock()
+		chunks = [
+			'{"requires_action_classification":true,',
+			'"response_source":"vehicle_manual",',
+			'"wait_message":"Checking how to activate cruise ',
+			'control for your vehicle."}',
+		]
+		events = []
+		class Stream:
+			def __init__(self):
+				self.chunks = iter(chunks)
+
+			def __aiter__(self):
+				return self
+
+			async def __anext__(self):
+				try:
+					text = next(self.chunks)
+				except StopIteration:
+					raise StopAsyncIteration
+				events.append("stream_chunk")
+				return SimpleNamespace(
+					choices=[SimpleNamespace(delta=SimpleNamespace(content=text))], usage=None,
+				)
+
+			async def close(self):
+				pass
+
+		stream = Stream()
+		classifier.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+			create=AsyncMock(return_value=stream),
+		)))
+		result = await classifier.execute(
+			PreClassificationInput(
+				"How fast am I going?",
+				[{"role": "user", "content": str(index)} for index in range(8)],
+				0,
+			),
+			on_update=lambda update: events.append(update),
+		)
+
+		assert result.requires_action_classification is True
+		assert result.wait_message == "Checking how to activate cruise control for your vehicle."
+		assert events == [
+			"stream_chunk",
+			PreClassificationUpdate(requires_action_classification=True),
+			"stream_chunk",
+			PreClassificationUpdate(response_source=ResponseSource.VEHICLE_MANUAL),
+			"stream_chunk",
+			"stream_chunk",
+			PreClassificationUpdate(
+				wait_message_chunk="Checking how to activate cruise control for your vehicle."
+			),
+		]
+		call = classifier.client.chat.completions.create.call_args.kwargs
+		assert call["model"] == "fast-model"
+		assert call["stream"] is True
+		json_schema = call["response_format"]["json_schema"]
+		assert json_schema["strict"] is True
+		assert json_schema["schema"]["required"] == list(
+			json_schema["schema"]["properties"]
+		)
+		assert json_schema["schema"]["additionalProperties"] is False
+		assert len(json.loads(call["messages"][1]["content"])["conversation_history"]) == 6
+		classifier.on_usage.assert_called_once_with("direct request pre-classification", None)
+	asyncio.run(check())
+
+
+def test_pre_classify_crew_mode_emits_updates_after_final_result():
+	async def check():
+		classifier = RequestPreClassifier.__new__(RequestPreClassifier)
+		classifier.streaming = False
+		classifier.model = "fast-model"
+		classifier.crew_llm = SimpleNamespace(
+			temperature=0.7,
+			get_token_usage_summary=Mock(return_value=None),
+		)
+		classifier.on_usage = Mock()
+		classification = PreClassification(
+			requires_action_classification=True,
+			wait_message="Un momento.",
+		)
+		crew = SimpleNamespace(kickoff_async=AsyncMock(
+			return_value=SimpleNamespace(pydantic=classification),
+		))
+		classifier.crew = crew
+		updates = []
+
+		result = await classifier.execute(
+			PreClassificationInput("Open the windows", [], 0),
+			on_update=updates.append,
+		)
+
+		assert result is classification
+		assert updates == [
+			PreClassificationUpdate(requires_action_classification=True),
+			PreClassificationUpdate(wait_message_chunk="Un momento."),
+		]
+		crew.kickoff_async.assert_awaited_once()
+		classifier.on_usage.assert_called_once_with("direct request pre-classification", None)
+	asyncio.run(check())
+
+
+def test_pre_classify_conversation_route_does_not_emit_wait_message():
+	async def check():
+		classifier = RequestPreClassifier.__new__(RequestPreClassifier)
+		classifier.streaming = True
+		classifier.model = "fast-model"
+		classifier.on_usage = Mock()
+		chunks = [
+			'{"requires_action_classification":false,',
+			'"wait_message":"","response_source":"general"}',
+		]
+		class Stream:
+			def __init__(self):
+				self.chunks = iter(chunks)
+
+			def __aiter__(self):
+				return self
+
+			async def __anext__(self):
+				try:
+					text = next(self.chunks)
+				except StopIteration:
+					raise StopAsyncIteration
+				return SimpleNamespace(
+					choices=[SimpleNamespace(delta=SimpleNamespace(content=text))], usage=None,
+				)
+
+			async def close(self):
+				pass
+
+		classifier.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+			create=AsyncMock(return_value=Stream()),
+		)))
+		updates = []
+
+		result = await classifier.execute(
+			PreClassificationInput("How are you?", [], 0), on_update=updates.append,
+		)
+
+		assert result.requires_action_classification is False
+		assert updates == [
+			PreClassificationUpdate(requires_action_classification=False),
+			PreClassificationUpdate(response_source=ResponseSource.GENERAL),
+		]
+	asyncio.run(check())
+
+
+def test_pre_classification_rejects_question_as_wait_message():
+	with pytest.raises(ValueError, match="brief non-question holding phrase"):
+		PreClassification(
+			requires_action_classification=True,
+			wait_message="Which make and model do you drive?",
+		)
+
+
+def test_pre_classification_accepts_natural_nine_word_wait_message():
+	classification = PreClassification(
+		requires_action_classification=True,
+		wait_message="Checking how to activate cruise control for your vehicle.",
+	)
+	assert classification.wait_message == (
+		"Checking how to activate cruise control for your vehicle."
+	)
+
+
+def test_pre_classify_wait_message_is_spoken_verbatim():
+	async def check():
+		agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+		agent.on_response = Mock()
+		agent.tts_manager = cast(Any, SimpleNamespace(speak=AsyncMock()))
+		message = "Un momento, controllo."
+
+		await agent._speak_wait_message(message)
+
+		agent.on_response.assert_called_once_with(message + "\n")
+		agent.tts_manager.speak.assert_awaited_once_with(message)
+	asyncio.run(check())
+
+
+def test_wait_message_chunks_update_one_bubble_and_finalize_once():
+	async def check():
+		agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+		agent.on_response = Mock()
+		agent.on_response_update = Mock()
+		tts_manager = SimpleNamespace(speak=AsyncMock())
+		agent.tts_manager = cast(Any, tts_manager)
+		chunks = asyncio.Queue()
+		chunks.put_nowait("Sure, I")
+		chunks.put_nowait("can help with that.")
+		chunks.put_nowait(None)
+
+		await agent._speak_wait_message_chunks(chunks)
+
+		assert [entry.args[0] for entry in agent.on_response_update.call_args_list] == [
+			"Sure, I",
+			"Sure, I can help with that.",
+		]
+		agent.on_response.assert_called_once_with("Sure, I can help with that.\n")
+		assert [entry.args[0] for entry in tts_manager.speak.await_args_list] == [
+			"Sure, I", "can help with that.",
+		]
+	asyncio.run(check())
+
+
+def test_clear_conversation_removes_history_and_pending_confirmation():
+	agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+	agent.conversation_history = [
+		{"role": "user", "content": "Open the windows."},
+		{"role": "assistant", "content": "Would you like me to?"},
+	]
+	agent.pending_confirmation = object()
+	agent.cancel_voice_response = Mock()
+	agent.clear_pending_music_selection = Mock()
+
+	agent.clear_conversation()
+
+	assert agent.conversation_history == []
+	assert agent.pending_confirmation is None
+	agent.cancel_voice_response.assert_called_once_with()
+	agent.clear_pending_music_selection.assert_called_once_with()
+
+
+def test_pre_classify_failure_routes_to_full_classifier():
+	async def check():
+		classifier = RequestPreClassifier.__new__(RequestPreClassifier)
+		classifier.streaming = True
+		classifier.model = "fast-model"
+		classifier.on_usage = Mock()
+		classifier.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+			create=AsyncMock(side_effect=RuntimeError("offline")),
+		)))
+		updates = []
+
+		result = await classifier.execute(
+			PreClassificationInput("Set the temperature", [], 0),
+			on_update=updates.append,
+		)
+
+		assert result.requires_action_classification is True
+		assert result.response_source is ResponseSource.GENERAL
+		assert updates == [
+			PreClassificationUpdate(requires_action_classification=True),
+		]
+	asyncio.run(check())
+
+
+def test_pre_classify_empty_json_routes_to_full_classifier():
+	async def check():
+		classifier = RequestPreClassifier.__new__(RequestPreClassifier)
+		classifier.streaming = True
+		classifier.model = "fast-model"
+		classifier.on_usage = Mock()
+		class Stream:
+			def __init__(self):
+				self.chunks = iter(["{}"])
+
+			def __aiter__(self):
+				return self
+
+			async def __anext__(self):
+				try:
+					text = next(self.chunks)
+				except StopIteration:
+					raise StopAsyncIteration
+				return SimpleNamespace(
+					choices=[SimpleNamespace(delta=SimpleNamespace(content=text))], usage=None,
+				)
+
+			async def close(self):
+				pass
+
+		classifier.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+			create=AsyncMock(return_value=Stream()),
+		)))
+		updates = []
+
+		result = await classifier.execute(
+			PreClassificationInput("Hello", [], 0), on_update=updates.append,
+		)
+
+		assert result.requires_action_classification is True
+		assert updates == [PreClassificationUpdate(requires_action_classification=True)]
+	asyncio.run(check())
+
+
+def test_invalid_wait_phrase_preserves_vehicle_manual_route():
+	async def check():
+		classifier = RequestPreClassifier.__new__(RequestPreClassifier)
+		classifier.streaming = True
+		classifier.model = "fast-model"
+		classifier.on_usage = Mock()
+		chunks = [
+			'{"requires_action_classification":true,',
+			'"response_source":"vehicle_manual",',
+			'"wait_message":"Checking how to activate cruise control for your vehicle."}',
+		]
+		class Stream:
+			def __init__(self):
+				self.chunks = iter(chunks)
+
+			def __aiter__(self):
+				return self
+
+			async def __anext__(self):
+				try:
+					text = next(self.chunks)
+				except StopIteration:
+					raise StopAsyncIteration
+				return SimpleNamespace(
+					choices=[SimpleNamespace(delta=SimpleNamespace(content=text))], usage=None,
+				)
+
+			async def close(self):
+				pass
+
+		classifier.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+			create=AsyncMock(return_value=Stream()),
+		)))
+		updates = []
+
+		result = await classifier.execute(
+			PreClassificationInput("How do I activate cruise control?", [], 0),
+			on_update=updates.append,
+		)
+
+		assert result.requires_action_classification is True
+		assert result.response_source is ResponseSource.VEHICLE_MANUAL
+		assert result.wait_message == ""
+		assert updates == [
+			PreClassificationUpdate(requires_action_classification=True),
+			PreClassificationUpdate(response_source=ResponseSource.VEHICLE_MANUAL),
+		]
 	asyncio.run(check())
 
 
@@ -142,7 +489,7 @@ def test_crewai_timing_observes_real_executor_without_duplicate_calls():
 		assert result.raw == "Done"
 		calls = backend.logger.info.call_args_list
 		assert len(calls) == 2
-		assert calls[0].args[0] == "CrewAI LLM call completed"
+		assert calls[0].args[0] == "[LLM] CrewAI call completed"
 		assert calls[0].kwargs["call_index"] == 1
 		assert calls[-1].kwargs["llm_calls"] == 1
 		assert calls[-1].kwargs["completed_llm_calls"] == 1
@@ -154,7 +501,7 @@ def test_conversation_logs_time_to_first_nonempty_token_once():
 	async def check():
 		class Stream:
 			async def __aiter__(self):
-				for text in [None, "", "Hello", " world"]:
+				for text in [None, "", "[[tone:empathetic]]", "Hello", " world"]:
 					yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
 
 			async def close(self):
@@ -170,6 +517,8 @@ def test_conversation_logs_time_to_first_nonempty_token_once():
 		)))
 		agent.set_assistant_status = Mock()
 		agent.on_speaking_tone_changed = None
+		tone_updates = []
+		agent.on_speaking_tone_changed = tone_updates.append
 		agent.on_response_update = None
 		agent.on_response = None
 		agent.tts_manager = None
@@ -182,7 +531,11 @@ def test_conversation_logs_time_to_first_nonempty_token_once():
 				CarEvent(SkillType.CONVERSATION, "user_input", "Hi", [], "Hi"),
 			)
 		assert response == "Hello world"
-		ttft_calls = [call for call in logger.info.call_args_list if call.args[0] == "LLM time to first token"]
+		assert tone_updates == [ToneType.EMPATHETIC.value, None]
+		agent.classify_conversation_tone.assert_not_awaited()
+		prompt = agent.voice_llm.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+		assert "[[tone:<value>]]" in prompt
+		ttft_calls = [call for call in logger.info.call_args_list if call.args[0] == "[LLM] Time to first token"]
 		assert len(ttft_calls) == 1
 		assert ttft_calls[0].kwargs == {
 			"llm_call": "conversation response", "model": "test-model", "ttft_ms": 125.0,
@@ -323,7 +676,7 @@ def test_log_llm_usage_reports_context_window_fill() -> None:
 	)
 
 	agent.logger.info.assert_called_once_with(
-		"LLM token usage",
+		"[LLM] Token usage",
 		llm_call="test call",
 		available=True,
 		prompt_tokens=1000,

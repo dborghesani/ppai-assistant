@@ -157,6 +157,7 @@ const conversation = document.querySelector("#conversation");
 const welcomeState = document.querySelector("#welcome-state");
 const input = document.querySelector("#message-input");
 const conversationButton = document.querySelector("#conversation-toggle");
+const clearConversationButton = document.querySelector("#clear-conversation");
 const duplicateSuppressionToggle = document.querySelector("#duplicate-suppression-toggle");
 let activeTab = "driver";
 let activeScenario = null;
@@ -286,21 +287,20 @@ function renderMusic(state) {
     return;
   }
   document.querySelector("#music-panel").hidden = state.status === "disabled";
-  if (state.status === "proposal" && (musicAudio.paused || !musicAudio.src)) {
-    document.querySelector("#music-transport").hidden = true;
-  }
   const statuses = {not_configured: "Not configured", loading: "Finding a playlist", empty: "No matching music", error: "Music unavailable", idle: "", ready: "Ready", proposal: "Selection found"};
   document.querySelector("#music-status").textContent = statuses[state.status] ?? "";
   if (state.title) document.querySelector("#music-title").textContent = state.title;
   else document.querySelector("#music-title").textContent = musicPlaylistTitle;
-  if (state.status === "ready" && state.tracks?.length) {
+  if ((state.status === "ready" || state.status === "proposal") && state.tracks?.length) {
     musicQueue = state.tracks;
     musicPlaylistTitle = state.title;
-    document.querySelector("#music-transport").hidden = false;
     musicTrackIndex = 0;
-    if (state.autoplay) playMusicTrack(0);
-    else {
-      displayMusicTrack(musicQueue[0]);
+    displayMusicTrack(musicQueue[0]);
+    document.querySelector("#music-transport").hidden = false;
+    const controls = document.querySelectorAll("#music-transport button");
+    controls.forEach(button => { button.disabled = state.status === "proposal"; });
+    if (state.status === "ready" && state.autoplay) playMusicTrack(0);
+    else if (state.status === "ready") {
       syncMusicTransport();
     }
   }
@@ -800,8 +800,17 @@ function addMessage(role, text) {
   article.innerHTML = `<div class="meta">${role === "user" ? "You" : "Drive assistant"}</div><div class="bubble"></div>`;
   article.querySelector(".bubble").textContent = text;
   conversation.append(article);
+  clearConversationButton.disabled = false;
   conversation.scrollTop = conversation.scrollHeight;
   return article;
+}
+
+function clearConversationView() {
+  conversation.replaceChildren(welcomeState);
+  pendingAssistantMessage = null;
+  input.value = "";
+  input.style.height = "auto";
+  clearConversationButton.disabled = true;
 }
 
 function updateAssistantMessage(text, final = false) {
@@ -826,6 +835,9 @@ function sendMessage(text) {
 document.querySelector("#composer").addEventListener("submit", event => {
   event.preventDefault();
   sendMessage(input.value);
+});
+clearConversationButton.addEventListener("click", () => {
+  bridge.call("clearConversation").catch(() => {});
 });
 input.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.shiftKey) {
@@ -932,6 +944,7 @@ bridge.on("sttEnabledChanged", enabled => {
 });
 bridge.on("responseUpdated", data => updateAssistantMessage(data[0]));
 bridge.on("responseReceived", data => updateAssistantMessage(data[0], true));
+bridge.on("conversationCleared", clearConversationView);
 bridge.on("speakingToneChanged", data => { setSpeakingTone(data[0]); updateMusicVolume(); });
 bridge.on("incomingMessageClassified", data => setIncomingMessageClassification(data[0]));
 bridge.on("assistantStatusChanged", data => { setAssistantStatus(data[0]); updateMusicVolume(); });

@@ -118,7 +118,7 @@ class LayaBackend:
         return SkillType.NONE.value
 
     async def process_event(self, event: CarEvent) -> None:
-        self.logger.info(f">>> [LAYA] Processing event: {event.event_value}")
+        self.logger.info(f"[LAYA] Processing event: {event.event_value}")
         laya_start = time.time()
         # Keep the inference payload identical to the fine-tuning dataset schema.
         if self.custom_model == "":
@@ -201,7 +201,7 @@ class LayaBackend:
         answers = result["answers"]
         output_lines = self.format_laya_answers(answers)
         for line in output_lines:
-            self.logger.info(f">>> [LAYA] {line}")
+            self.logger.info(f"[LAYA] {line}")
         self.logger.info(
             f">>> finished processing intervention analysis in {laya_elapsed:.3f} seconds"
         )

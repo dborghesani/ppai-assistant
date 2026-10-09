@@ -11,6 +11,7 @@ from ui.bridge import VehicleBridge
 class WebUIServer:
     _METHODS = {
         "boolChanged",
+        "clearConversation",
         "dumpKnowledge",
         "duplicateSuppressionChanged",
         "eventProcessingChanged",
@@ -65,6 +66,7 @@ class WebUIServer:
             "driverPreferencesChanged",
             "userSpeechReceived",
             "conversationModeChanged",
+            "conversationCleared",
             "knowledgeUpdated",
             "knowledgeChanged",
             "friendMessageSimulationChanged",

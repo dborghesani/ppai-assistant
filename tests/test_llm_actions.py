@@ -16,8 +16,9 @@ from data.agents_dataclasses import (
     ToneType,
     UrgencyType,
 )
-from agents.llm_backend import LLMBackend, NotificationDecision, ResponseSource
+from agents.llm_backend import LLMBackend, NotificationDecision, PreClassification, ResponseSource
 from agents.automotive_agent import AutomotiveAgent
+from agents.tasks.pre_classify import PreClassificationUpdate
 from managers.message_manager import MessageManager
 from data.events import CarEvent, EventName
 
@@ -36,6 +37,7 @@ def make_llm_agent(decision: NotificationDecision):
     agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
     agent.__dict__.update(vars(SimpleNamespace(
         maybe_handle_meeting_confirmation=AsyncMock(return_value=False),
+        pending_confirmation=None,
         log_llm_usage=Mock(),
         cancel_voice_response=Mock(),
         notify_incoming_message_classification=Mock(),
@@ -63,8 +65,11 @@ def make_llm_agent(decision: NotificationDecision):
     agent.recent_notifications = []
     agent.duplicate_suppression_enabled = False
     agent.action_manager.message_manager.simulation_stopped = lambda event: MessageManager.simulation_stopped(agent.action_manager.message_manager, event)
-    async def prepare_response(event, source):
-        await agent.stream_user_response(event)
+    async def prepare_response(event, source, *, response_gate=None):
+        if response_gate is None:
+            await agent.stream_user_response(event)
+        else:
+            await agent.stream_user_response(event, response_gate=response_gate)
 
     agent.prepare_user_response = AsyncMock(side_effect=prepare_response)
     llm_agent = LLMBackend.__new__(LLMBackend)
@@ -82,6 +87,9 @@ def make_llm_agent(decision: NotificationDecision):
     llm_agent.direct_action_options = "enable_heating: enable cabin heating"
     llm_agent.direct_vehicle_actions = (ActionType.ENABLE_HEATING, ActionType.OPEN_WINDOWS)
     llm_agent.silent_decision_guidance = "silent guidance"
+    llm_agent.pre_classify_request = AsyncMock(return_value=PreClassification(
+        requires_action_classification=True,
+    ))
     agent.llm_backend = llm_agent
     return llm_agent, agent
 
@@ -135,6 +143,224 @@ def test_direct_vehicle_command_dispatches_structured_action():
     assert llm_agent.direct_action_crew.inputs["user_input"] == command
     assert llm_agent.direct_action_crew.inputs["vehicle_action_guidance"] == "vehicle action reference"
     assert "context" not in llm_agent.direct_action_crew.inputs
+
+
+def test_action_classifier_runs_while_wait_message_is_spoken():
+    import asyncio
+
+    async def check():
+        llm_agent, agent = make_llm_agent(make_decision(ActionType.NONE))
+        classifier_started = asyncio.Event()
+        wait_started = asyncio.Event()
+        execution_order = []
+
+        async def classify_request(_inputs):
+            execution_order.append("classifier_started")
+            classifier_started.set()
+            await wait_started.wait()
+            execution_order.append("classifier_finished")
+            return make_decision(ActionType.NONE)
+
+        async def speak_wait_message(chunks):
+            assert await chunks.get() == "Hm."
+            await classifier_started.wait()
+            execution_order.append("wait_message_started")
+            wait_started.set()
+            assert await chunks.get() is None
+
+        llm_agent.classify_request = AsyncMock(side_effect=classify_request)
+        agent._speak_wait_message_chunks = AsyncMock(side_effect=speak_wait_message)
+        agent.prepare_user_response = AsyncMock()
+        event = CarEvent(
+            SkillType.CONVERSATION, EventName.USER_INPUT, "How are you?", [], "How are you?",
+        )
+
+        await agent.handle_direct_user_input(event)
+
+        assert execution_order == [
+            "classifier_started", "wait_message_started", "classifier_finished",
+        ]
+        llm_agent.classify_request.assert_awaited_once()
+        agent._speak_wait_message_chunks.assert_awaited_once()
+
+    asyncio.run(check())
+
+
+def test_action_classifier_starts_before_preclassification_finishes():
+    import asyncio
+
+    async def check():
+        llm_agent, agent = make_llm_agent(make_decision(ActionType.NONE))
+        classifier_started = asyncio.Event()
+        wait_started = asyncio.Event()
+        execution_order = []
+
+        async def pre_classify_request(
+            _user_input, _history, _pending_count, *, on_update,
+        ):
+            on_update(PreClassificationUpdate(requires_action_classification=True))
+            await classifier_started.wait()
+            execution_order.append("preclassifier_continued")
+            on_update(PreClassificationUpdate(wait_message_chunk="One moment."))
+            return PreClassification(
+                requires_action_classification=True,
+                wait_message="One moment.",
+            )
+
+        async def classify_request(_inputs):
+            execution_order.append("classifier_started")
+            classifier_started.set()
+            await wait_started.wait()
+            execution_order.append("classifier_finished")
+            return make_decision(ActionType.NONE)
+
+        async def speak_wait_message(chunks):
+            message = await chunks.get()
+            execution_order.append("wait_message_started")
+            assert message == "One moment."
+            wait_started.set()
+            assert await chunks.get() is None
+
+        llm_agent.pre_classify_request = AsyncMock(side_effect=pre_classify_request)
+        llm_agent.classify_request = AsyncMock(side_effect=classify_request)
+        agent._speak_wait_message_chunks = AsyncMock(side_effect=speak_wait_message)
+        agent.prepare_user_response = AsyncMock()
+        event = CarEvent(
+            SkillType.CONVERSATION, EventName.USER_INPUT, "How are you?", [], "How are you?",
+        )
+
+        await agent.handle_direct_user_input(event)
+
+        assert execution_order == [
+            "classifier_started",
+            "preclassifier_continued",
+            "wait_message_started",
+            "classifier_finished",
+        ]
+
+    asyncio.run(check())
+
+
+def test_vehicle_manual_response_starts_before_wait_message_finishes():
+    import asyncio
+
+    async def check():
+        llm_agent, agent = make_llm_agent(make_decision(ActionType.NONE))
+        rag_started = asyncio.Event()
+        wait_audio_started = asyncio.Event()
+        response_audio_released = asyncio.Event()
+        execution_order = []
+        event = CarEvent(
+            SkillType.CONVERSATION,
+            EventName.USER_INPUT,
+            "How do I change the cabin filter?",
+            [],
+            "How do I change the cabin filter?",
+        )
+
+        async def manual_context(_question, _history):
+            execution_order.append("rag_started")
+            rag_started.set()
+            return "manual instructions", "cabin-filter procedure"
+
+        async def stream_answer(_event, *, response_context, response_gate):
+            execution_order.append("response_generation_started")
+            assert response_context == ("manual instructions", "cabin-filter procedure")
+            await response_gate.wait()
+            execution_order.append("response_audio_released")
+            response_audio_released.set()
+
+        async def prepare_response(response_event, source, *, response_gate=None):
+            await AutomotiveAgent.prepare_user_response(
+                agent, response_event, source, response_gate=response_gate,
+            )
+
+        async def preclassify(_text, _history, _pending, *, on_update):
+            on_update(PreClassificationUpdate(requires_action_classification=True))
+            on_update(PreClassificationUpdate(response_source=ResponseSource.VEHICLE_MANUAL))
+            await rag_started.wait()
+            execution_order.append("wait_phrase_ready")
+            on_update(PreClassificationUpdate(wait_message_chunk="Un momento, controllo."))
+            return PreClassification(
+                requires_action_classification=True,
+                response_source=ResponseSource.VEHICLE_MANUAL,
+                wait_message="Un momento, controllo.",
+            )
+
+        async def classify(_inputs):
+            execution_order.append("classifier_started")
+            decision = make_decision(ActionType.NONE)
+            decision.response_source = ResponseSource.VEHICLE_MANUAL
+            return decision
+
+        async def speak_wait_chunks(chunks):
+            phrase = await chunks.get()
+            assert phrase == "Un momento, controllo."
+            execution_order.append("wait_audio_started")
+            wait_audio_started.set()
+            assert await chunks.get() is None
+
+        agent.response_context_providers = {
+            ResponseSource.VEHICLE_MANUAL: manual_context,
+        }
+        agent.prepare_user_response = AsyncMock(side_effect=prepare_response)
+        agent.stream_user_response = AsyncMock(side_effect=stream_answer)
+        agent._speak_wait_message_chunks = AsyncMock(side_effect=speak_wait_chunks)
+        llm_agent.pre_classify_request = AsyncMock(side_effect=preclassify)
+        llm_agent.classify_request = AsyncMock(side_effect=classify)
+
+        await agent.handle_direct_user_input(event)
+        await agent.voice_response_task
+
+        assert execution_order.index("rag_started") < execution_order.index("wait_audio_started")
+        assert execution_order.index("response_generation_started") < execution_order.index("wait_audio_started")
+        assert execution_order.index("wait_audio_started") < execution_order.index("response_audio_released")
+        assert response_audio_released.is_set()
+
+    asyncio.run(check())
+
+
+def test_invalid_wait_phrase_keeps_manual_rag_started_once():
+    import asyncio
+
+    async def check():
+        llm_agent, agent = make_llm_agent(make_decision(ActionType.NONE))
+        manual_decision = make_decision(ActionType.NONE)
+        manual_decision.response_source = ResponseSource.VEHICLE_MANUAL
+        llm_agent.classify_request = AsyncMock(return_value=manual_decision)
+        llm_agent.pre_classify_request = AsyncMock(side_effect=lambda *args, on_update: (
+            on_update(PreClassificationUpdate(requires_action_classification=True)),
+            on_update(PreClassificationUpdate(response_source=ResponseSource.VEHICLE_MANUAL)),
+            PreClassification(
+                requires_action_classification=True,
+                response_source=ResponseSource.VEHICLE_MANUAL,
+                wait_message="",
+            ),
+        )[-1])
+        agent.prepare_user_response = AsyncMock()
+        agent.start_conversation_response = Mock()
+
+        async def consume_wait_chunks(chunks):
+            assert await chunks.get() == "Hm."
+            assert await chunks.get() is None
+
+        agent._speak_wait_message_chunks = AsyncMock(side_effect=consume_wait_chunks)
+        event = CarEvent(
+            SkillType.CONVERSATION,
+            EventName.USER_INPUT,
+            "How do I activate cruise control?",
+            [],
+            "How do I activate cruise control?",
+        )
+
+        await agent.handle_direct_user_input(event)
+        await agent.voice_response_task
+
+        agent.prepare_user_response.assert_awaited_once()
+        assert agent.prepare_user_response.call_args.args == (event, ResponseSource.VEHICLE_MANUAL)
+        agent.start_conversation_response.assert_not_called()
+
+    asyncio.run(check())
 
 
 def test_direct_vehicle_action_is_dispatched_with_unrelated_meeting_context():

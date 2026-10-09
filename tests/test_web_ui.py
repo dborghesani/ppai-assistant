@@ -21,6 +21,7 @@ class FakeBridge:
     def __init__(self) -> None:
         self.listeners = {}
         self.friend_simulation_running = False
+        self.conversation_cleared = False
         self.duplicate_suppression_enabled = False
         self.driver_preferences = {
             "preferred_cabin_temperature": None,
@@ -59,6 +60,11 @@ class FakeBridge:
 
     def duplicateSuppressionChanged(self, enabled: bool) -> None:
         self.duplicate_suppression_enabled = enabled
+
+    def clearConversation(self) -> bool:
+        self.conversation_cleared = True
+        self.listeners["conversationCleared"]()
+        return True
 
 
 class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
@@ -146,6 +152,17 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         response = await socket.receive_json()
         self.assertEqual(response, {"id": 4, "result": None})
         self.assertTrue(cast(Any, self.web_ui.bridge).duplicate_suppression_enabled)
+        await socket.close()
+
+    async def test_websocket_clears_conversation(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+        await socket.send_json({"id": 7, "method": "clearConversation", "params": []})
+
+        messages = [await socket.receive_json(), await socket.receive_json()]
+        self.assertIn({"id": 7, "result": True}, messages)
+        self.assertIn({"event": "conversationCleared", "data": []}, messages)
+        self.assertTrue(cast(Any, self.web_ui.bridge).conversation_cleared)
         await socket.close()
 
     async def test_websocket_accepts_legacy_friend_simulation_method(self) -> None:

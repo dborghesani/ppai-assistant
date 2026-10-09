@@ -330,6 +330,11 @@ class VehicleBridge:
         )
         self.agent.event_queue.put_nowait(event)
 
+    def clearConversation(self) -> bool:
+        self.agent.clear_conversation()
+        self._emit("conversationCleared")
+        return True
+
     def eventProcessingChanged(self, enabled: bool):
         self.agent.is_listening = enabled
 

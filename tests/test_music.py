@@ -253,10 +253,42 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
         assert agent.pending_music_prompt is None
         manager.request.assert_awaited_once()
         assert agent.pending_confirmation is None
-        agent.stream_user_response.assert_awaited_once()
-        assert '"queued_playlist_title": "Mellow Nights"' in (
-            agent.stream_user_response.call_args.kwargs["response_context"][1]
-        )
+        assert agent.stream_user_response.await_count == 2
+        accepted_reply_context = agent.stream_user_response.call_args_list[1].kwargs[
+            "response_context"
+        ]
+        assert '"confirmed": true' in accepted_reply_context[1]
+        assert '"queued_playlist_title": "Mellow Nights"' in accepted_reply_context[1]
+        assert "without asking again" in accepted_reply_context[0]
+
+    asyncio.run(check())
+
+
+def test_music_proposal_with_no_selection_does_not_claim_a_playlist_was_found():
+    async def check():
+        manager = MusicManager(ConfigAssistant(jamendo_client_id="test"), None, Mock())
+        manager.request = AsyncMock(return_value=None)
+        agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
+        agent.pending_confirmation = SimpleNamespace(action=ActionType.PROPOSE_MUSIC)
+        agent.interpret_confirmation = AsyncMock(return_value=True)
+        agent.voice_response_task = None
+        agent.cancel_voice_response = Mock()
+        agent.knowledge_context = Mock(return_value=[])
+        agent.music_preferences_provider = Mock(return_value="rock")
+        agent.emotion_state = Mock(return_value={})
+        agent.conversation_history = [{"role": "assistant", "content": "Would you like music?"}]
+        agent.pending_music_selection = None
+        agent.pending_music_prompt = None
+        agent.on_music_update = Mock()
+        agent.action_manager = SimpleNamespace(music_manager=manager)
+        agent.speak = AsyncMock()
+        agent.stream_user_response = AsyncMock()
+
+        await agent.handle_pending_confirmation("Yes, find me some music.")
+
+        agent.speak.assert_awaited_once_with("I couldn't find a suitable playlist right now.")
+        agent.stream_user_response.assert_not_awaited()
+        assert agent.pending_confirmation is None
 
     asyncio.run(check())
 

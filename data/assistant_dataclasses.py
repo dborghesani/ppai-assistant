@@ -2,9 +2,6 @@ from dataclasses import dataclass, field
 from typing import Any
 import quaternion
 
-from data.agents_dataclasses import SkillType
-
-
 def knowledge_field(
     *,
     default: Any = None,
@@ -13,7 +10,6 @@ def knowledge_field(
     notify_on_trend_change: bool = True,
     notify_on_change: bool = True,
     value_kind: str | None = "magnitude",  # "category" reports the value directly, including numeric values.
-    skills: tuple[SkillType, ...] = (),
     persistence_levels: tuple[str, ...] = (),
     persistence_seconds: float = 30.0,
     reference: tuple[str, str] | None = None,
@@ -29,7 +25,6 @@ def knowledge_field(
         "notify_on_trend_change": notify_on_trend_change,
         "notify_on_change": notify_on_change,
         "value_kind": value_kind,
-        "skills": skills,
         "persistence_levels": persistence_levels,
         "persistence_seconds": persistence_seconds,
         "reference": reference,
@@ -82,7 +77,6 @@ class VehicleMotion:
     speed: float | None = knowledge_field(
         default=0.0,
         change_threshold=10.0,
-        skills=(SkillType.DRIVING, SkillType.WELLBEING),
         reference=("DetectedObjects", "traffic_signs.speed_limit"),
         reference_tolerance=0.0,
         reference_extreme_threshold=10.0,
@@ -94,9 +88,9 @@ class VehicleMotion:
     wheel_speed_rear_left: float | None = None  # km/h
     wheel_speed_rear_right: float | None = None  # km/h
     yaw_speed: float | None = None  # deg/s
-    acceleration_longitudinal: float | None = None#knowledge_field(change_threshold=0.5, skills=(SkillType.DRIVING,))  # m/s^2
-    acceleration_lateral: float | None = None #knowledge_field(change_threshold=0.5, skills=(SkillType.DRIVING,))  # m/s^2
-    steering_angle: float | None = None #knowledge_field(change_threshold=5.0, skills=(SkillType.DRIVING,))  # degrees
+    acceleration_longitudinal: float | None = None#knowledge_field(change_threshold=0.5)  # m/s^2
+    acceleration_lateral: float | None = None #knowledge_field(change_threshold=0.5)  # m/s^2
+    steering_angle: float | None = None #knowledge_field(change_threshold=5.0)  # degrees
     engine_rpm: float | None = None # rpm
     # from GPSIMU:
     acceleration_g_x: float | None = None  # g
@@ -111,67 +105,62 @@ class VehicleMotion:
 
 @dataclass
 class DriverAgenda:
-    late_for_meeting: bool | None = knowledge_field(default=False, skills=(SkillType.CONVERSATION,))
+    late_for_meeting: bool | None = knowledge_field(default=False)
 
 @dataclass
 class VehicleState:
-    door_open_front_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    door_open_front_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    door_open_rear_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    door_open_rear_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    window_open_front_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    window_open_front_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    window_open_rear_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    window_open_rear_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    sunroof_open: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    doors_locked: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    lights_on_sidelights: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    lights_on_low_beams: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    lights_on_high_beams: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    lights_on_fog_lights: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    turn_signal: str | None = knowledge_field(default="Off", skills=(SkillType.DRIVING,))  # ["Off", "Right", "Left", "Both"]
-    trunk_open: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    door_open_front_left: bool | None = knowledge_field(default=False)
+    door_open_front_right: bool | None = knowledge_field(default=False)
+    door_open_rear_left: bool | None = knowledge_field(default=False)
+    door_open_rear_right: bool | None = knowledge_field(default=False)
+    window_open_front_left: bool | None = knowledge_field(default=False)
+    window_open_front_right: bool | None = knowledge_field(default=False)
+    window_open_rear_left: bool | None = knowledge_field(default=False)
+    window_open_rear_right: bool | None = knowledge_field(default=False)
+    sunroof_open: bool | None = knowledge_field(default=False)
+    doors_locked: bool | None = knowledge_field(default=False)
+    lights_on_sidelights: bool | None = knowledge_field(default=False)
+    lights_on_low_beams: bool | None = knowledge_field(default=False)
+    lights_on_high_beams: bool | None = knowledge_field(default=False)
+    lights_on_fog_lights: bool | None = knowledge_field(default=False)
+    turn_signal: str | None = knowledge_field(default="Off")  # ["Off", "Right", "Left", "Both"]
+    trunk_open: bool | None = knowledge_field(default=False)
     lane_keep_assist: str | None = None  # ["Unavailable", "Unselected", "Selected", "Authorized", "Active", "Defect", "Collision_Risk_not_used_during_LPA"]
-    lane_keep_assist_enabled: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    adaptive_cruise_control_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    blind_spot_monitor: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    lane_keep_assist_enabled: bool | None = knowledge_field(default=False)
+    adaptive_cruise_control_on: bool | None = knowledge_field(default=False)
+    blind_spot_monitor: bool | None = knowledge_field(default=False)
     adas_target_speed: int | None = knowledge_field(
         default=90,
         change_threshold=5.0,
         value_kind="count",
-        skills=(SkillType.DRIVING,),
     )  # km/h; ADAS setpoint, not measured vehicle speed
     following_distance_level: int | None = knowledge_field(
         default=3,
         change_threshold=1.0,
         value_kind="count",
-        skills=(SkillType.DRIVING,),
     )  # simulated setting from 1 (short) to 5 (long)
-    engine_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    privacy_mode: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    air_conditioning_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
-    heating_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
-    air_recirculation_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
+    engine_on: bool | None = knowledge_field(default=False)
+    privacy_mode: bool | None = knowledge_field(default=False)
+    air_conditioning_on: bool | None = knowledge_field(default=False)
+    heating_on: bool | None = knowledge_field(default=False)
+    air_recirculation_on: bool | None = knowledge_field(default=False)
     fan_speed: int | None = knowledge_field(
         default=3,
         change_threshold=1.0,
         value_kind="count",
-        skills=(SkillType.WELLBEING,),
     )
-    seat_heating_on: bool | None = knowledge_field(default=False, skills=(SkillType.WELLBEING,))
-    radio_on: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    seat_heating_on: bool | None = knowledge_field(default=False)
+    radio_on: bool | None = knowledge_field(default=False)
     audio_volume: int | None = knowledge_field(
         default=20,
         change_threshold=5.0,
         value_kind="count",
-        skills=(SkillType.DRIVING,),
     )
-    navigation_active: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    navigation_active: bool | None = knowledge_field(default=False)
     internal_temperature: float | None = knowledge_field(
         default=22.0,
         change_threshold=1.0,
         notify_on_trend_change=False,
-        skills=(SkillType.WELLBEING,),
         reference=("DriverPreferences", "preferred_cabin_temperature"),
         reference_label="Cabin temperature",
     )  # °C
@@ -192,9 +181,9 @@ class LaneTrace:
 @dataclass
 class LaneTracing:
     road_type: str | None = None  # ["Unknown", "Highway", "Inner_city", "Interurban"]
-    highway_exit: str | None = knowledge_field(default="No exit", skills=(SkillType.DRIVING,)) # ["No exit", "Right", "Left"]
-    lane_crossing_left: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
-    lane_crossing_right: bool | None = knowledge_field(default=False, skills=(SkillType.DRIVING,))
+    highway_exit: str | None = knowledge_field(default="No exit") # ["No exit", "Right", "Left"]
+    lane_crossing_left: bool | None = knowledge_field(default=False)
+    lane_crossing_right: bool | None = knowledge_field(default=False)
     lane_L0: LaneTrace | None = None
     lane_L1: LaneTrace | None = None
     lane_R0: LaneTrace | None = None
@@ -206,7 +195,6 @@ class LaneTracing:
         default=1,
         value_kind="category",
         notify_on_change=False,
-        skills=(SkillType.DRIVING,),
     )  # start at 1
 
 @dataclass
@@ -287,49 +275,41 @@ class DetectedObjects:
         default=0,
         change_threshold=1.0,
         value_kind="count",
-        skills=(SkillType.WELLBEING,),
     )
     people_inside: int | None = knowledge_field(
         default=1,
         change_threshold=1.0,
         value_kind="count",
-        skills=(SkillType.WELLBEING, SkillType.DRIVING),
     )
     animal_inside: bool | None = knowledge_field(
         default=False,
-        skills=(SkillType.WELLBEING,),
     )
     people_around: int | None = knowledge_field(
         default=0,
         change_threshold=1.0,
         value_kind="density",
-        skills=(SkillType.WELLBEING,),
     )
     vehicles_around: int | None = knowledge_field(
         default=0,
         change_threshold=1.0,
         value_kind="density",
-        skills=(SkillType.WELLBEING,),
     )
     dangerous_objects_around: int | None = knowledge_field(
         default=0,
         value_kind="presence",
-        skills=(SkillType.DRIVING,),
     )
 
 @dataclass
 class DriverPhysicalState:
-    activity: str | None = knowledge_field(default="Idle", skills=(SkillType.WELLBEING,))  # Includes "Children out of place".
+    activity: str | None = knowledge_field(default="Idle")  # Includes "Children out of place".
     attention_level: float | None = knowledge_field(
         default=1.0,
         value_kind="intensity",
-        skills=(SkillType.WELLBEING,),
         persistence_levels=("low",),
     )  # [0.0, 1.0]
     fatigue_level: float | None = knowledge_field(
         default=0.0,
         value_kind="intensity",
-        skills=(SkillType.WELLBEING,),
         persistence_levels=("high", "very high"),
     )  # [0.0, 1.0]
 
@@ -350,35 +330,32 @@ class DriverPreferences:
         default="David",
         value_kind="category",
         notify_on_change=False,
-        skills=(SkillType.CONVERSATION,),
     )
     preferred_cabin_temperature: float | None = knowledge_field(
         default=22.0,
         value_kind="category",
         notify_on_change=False,
-        skills=(SkillType.CONVERSATION, SkillType.WELLBEING),
     )
     preferred_music: str | None = knowledge_field(
         default=DEFAULT_MUSIC_PREFERENCE,
         value_kind="category",
         notify_on_change=False,
-        skills=(SkillType.CONVERSATION, SkillType.WELLBEING),
     )
 
 
 @dataclass
 class DriverEmotionState:
-    angry: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,)) # persistence_levels=("medium", "high", "very high"))
-    disgust: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))#, persistence_levels=("medium", "high", "very high"))
-    fear: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))#, persistence_levels=("medium", "high", "very high"))
-    happy: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))#, persistence_levels=("medium", "high", "very high"))
-    sad: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))#, persistence_levels=("medium", "high", "very high"))
-    surprise: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING,))#, persistence_levels=("medium", "high", "very high"))
-    neutral: float | None = knowledge_field(default=1.0, value_kind="intensity", skills=(SkillType.WELLBEING,))
+    angry: float | None = knowledge_field(default=0.0, value_kind="intensity") # persistence_levels=("medium", "high", "very high"))
+    disgust: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
+    fear: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
+    happy: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
+    sad: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
+    surprise: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
+    neutral: float | None = knowledge_field(default=1.0, value_kind="intensity")
 
 @dataclass
 class DriverDrivingStyle:
-    driving_tension: float | None = knowledge_field(default=0.0, value_kind="intensity", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # [0.0, 1.0] [safe, aggressive]
+    driving_tension: float | None = knowledge_field(default=0.0, value_kind="intensity")  # [0.0, 1.0] [safe, aggressive]
     
 @dataclass
 class EnvironmentState:
@@ -386,17 +363,15 @@ class EnvironmentState:
         default=22.0,
         change_threshold=2.0,
         notify_on_trend_change=False,
-        skills=(SkillType.WELLBEING, SkillType.DRIVING),
     )  # °C
-    weather: str | None = knowledge_field(default="Sunny", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
-    forecast_weather: str | None = knowledge_field(default="Sunny", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
-    time_of_day: str | None = knowledge_field(default="Morning", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # ["Morning", "Afternoon", "Evening", "Night"]
-    road_condition: str | None = knowledge_field(default="Dry", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # ["Dry", "Wet", "Icy", "Snowy", "Gravel"]
-    road_type: str | None = knowledge_field(default="Urban", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # ["Urban", "Rural", "Highway", "Residential"]
-    risk_level: str | None = knowledge_field(default="None", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # ["None", "Low", "Medium", "High"]
+    weather: str | None = knowledge_field(default="Sunny")  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
+    forecast_weather: str | None = knowledge_field(default="Sunny")  # ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"]
+    time_of_day: str | None = knowledge_field(default="Morning")  # ["Morning", "Afternoon", "Evening", "Night"]
+    road_condition: str | None = knowledge_field(default="Dry")  # ["Dry", "Wet", "Icy", "Snowy", "Gravel"]
+    road_type: str | None = knowledge_field(default="Urban")  # ["Urban", "Rural", "Highway", "Residential"]
+    risk_level: str | None = knowledge_field(default="None")  # ["None", "Low", "Medium", "High"]
     visibility: int | None = knowledge_field(default=100,
                                              change_threshold=10.0,
-                                             value_kind="intensity",
-                                             skills=(SkillType.WELLBEING, SkillType.DRIVING))
-    traffic: str | None = knowledge_field(default="No traffic", skills=(SkillType.WELLBEING, SkillType.DRIVING))  # ["No traffic", "Light", "Medium", "Heavy"]
+                                             value_kind="intensity")
+    traffic: str | None = knowledge_field(default="No traffic")  # ["No traffic", "Light", "Medium", "Heavy"]
 

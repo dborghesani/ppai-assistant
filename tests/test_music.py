@@ -19,7 +19,8 @@ from data.agents_dataclasses import (
 )
 from data.events import EventName
 from agents.automotive_agent import AutomotiveAgent
-from agents.llm_backend import LLMBackend, NotificationDecision
+from agents.tasks.decision import NotificationDecision
+from agents.tasks.mood_music import music_proposal_reply_context
 from managers.music_manager import MusicManager, MusicSearchPlan, jamendo_url
 from managers.knowledge_manager import KnowledgeManager
 
@@ -173,7 +174,7 @@ def test_agent_rejects_music_confirmation_after_a_newer_assistant_question():
 
 
 def test_music_proposal_reply_acknowledges_selection_without_asking_again():
-    instructions, reference = LLMBackend.music_proposal_reply_context(
+    instructions, reference = music_proposal_reply_context(
         True, {"title": "Mellow piano"}
     )
     assert "without asking again" in instructions
@@ -181,7 +182,7 @@ def test_music_proposal_reply_acknowledges_selection_without_asking_again():
 
 
 def test_music_proposal_reply_asks_for_selection_confirmation_after_first_yes():
-    instructions, reference = LLMBackend.music_proposal_reply_context(
+    instructions, reference = music_proposal_reply_context(
         True, {"title": "Mellow Nights"}, asking_selection_confirmation=True,
     )
     assert "second, separate confirmation" in instructions
@@ -211,9 +212,6 @@ def test_music_proposal_requires_two_confirmations_to_start_selected_tracks():
         agent.pending_music_prompt = None
         agent.on_music_update = Mock()
         agent.action_manager = SimpleNamespace(music_manager=manager)
-        agent.llm_backend = SimpleNamespace(
-            music_proposal_reply_context=LLMBackend.music_proposal_reply_context,
-        )
         async def generate_reply(_event, *, response_context):
             if response_context[1].find('"asking_selection_confirmation": true') >= 0:
                 assert agent.pending_confirmation.action is ActionType.EVALUATE_MUSIC_PROPOSAL
@@ -309,9 +307,6 @@ def test_unclassified_music_confirmation_is_treated_as_decline_in_both_stages():
         agent.pending_music_prompt = None
         agent.on_music_update = Mock()
         agent.action_manager = SimpleNamespace(music_manager=manager)
-        agent.llm_backend = SimpleNamespace(
-            music_proposal_reply_context=LLMBackend.music_proposal_reply_context,
-        )
         agent.stream_user_response = AsyncMock()
 
         await agent.handle_pending_confirmation("Maybe.")

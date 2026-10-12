@@ -27,9 +27,11 @@ class CarEvent:
     context: list[str]
     timestamp: datetime = field(init=False, default_factory=datetime.now)
     user_input: str = ""
+    facts: dict[str, str] = field(default_factory=dict, kw_only=True)
 
     def __post_init__(self) -> None:
         self.event_name = EventName(self.event_name)
         self.context = list(self.context)
+        self.facts = dict(self.facts)
 
         

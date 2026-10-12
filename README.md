@@ -40,18 +40,13 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
 ```text
 .
 ├── main.py              # Application entry point and async lifecycle
-├── automotive_agent.py  # CrewAI Agent, Task and notification logic
 ├── config.py            # Configuration dataclasses (OmegaConf)
-├── skill_manager.py     # Manager for loading skill contexts
-├── knowledge_manager.py # Statistical knowledge extraction from telemetry
-├── action_manager.py    # Vehicle action dispatching
-├── events.py            # Event models (CarEvent)
-├── skills/              # Markdown files defining agent skills
-├── data/                # Data ingest, dataclasses and InfluxDB persistence layer
-│   ├── assistant_dataclasses.py # Vehicle, driver, and environment models
-│   ├── database_manager.py      # InfluxDB persistence and query layer
-│   ├── skill_map.py             # Event-to-skill routing map
-│   └── source_manager.py        # WebSocket/MQTT source and replay manager
+├── agents/
+│   ├── automotive_agent.py # Event orchestration, routing and action dispatch
+│   ├── backends/         # Technical CrewAI, Ollama and LAYA calls
+│   └── tasks/            # Domain prompts, input/output contracts and execution
+├── managers/             # Knowledge extraction, persistence, actions and sources
+├── data/                 # Vehicle, driver, environment and event models
 ├── voice/               # Kyutai TTS/STT (Delayed Streams Modeling, PyTorch backend)
 │   ├── tts_manager.py   # Text-to-speech: warmup, playback, barge-in stop(), echo reference buffer
 │   ├── stt_manager.py   # Continuous conversation loop (turn-taking, barge-in)
@@ -162,6 +157,10 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `ollama_port` | Ollama server port | `11434` |
 | `ollama_llm` | LLM model to use | `qwen2.5:3b-instruct` |
 | `ollama_timeout` | LLM timeout in seconds | `1200` |
+| `pre_classify_backend` | User-request preclassification: `llm` or `laya`; independent of telemetry routing | `llm` |
+| `pre_classify_model_laya` | Optional local LAYA preclassification checkpoint; unset uses the pretrained typed-decisions model | `None` |
+| `routing_backend` | Telemetry router: `llm` (Ollama) or `laya`; independent of specialist backends | `llm` |
+| `laya_routing_model` | Optional local LAYA routing checkpoint; unset uses the pretrained typed-decisions model | `None` |
 | `max_tokens` | Max tokens generated per LLM response | `1024` |
 | `context_window_size` | LLM context window size | `4096` |
 | `data_websocket_url` | WebSocket URL for telemetry source | `ws://localhost:4545/socket` |
@@ -311,8 +310,37 @@ retrieval is disabled or unavailable, a manual-specific question still retains i
 constraints instead of silently falling back to unsupported vehicle advice.
 
 `AutomotiveAgent` owns routing, action dispatch, interruptions, UI/TTS delivery and conversation
-history. `LLMBackend` owns prompts, classification, parsing and token generation, and has no
-reference to the orchestrator. `LayaBackend` is renamed but retains its existing implementation.
+history through a single `process_event` entry point. Each task owns its prompts, input/output
+contracts and interpretation, and uses its configured technical backend from `agents/backends`.
+There is no global LLM/LAYA event-processing mode.
+
+The telemetry router defaults to Ollama and can instead use LAYA:
+
+```bash
+uv run python main.py routing_backend=laya
+```
+
+LAYA evaluates an independent `route`/`skip` choice for each telemetry domain, allowing
+multiple tasks for a mixed update. Messages and meeting scenarios keep direct entry points;
+set `pre_classify_backend=laya` to also use LAYA for direct user requests:
+
+```bash
+uv run python main.py routing_backend=laya pre_classify_backend=laya
+```
+
+`TelemetryRouter` and `RequestPreClassifier` keep the same classes and input/output contracts
+for both backends. The LAYA preclassifier selects whether full action classification is required
+and the response source (`general`, `vehicle_state`, `vehicle_manual`). It does not generate a
+holding phrase: `wait_message` is empty, and the orchestrator uses its short fallback for action
+requests. Invalid predictions fall back to full action classification without exposing partial
+route updates. Matching LAYA model settings share one loaded backend instance.
+
+Set `pre_classify_model_laya=/path/to/checkpoint` for a compatible request-preclassification
+model, or `laya_routing_model=/path/to/checkpoint`
+only for a model compatible with these routing questions and the `changed_facts` input.
+Old automotive action-decision checkpoints are not assumed to support this routing contract.
+The former global `use_laya` option is removed. Changing the router does not change specialist
+backends. Routing quality needs evaluation with the chosen model; unit tests use fake predictions.
 
 ```bash
 ollama pull bge-m3
@@ -370,7 +398,7 @@ instructions are not interpreted by this text-only pipeline.
    - `DatabaseManager` writes telemetry time-series into InfluxDB and notifies `KnowledgeManager`.
    - `KnowledgeManager` computes statistical trends, windowed aggregations, and detects significant changes.
 4. **Agent Orchestration**:
-   - `AutomotiveAgent` evaluates significant events and user inputs using CrewAI against domain skills (`skills/*.md`).
+   - `AutomotiveAgent.process_event` dispatches significant events and user inputs to specialized tasks, independently of their inference backends.
    - Applies deduplication and urgency-based cooldowns to prevent alert fatigue, while direct user requests always get a real response.
 5. **Voice Input/Output** (optional):
    - The microphone button toggles continuous conversation mode without needing to be held down.

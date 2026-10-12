@@ -4,7 +4,7 @@ import math
 import time
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
-from typing import Any, Callable, DefaultDict, Tuple
+from typing import TYPE_CHECKING, Any, Callable, DefaultDict, Tuple
 
 import structlog
 from data.agents_dataclasses import ActionType
@@ -15,8 +15,10 @@ from managers.database_manager import DatabaseManager
 from managers.mqtt_thread import MqttThreadClient
 from data.events import CarEvent, EventName
 from managers.knowledge_manager import KnowledgeManager
-from managers.skill_manager import SkillType
-from voice.stt_manager import STTManager
+from data.agents_dataclasses import SkillType
+
+if TYPE_CHECKING:
+    from voice.stt_manager import STTManager
 
 
 class VehicleBridge:
@@ -27,7 +29,7 @@ class VehicleBridge:
         opt: ConfigAssistant,
         database_manager: DatabaseManager,
         knowledge_manager: KnowledgeManager,
-        stt_manager: STTManager | None = None,
+        stt_manager: "STTManager | None" = None,
     ):
         self.logger = structlog.get_logger()
         self.opt = opt
@@ -75,7 +77,7 @@ class VehicleBridge:
     def on(self, event_name: str, callback: Callable[..., None]) -> None:
         self._listeners[event_name].append(callback)
 
-    def set_stt_manager(self, stt_manager: STTManager | None) -> None:
+    def set_stt_manager(self, stt_manager: "STTManager | None") -> None:
         self.stt_manager = stt_manager
         self._emit(
             "sttEnabledChanged",

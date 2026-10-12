@@ -25,8 +25,6 @@ from managers.knowledge_manager import KnowledgeManager
 from omegaconf import OmegaConf
 from ui.bridge import VehicleBridge
 from ui.web_server import WebUIServer
-from voice.stt_manager import STTManager
-from voice.tts_manager import TTSManager
 
 os.environ["OPENAI_API_KEY"] = "sk-fakeapikey"
 
@@ -45,7 +43,7 @@ structlog.configure(
 logger = structlog.get_logger()
 
 
-def _browser_already_running() -> bool:
+def browser_already_running() -> bool:
     if not Path("/proc").is_dir():
         return False
     browser_processes = {"msedge", "firefox", "chrome", "chromium", "chromium-browser"}
@@ -61,8 +59,8 @@ def _browser_already_running() -> bool:
     return False
 
 
-def _open_browser_tab(url: str) -> None:
-    if _browser_already_running():
+def open_browser_tab(url: str) -> None:
+    if browser_already_running():
         logger.info("Browser already running; reusing the existing UI tab", url=url)
         return
 
@@ -93,11 +91,47 @@ def _open_browser_tab(url: str) -> None:
     )
 
 
-def _load_ollama_model(opt: ConfigAssistant) -> str:
-    """Resolve the model name to use (creating a custom-context-window variant on Ollama
-    if needed) and warm it up so the first real request isn't slowed by a cold start."""
-    raw_model = opt.ollama_model
-    if "-ctx" in raw_model or opt.context_window_size <= 4096:
+def _stop_ollama_model(opt: ConfigAssistant) -> None:
+    if not opt.pre_classify_model:
+        return
+    model = opt.pre_classify_model.removeprefix("ollama/")
+    model_names = {model}
+    if ":" not in model.rsplit("/", 1)[-1]:
+        model_names.add(f"{model}:latest")
+    try:
+        request = Request(f"http://{opt.ollama_host}:{opt.ollama_port}/api/ps")
+        with urlopen(request, timeout=min(opt.ollama_timeout, 30)) as response:
+            payload = json.loads(response.read())
+        if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+            raise ValueError("Invalid Ollama running-models response")
+        if not any(
+            isinstance(entry, dict)
+            and (entry.get("name") in model_names or entry.get("model") in model_names)
+            for entry in payload["models"]
+        ):
+            return
+        subprocess.run(
+            ["ollama", "stop", model],
+            env={**os.environ, "OLLAMA_HOST": f"http://{opt.ollama_host}:{opt.ollama_port}"},
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=min(opt.ollama_timeout, 30),
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        logger.warning("Unable to stop pre-classification Ollama model", model=model, error=str(error))
+    else:
+        logger.info("Stopped pre-classification Ollama model", model=model)
+
+
+def _warmup_ollama_model(
+    opt: ConfigAssistant,
+    raw_model: str,
+    *,
+    configure_context_window: bool = False,
+) -> str:
+    """Warm a model, optionally creating a custom-context-window variant first."""
+    if not configure_context_window or "-ctx" in raw_model or opt.context_window_size <= 4096:
         model_to_use = raw_model
     else:
         model_to_use = f"{raw_model}-ctx{opt.context_window_size}"
@@ -159,6 +193,21 @@ def _load_ollama_model(opt: ConfigAssistant) -> str:
     return raw_model
 
 
+def preload_ollama_models(opt: ConfigAssistant) -> None:
+    """Warm the configured Ollama models needed by the selected backends."""
+    opt.ollama_model = _warmup_ollama_model(
+        opt,
+        opt.ollama_model,
+        configure_context_window=True,
+    )
+
+    if "llm" in {opt.pre_classify_backend, opt.routing_backend}:
+        if opt.pre_classify_model:
+            _warmup_ollama_model(opt, opt.pre_classify_model.removeprefix("ollama/"))
+    else:
+        _stop_ollama_model(opt)
+
+
 async def main(opt: ConfigAssistant):
 
     logger.info("Starting Automotive AI Agent...")
@@ -169,7 +218,7 @@ async def main(opt: ConfigAssistant):
     # ensure ollama is running: ollama serve
     # Resolve the actual model name (possibly a custom-context-window variant) once here,
     # and write it back so every LLM client built downstream (crewai and conversational) agrees.
-    opt.ollama_model = await asyncio.to_thread(_load_ollama_model, opt)
+    await asyncio.to_thread(preload_ollama_models, opt)
 
     data_event_queue: asyncio.Queue = asyncio.Queue()
     measurement_event_queue: asyncio.Queue = asyncio.Queue()
@@ -217,7 +266,7 @@ async def main(opt: ConfigAssistant):
     )
     await web_ui.start()
     if opt.web_ui_open_browser:
-        await asyncio.to_thread(_open_browser_tab, web_ui.url)
+        await asyncio.to_thread(open_browser_tab, web_ui.url)
 
     tasks = [
         asyncio.create_task(agent.run()),
@@ -234,6 +283,8 @@ async def main(opt: ConfigAssistant):
         tasks.append(asyncio.create_task(source_manager.run_replay()))
     try:
         if opt.tts_enabled:
+            from voice.tts_manager import TTSManager
+
             agent.tts_manager = await asyncio.to_thread(
                 TTSManager,
                 enabled=opt.tts_enabled,
@@ -243,6 +294,8 @@ async def main(opt: ConfigAssistant):
                 cfg_coef=opt.tts_cfg_coef,
             )
         if opt.stt_enabled:
+            from voice.stt_manager import STTManager
+
             stt_manager = await asyncio.to_thread(
                 STTManager,
                 enabled=opt.stt_enabled,

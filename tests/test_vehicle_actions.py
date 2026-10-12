@@ -331,7 +331,7 @@ def test_cabin_temperature_knowledge_is_relative_to_user_preference(
             fact = manager.context[status_key]
             assert fact == f"Cabin temperature is {expected_status}."
             event = await manager.knowledge_event_queue.get()
-            assert event.skill is SkillType.WELLBEING
+            assert event.skill is SkillType.NONE
             assert event.event_value == {status_key: expected_status}
             assert event.context[0] == f"Changed just now: {fact}"
             assert changes == [[fact]]
@@ -370,7 +370,7 @@ def test_preference_changes_recalculate_cabin_temperature_without_new_reading():
                 {("DriverPreferences", "preferred_cabin_temperature"): preferred}
             )
             event = await manager.knowledge_event_queue.get()
-            assert event.skill is SkillType.WELLBEING
+            assert event.skill is SkillType.NONE
             assert event.event_value == {"VehicleState.internal_temperature": expected_status}
             await manager.process_pending(
                 {("VehicleState", "internal_temperature"): 25.0}
@@ -513,7 +513,8 @@ def test_changed_speed_limit_recalculates_relative_speed_without_new_measurement
         events = []
         while not manager.knowledge_event_queue.empty():
             events.append(manager.knowledge_event_queue.get_nowait())
-        driving = next(event for event in events if event.skill is SkillType.DRIVING)
+        assert len(events) == 1
+        driving = events[0]
         assert driving.event_value["VehicleMotion.speed"] == "too high"
         assert any(
             fact.startswith("Changed just now: Vehicle speed is too high.")
@@ -533,14 +534,6 @@ def test_changed_speed_limit_recalculates_relative_speed_without_new_measurement
 
 
 def test_driver_preferences_become_non_notifying_knowledge():
-    assert KnowledgeManager._field_skills("VehicleState", "privacy_mode") == (
-        SkillType.DRIVING,
-    )
-    assert KnowledgeManager._field_skills("DetectedObjects", "people_inside") == (
-        SkillType.WELLBEING,
-        SkillType.DRIVING,
-    )
-
     manager = KnowledgeManager.__new__(KnowledgeManager)
     manager.logger = structlog.get_logger()
     manager.database_manager = SimpleNamespace()
@@ -573,14 +566,6 @@ def test_driver_preferences_become_non_notifying_knowledge():
 
 
 def test_privacy_mode_and_people_inside_are_readable_knowledge():
-    assert KnowledgeManager._field_skills("VehicleState", "privacy_mode") == (
-        SkillType.DRIVING,
-    )
-    assert KnowledgeManager._field_skills("DetectedObjects", "people_inside") == (
-        SkillType.WELLBEING,
-        SkillType.DRIVING,
-    )
-
     manager = KnowledgeManager.__new__(KnowledgeManager)
     manager.logger = structlog.get_logger()
     manager.database_manager = SimpleNamespace()
@@ -915,10 +900,6 @@ def test_database_write_dataclass_coerces_int_for_float_field():
 
 
 def test_dangerous_object_count_becomes_boolean_knowledge():
-    assert KnowledgeManager._field_skills(
-        "DetectedObjects", "dangerous_objects_around"
-    ) == (SkillType.DRIVING,)
-
     manager = KnowledgeManager.__new__(KnowledgeManager)
     manager.logger = structlog.get_logger()
     manager.database_manager = SimpleNamespace()
@@ -957,6 +938,7 @@ def test_dangerous_object_count_becomes_boolean_knowledge():
 def test_knowledge_event_marks_changed_fact_ahead_of_supporting_facts():
     manager = KnowledgeManager.__new__(KnowledgeManager)
     manager.logger = structlog.get_logger()
+    manager._raw_values = {}
     manager.context = {
         "DriverPhysicalState.fatigue_level": "Fatigue level is high.",
         "DetectedObjects.children_inside": "2 children are detected inside the vehicle.",

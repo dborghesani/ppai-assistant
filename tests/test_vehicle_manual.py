@@ -89,7 +89,8 @@ def test_invalid_chunk_configuration():
 
 
 def test_response_source_is_structured_and_defaults_to_general():
-    from agents.llm_backend import NotificationDecision, ResponseSource
+    from agents.tasks.decision import NotificationDecision
+    from agents.tasks.pre_classify import ResponseSource
     payload = {"urgency": "none", "tone": "calm", "intervention_type": "none", "skill": "none",
                "action": "none", "suggestion_type": "none", "reason": "Informational question"}
     assert NotificationDecision(**payload).response_source is ResponseSource.GENERAL
@@ -104,7 +105,7 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
     from data.agents_dataclasses import AssistantStatus, SkillType, ToneType
     from agents.automotive_agent import AutomotiveAgent
     from data.events import CarEvent
-    from agents.llm_backend import ResponseSource
+    from agents.tasks.pre_classify import ResponseSource
 
     class FakeStream:
         async def __aiter__(self):
@@ -119,7 +120,6 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
         agent = AutomotiveAgent.__new__(AutomotiveAgent)
         agent.opt = ConfigAssistant()
         agent.conversation_history = []
-        agent.skill_manager = SimpleNamespace(get_skill=Mock(return_value="Be concise."))
         agent.classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
         agent.manual_manager = SimpleNamespace(context_for=AsyncMock(
             return_value="Source: manual.pdf; PDF page 1\nUse the steering wheel button."
@@ -139,10 +139,6 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
         agent.on_response = Mock()
         agent.tts_manager = SimpleNamespace(speak=AsyncMock())
         agent.log_llm_usage = Mock()
-        from agents.llm_backend import LLMBackend
-        agent.llm_backend = LLMBackend.__new__(LLMBackend)
-        agent.llm_backend.opt = agent.opt
-        agent.llm_backend.classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
         event = CarEvent(SkillType.CONVERSATION, "user_input", "How does cruise control work?", [], "How does cruise control work?")
         source = ResponseSource.VEHICLE_MANUAL if manual_question else ResponseSource.GENERAL
         await agent.prepare_user_response(event, source)
@@ -165,32 +161,3 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
         assert agent.assistant_status == AssistantStatus.IDLE
     asyncio.run(check())
 
-
-@pytest.mark.parametrize("content, expected_tone", [
-    ('{"tone": "serious"}', "serious"),
-    ('{}', "calm"),
-    ('', "calm"),
-    ('{"tone": "unknown"}', "calm"),
-])
-def test_tone_classification_falls_back_to_calm_on_backend_failure(content, expected_tone):
-    from data.agents_dataclasses import SkillType
-    from agents.automotive_agent import AutomotiveAgent
-    from data.events import CarEvent
-    from agents.llm_backend import LLMBackend
-
-    async def check():
-        agent = AutomotiveAgent.__new__(AutomotiveAgent)
-        agent.opt = ConfigAssistant()
-        agent.conversation_history = []
-        agent.log_llm_usage = Mock()
-        event = CarEvent(SkillType.CONVERSATION, "user_input", "How do I activate cruise control?", [], "How do I activate cruise control?")
-        agent.llm_backend = LLMBackend.__new__(LLMBackend)
-        agent.llm_backend.logger = Mock()
-        if content == '{"tone": "serious"}':
-            from agents.llm_backend import ConversationTone
-            agent.llm_backend.classify_conversation_tone = AsyncMock(return_value=ConversationTone(tone="serious").tone)
-        else:
-            agent.llm_backend.classify_conversation_tone = AsyncMock(side_effect=RuntimeError("crew failed"))
-        tone = await agent.classify_conversation_tone(event, "")
-        assert tone.value == expected_tone
-    asyncio.run(check())

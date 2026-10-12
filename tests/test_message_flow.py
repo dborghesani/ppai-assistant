@@ -14,7 +14,7 @@ from data.agents_dataclasses import (
     UrgencyType,
 )
 from agents.automotive_agent import AutomotiveAgent
-from agents.llm_backend import NotificationDecision
+from agents.tasks.decision import NotificationDecision
 from data.events import CarEvent, IncomingMessage
 from managers.action_manager import ActionManager
 from managers.message_manager import PendingMessage
@@ -586,27 +586,6 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         await manager.read_task
 
         self.assertEqual(list(manager.pending_messages), [PendingMessage(message)])
-
-    async def test_user_reply_goes_to_simulator_only_without_pending_messages(self):
-        agent = make_agent()
-        agent.message_simulator.submit_driver_reply.return_value = True
-        agent.process_event_llm = AsyncMock()
-        reply = CarEvent(
-            SkillType.CONVERSATION, "user_input", "Tell me more", [], "Tell me more"
-        )
-
-        await agent.process_event(reply)
-
-        agent.message_simulator.submit_driver_reply.assert_called_once_with(
-            "Tell me more"
-        )
-        agent.process_event_llm.assert_not_awaited()
-
-        agent.action_manager.message_manager.pending_messages.append(
-            PendingMessage(IncomingMessage(sender="Luca", text="Private rumor"))
-        )
-        await agent.process_event(reply)
-        agent.process_event_llm.assert_awaited_once_with(reply)
 
     async def test_reminder_enqueues_reasoner_event_only_when_agent_is_idle(self):
         agent = make_agent(["Privacy mode is on."])

@@ -16,8 +16,13 @@ class ConfigAssistant:
     # custom LLM configuration (optional)
     ollama_host: str = "localhost"
     ollama_port: int = 11434
-    ollama_model: str = "qwen2.5:3b-instruct"
-    pre_classify_model: str | None = None
+    ollama_model: str = "qwen3.5:4b"
+    pre_classify_backend: str = "llm"
+    pre_classify_model: str | None = "qwen2.5:3b-instruct"
+    pre_classify_model_laya: str | None = None
+    routing_backend: str = "llm"
+    routing_model: str | None = "qwen2.5:3b-instruct"
+    routing_model_laya: str | None = None
     ollama_timeout: int = 1200
 
     max_tokens: int = 1024
@@ -105,6 +110,4 @@ class ConfigAssistant:
     socket_url: str = "ws://localhost:4545/socket"
     is_socket_enabled: bool = True
 
-    # LLM or LAYA
-    use_laya: bool = False
     laya_custom_model: str | None = None

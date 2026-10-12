@@ -498,11 +498,6 @@ class KnowledgeManager:
                 return None
         return None
 
-    @classmethod
-    def _field_skills(cls, name: str, measure: str) -> tuple[SkillType, ...]:
-        metadata = cls._knowledge_metadata(name, measure) or {}
-        return tuple(metadata.get("skills", ()))
-
     def _is_significant_change(
         self,
         name: str,
@@ -547,52 +542,18 @@ class KnowledgeManager:
         return value != previous.value
 
     async def _notify_agent(self, changes: dict[str, Any]) -> None:
-        if self.opt.use_laya:
-            await self.knowledge_event_queue.put(
-                CarEvent(
-                    skill=SkillType.NONE,
-                    event_name=EventName.KNOWLEDGE_UPDATED,
-                    event_value=dict(changes),
-                    context=list(self.context.values()),
-                )
+        facts = dict(self.context)
+        speed = self._raw_values.get("VehicleMotion.speed")
+        if isinstance(speed, (int, float)) and not isinstance(speed, bool) and math.isfinite(speed):
+            facts["VehicleMotion.moving"] = (
+                "The vehicle is moving." if speed > 0 else "The vehicle is stationary."
             )
-            return
-
-        changes_by_skill: dict[SkillType, dict[str, Any]] = {}
-        for key, value in changes.items():
-            name, separator, measure = key.partition(".")
-            if not separator:
-                continue
-            skills = self._field_skills(name, measure)
-            for skill in skills:
-                changes_by_skill.setdefault(skill, {})[key] = value
-
-        for skill, skill_changes in changes_by_skill.items():
-            skill_context = {}
-            for context_key, context_value in self.context.items():
-                context_name, separator, context_measure = context_key.partition(".")
-                if separator and skill in self._field_skills(
-                    context_name, context_measure
-                ):
-                    skill_context[context_key] = context_value
-
-            changed_context = [
-                f"Changed just now: {skill_context[key]}"
-                for key in skill_changes
-                if key in skill_context
-            ]
-            supporting_context = [
-                value for key, value in skill_context.items() if key not in skill_changes
-            ]
-            skill_context_all_values_as_list = changed_context + supporting_context
-            await self.knowledge_event_queue.put(
-                CarEvent(
-                    skill=skill,
-                    event_name=EventName.KNOWLEDGE_UPDATED,
-                    event_value=dict(skill_changes),
-                    context=skill_context_all_values_as_list,
-                )
-            )
+        changed_context = [f"Changed just now: {facts[key]}" for key in changes if key in facts]
+        supporting_context = [value for key, value in facts.items() if key not in changes]
+        await self.knowledge_event_queue.put(CarEvent(
+            skill=SkillType.NONE, event_name=EventName.KNOWLEDGE_UPDATED,
+            event_value=dict(changes), context=changed_context + supporting_context, facts=facts,
+        ))
 
     def _relative_knowledge(
         self, measure: str, value: Any, metadata: Mapping[str, Any]

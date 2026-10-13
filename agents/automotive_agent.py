@@ -481,6 +481,7 @@ class AutomotiveAgent:
                     or "No additional vehicle context is available.",
             }))
             decisions.append((task_type, decision))
+            break   # Only process the first task decision for now
         acute_hazard = any(
             task_type in {TaskType.DRIVING, TaskType.WELLBEING} and decision.urgency.rank >= UrgencyType.HIGH.rank
             for task_type, decision in decisions

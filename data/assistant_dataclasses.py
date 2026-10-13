@@ -305,12 +305,12 @@ class DriverPhysicalState:
     attention_level: float | None = knowledge_field(
         default=1.0,
         value_kind="intensity",
-        persistence_levels=("low",),
+        #persistence_levels=("low",),
     )  # [0.0, 1.0]
     fatigue_level: float | None = knowledge_field(
         default=0.0,
         value_kind="intensity",
-        persistence_levels=("high", "very high"),
+        #persistence_levels=("high", "very high"),
     )  # [0.0, 1.0]
 
 
@@ -345,13 +345,34 @@ class DriverPreferences:
 
 @dataclass
 class DriverEmotionState:
-    angry: float | None = knowledge_field(default=0.0, value_kind="intensity") # persistence_levels=("medium", "high", "very high"))
-    disgust: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
-    fear: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
-    happy: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
-    sad: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
-    surprise: float | None = knowledge_field(default=0.0, value_kind="intensity")#, persistence_levels=("medium", "high", "very high"))
-    neutral: float | None = knowledge_field(default=1.0, value_kind="intensity")
+    angry: float | None = knowledge_field(default=0.0, 
+                                          value_kind="intensity",
+                                          # persistence_levels=("medium", "high", "very high")
+                                          )
+    disgust: float | None = knowledge_field(default=0.0, 
+                                            value_kind="intensity",
+                                            #persistence_levels=("medium", "high", "very high")
+                                            )
+    fear: float | None = knowledge_field(default=0.0,
+                                         value_kind="intensity"
+                                         #, persistence_levels=("medium", "high", "very high")
+                                         )
+    happy: float | None = knowledge_field(default=0.0,
+                                          value_kind="intensity", 
+                                          #persistence_levels=("medium", "high", "very high")
+                                          )
+    sad: float | None = knowledge_field(default=0.0, 
+                                        value_kind="intensity", 
+                                        #persistence_levels=("medium", "high", "very high")
+                                        )
+    surprise: float | None = knowledge_field(default=0.0,
+                                             value_kind="intensity", 
+                                             #persistence_levels=("medium", "high", "very high")
+                                             )
+    neutral: float | None = knowledge_field(default=1.0,
+                                            value_kind="intensity",
+                                            #persistence_levels=("medium", "high", "very high")
+                                            )
 
 @dataclass
 class DriverDrivingStyle:

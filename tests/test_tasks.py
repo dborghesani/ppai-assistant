@@ -10,12 +10,16 @@ def test_telemetry_route_deduplicates_tasks_in_priority_order():
 
 
 @pytest.mark.parametrize("task", [
-    TaskType.MESSAGES, TaskType.MEETING, TaskType.CONVERSATION,
-    TaskType.VEHICLE_MANUAL, TaskType.VEHICLE_COMMAND,
+    TaskType.CONVERSATION, TaskType.VEHICLE_MANUAL, TaskType.VEHICLE_COMMAND,
 ])
-def test_telemetry_route_rejects_manual_and_direct_scenarios(task):
+def test_telemetry_route_rejects_manual_scenarios(task):
     with pytest.raises(ValidationError):
         TaskRoute(tasks=[task])
+
+
+@pytest.mark.parametrize("task", [TaskType.MESSAGES, TaskType.MEETING])
+def test_telemetry_route_accepts_direct_scenarios(task):
+    assert TaskRoute(tasks=[task]).tasks == [task]
 
 
 def test_telemetry_route_can_be_empty():
@@ -45,7 +49,7 @@ def test_laya_router_preserves_multiple_task_routes(selected):
     assert set(questions) == {task_type.value for task_type in TelemetryRouter.TASK_CRITERIA}
     assert all(question["type"] == "choice" for question in questions.values())
     assert all(set(question["criteria"]) == {"route", "skip"} for question in questions.values())
-    assert "messages" not in questions and "meeting" not in questions
+    assert "conversation" not in questions and "vehicle_command" not in questions
 
 
 @pytest.mark.parametrize("result", [None, {}, {"answers": {}}, {"answers": {
@@ -270,7 +274,7 @@ def test_agent_keeps_distinct_laya_checkpoints_separate():
     from config import ConfigAssistant
 
     opt = ConfigAssistant(routing_backend="laya", pre_classify_backend="laya",
-                          routing_model_laya="router-model", pre_classify_model_laya="request-model")
+                          routing_model="router-model", pre_classify_model="request-model")
     router_backend, request_backend = Mock(spec=LayaBackend), Mock(spec=LayaBackend)
     router_backend.predict = AsyncMock()
     request_backend.predict = AsyncMock()
@@ -318,7 +322,7 @@ def test_laya_preclassification_uses_agent_holding_phrase_fallback():
         async def prepare_response(event, source, *, response_gate):
             await response_gate.wait()
 
-        agent._speak_wait_message_chunks = AsyncMock(side_effect=speak_wait)
+        agent.speak_wait_message_chunks = AsyncMock(side_effect=speak_wait)
         agent.prepare_user_response = AsyncMock(side_effect=prepare_response)
         event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Open the windows", [], "Open the windows")
         preparation = await agent.preclassify_direct_input(event, 0)
@@ -388,7 +392,7 @@ def test_agent_owns_preclassification_orchestration(requires_action):
                                      wait_message="Checking." if requires_action else "")
 
         agent.prepare_user_response = AsyncMock(side_effect=prepare_response)
-        agent._speak_wait_message_chunks = AsyncMock(side_effect=speak_wait)
+        agent.speak_wait_message_chunks = AsyncMock(side_effect=speak_wait)
         agent.request_pre_classifier = SimpleNamespace(execute=AsyncMock(side_effect=preclassify))
         event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Current turn", [], "Current turn")
         preparation = await agent.preclassify_direct_input(event, 2)
@@ -405,7 +409,7 @@ def test_agent_owns_preclassification_orchestration(requires_action):
             assert preparation.classifier_task is None
             assert preparation.wait_task is None
             agent.command_task.execute.assert_not_awaited()
-            agent._speak_wait_message_chunks.assert_not_awaited()
+            agent.speak_wait_message_chunks.assert_not_awaited()
         preparation.response_gate.set()
         await preparation.response_task
 
@@ -499,7 +503,8 @@ def test_agent_builds_specialist_tasks_without_connecting_to_ollama():
 
     agent = AutomotiveAgent(ConfigAssistant())
     assert set(agent.tasks) == set(DECISION_TASKS)
-    assert agent.telemetry_router.model == "qwen2.5:3b-instruct"
+    # routing_model defaults to None: the router falls back to the main model.
+    assert agent.telemetry_router.model == "qwen3.5:4b"
     assert "Vehicle action reference" in agent.command_task.crew.tasks[0].description
     assert agent.command_task.backend is agent.crewai_backend
     assert not hasattr(agent, "process_event_llm")
@@ -514,7 +519,7 @@ def test_agent_selects_laya_router_without_changing_specialist_backends():
     from agents.tasks.routing import TelemetryRouter
     from config import ConfigAssistant
 
-    opt = ConfigAssistant(routing_backend="laya", routing_model_laya="router-model",
+    opt = ConfigAssistant(routing_backend="laya", routing_model="router-model",
                           laya_custom_model="old-decision-model")
     backend = Mock(spec=LayaBackend)
     backend.predict = AsyncMock()
@@ -571,13 +576,12 @@ def test_routing_configuration_can_be_selected_through_omegaconf():
 
     configuration = OmegaConf.merge(
         OmegaConf.structured(ConfigAssistant),
-        OmegaConf.from_dotlist(["routing_backend=laya", "routing_model_laya=/tmp/router-checkpoint",
-                       "pre_classify_model_laya=/tmp/request-checkpoint", "routing_model=router-llm"]),
+        OmegaConf.from_dotlist(["routing_backend=laya", "routing_model=/tmp/router-checkpoint",
+                       "pre_classify_model=/tmp/request-checkpoint", "routing_model=router-llm"]),
     )
     opt = OmegaConf.to_object(configuration)
     assert opt.routing_backend == "laya"
-    assert opt.routing_model_laya == "/tmp/router-checkpoint"
-    assert opt.pre_classify_model_laya == "/tmp/request-checkpoint"
+    assert opt.pre_classify_model == "/tmp/request-checkpoint"
     assert opt.routing_model == "router-llm"
     assert not hasattr(opt, "use_laya")
 
@@ -673,18 +677,24 @@ def test_automotive_agent_dispatches_with_only_task_context():
     assert "Rock" not in str(inputs)
 
 
-def test_manual_meeting_scenario_bypasses_router():
+def test_late_meeting_scenario_routes_through_router_prompt():
     import asyncio
+    from agents.tasks import routing
     from data.events import CarEvent, EventName
     from data.agents_dataclasses import SkillType
 
-    agent = make_routed_agent([])
+    # Meeting routing is engine-driven: the prompt encodes the activation rule.
+    assert '"DriverAgenda.late_for_meeting"' in routing.ROUTING_PROMPT
+    assert "meeting:" in routing.ROUTING_PROMPT
+    assert '"UnreadMessages.count"' in routing.ROUTING_PROMPT
+
+    # When the router (the engine's answer) selects meeting, the task runs.
+    agent = make_routed_agent([TaskType.MEETING])
     event = CarEvent(SkillType.NONE, EventName.KNOWLEDGE_UPDATED,
         {"DriverAgenda.late_for_meeting": True}, [], facts={
             "DriverAgenda.late_for_meeting": "The driver is late for an upcoming meeting.",
         })
     asyncio.run(agent.process_car_event(event))
-    agent.telemetry_router.execute.assert_not_awaited()
     agent.tasks[TaskType.MEETING].execute.assert_awaited_once()
 
 

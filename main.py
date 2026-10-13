@@ -201,7 +201,14 @@ def preload_ollama_models(opt: ConfigAssistant) -> None:
         configure_context_window=True,
     )
 
-    if "llm" in {opt.pre_classify_backend, opt.routing_backend}:
+    # The dedicated routing model is loaded by both "llm" (direct Ollama) and
+    # "crew" (CrewAIBackend with model=routing_model) router configurations.
+    if opt.routing_backend in {"llm", "crew"} and opt.routing_model:
+        _warmup_ollama_model(opt, opt.routing_model.removeprefix("ollama/"))
+
+    # pre_classify: "llm" streams via Ollama, "crew" uses CrewAIBackend with the
+    # same pre-classify model; "laya" runs its own checkpoint and keeps Ollama idle.
+    if opt.pre_classify_backend in {"llm", "crew"}:
         if opt.pre_classify_model:
             _warmup_ollama_model(opt, opt.pre_classify_model.removeprefix("ollama/"))
     else:

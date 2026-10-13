@@ -38,7 +38,11 @@ def test_laya_stops_configured_preclassification_model_on_the_configured_server(
     ("llm", "llm", True),
     ("laya", "laya", False),
     ("laya", "llm", True),
-    ("llm", "laya", True),
+    # No dedicated routing_model: routing falls back to the main model, so the
+    # small model is warmed only when the pre-classifier itself needs it.
+    ("crew", "llm", True),
+    ("llm", "laya", False),
+    ("crew", "laya", False),
     ("other", "other", False),
 ])
 def test_preload_always_loads_main_and_conditionally_loads_or_stops_preclassification(

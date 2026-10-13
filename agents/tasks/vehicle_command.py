@@ -72,7 +72,7 @@ class VehicleCommandTask:
             ActionType.NONE, ActionType.FIND_REST_AREA, ActionType.ASK_ATTEND_MEETING,
             ActionType.PROPOSE_MUSIC, ActionType.ASK_PERMISSION_TO_TALK,
             ActionType.POSTPONE_NOTIFICATION_DELIVERY, ActionType.READ_PENDING_MESSAGES,
-            *registered_actions,
+            ActionType.PLAY_MUSIC, *registered_actions,
         })
         self.direct_action_options = enum_options(self.direct_vehicle_actions)
         self.vehicle_action_guidance = action_reference()

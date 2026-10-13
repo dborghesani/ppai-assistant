@@ -52,10 +52,10 @@ class AutomotiveAgent:
     ):
         if opt.music_cooldown_seconds < 0:
             raise ValueError("Music cooldown must be non-negative")
-        if opt.routing_backend not in {"llm", "laya"}:
-            raise ValueError("routing_backend must be 'llm' or 'laya'")
-        if opt.pre_classify_backend not in {"llm", "laya"}:
-            raise ValueError("pre_classify_backend must be 'llm' or 'laya'")
+        if opt.routing_backend not in {"crew", "llm", "laya"}:
+            raise ValueError("routing_backend must be 'crew', 'llm' or 'laya'")
+        if opt.pre_classify_backend not in {"crew", "llm", "laya"}:
+            raise ValueError("pre_classify_backend must be 'crew', 'llm' or 'laya'")
         self.logger = logger
         self.opt = opt
         self.is_active = True
@@ -112,21 +112,29 @@ class AutomotiveAgent:
             registered_actions=self.action_manager.registered_actions,
         )
         if opt.routing_backend == "laya":
-            router_backend = LayaBackend(opt.routing_model_laya, self.log_llm_usage)
+            router_backend = LayaBackend(opt.routing_model, self.log_llm_usage)
+        elif opt.routing_backend == "crew":
+            router_backend = CrewAIBackend(opt, self.log_llm_usage, model=opt.routing_model)
         else:
             router_backend = self.ollama_backend
         self.telemetry_router = TelemetryRouter(opt, self.log_llm_usage, backend=router_backend)
         if opt.pre_classify_backend == "laya":
             if (
                 opt.routing_backend == "laya"
-                and opt.pre_classify_model_laya == opt.routing_model_laya
+                and opt.pre_classify_model == opt.routing_model
             ):
                 pre_classifier_backend = router_backend
             else:
-                pre_classifier_backend = LayaBackend(opt.pre_classify_model_laya, self.log_llm_usage)
+                pre_classifier_backend = LayaBackend(opt.pre_classify_model, self.log_llm_usage)
         else:
+            # "llm" keeps streaming Ollama (the wait-message path needs incremental
+            # output); "crew" selects the Crew engine with streaming disabled.
             pre_classifier_backend = self.ollama_backend
-        self.request_pre_classifier = RequestPreClassifier(opt, self.log_llm_usage, backend=pre_classifier_backend)
+        self.request_pre_classifier = RequestPreClassifier(
+            opt, self.log_llm_usage,
+            backend=pre_classifier_backend,
+            streaming=opt.pre_classify_backend == "llm",
+        )
 
         self.on_response: Callable[[str], None] | None = None
         self.on_response_update: Callable[[str], None] | None = None
@@ -445,22 +453,8 @@ class AutomotiveAgent:
             for index, (key, value) in enumerate(changes.items())
         }
         facts.update(changed_facts)
-        direct_tasks = []
-        if "DriverAgenda.late_for_meeting" in changes or any(
-            key == "UnreadMessages.count" for key in changes
-        ):
-            if "DriverAgenda.late_for_meeting" in changes:
-                direct_tasks.append(TaskType.MEETING)
-            direct_tasks.append(TaskType.MESSAGES)
-        elif self.pending_message_count:
-            direct_tasks.append(TaskType.MESSAGES)
-        routing_facts = {
-            key: value for key, value in changed_facts.items()
-            if not key.startswith("DriverAgenda.")
-            and not key.startswith("UnreadMessages.")
-        }
-        route = await self.telemetry_router.execute(RoutingInput(routing_facts)) if routing_facts else None
-        task_types = direct_tasks + (route.tasks if route is not None else [])
+        route = await self.telemetry_router.execute(RoutingInput(changed_facts))
+        task_types = route.tasks
         self.logger.info("[LLM] Event dispatched", tasks=[task.value for task in task_types])
         decisions = []
         for task_type in task_types:
@@ -548,7 +542,7 @@ class AutomotiveAgent:
         def start_wait_message_stream() -> None:
             nonlocal wait_task
             if wait_task is None:
-                wait_task = asyncio.create_task(self._speak_wait_message_chunks(wait_chunks))
+                wait_task = asyncio.create_task(self.speak_wait_message_chunks(wait_chunks))
 
         def start_response(source: ResponseSource) -> None:
             nonlocal response_task
@@ -561,7 +555,7 @@ class AutomotiveAgent:
             response_task = asyncio.create_task(self.prepare_user_response(
                 event, source, response_gate=response_gate,
             ))
-            self._track_voice_response_task(response_task)
+            self.track_voice_response_task(response_task)
 
         def handle_preclassification_update(update: PreClassificationUpdate) -> None:
             nonlocal requires_action_classification, wait_chunk_count
@@ -749,9 +743,9 @@ class AutomotiveAgent:
         response = (self.action_manager.execute_registered_action(action, event.user_input) if action is not None
                     else self.prepare_user_response(event, source))
         response_task = asyncio.create_task(response)
-        self._track_voice_response_task(response_task)
+        self.track_voice_response_task(response_task)
 
-    def _track_voice_response_task(self, response_task: asyncio.Task) -> None:
+    def track_voice_response_task(self, response_task: asyncio.Task) -> None:
         self.voice_response_task = response_task
 
         def response_done(task: asyncio.Task) -> None:
@@ -764,16 +758,7 @@ class AutomotiveAgent:
 
         response_task.add_done_callback(response_done)
 
-    async def _speak_wait_message(self, message: str = "") -> None:
-        message = message.strip() or "Hm."
-        on_response = getattr(self, "on_response", None)
-        if on_response is not None:
-            on_response(message + "\n")
-        tts_manager = getattr(self, "tts_manager", None)
-        if tts_manager is not None:
-            await tts_manager.speak(message)
-
-    async def _speak_wait_message_chunks(
+    async def speak_wait_message_chunks(
         self, chunks: asyncio.Queue[str | None]
     ) -> None:
         displayed_message = ""

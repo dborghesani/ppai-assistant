@@ -44,8 +44,8 @@
             "args": [
                 "ollama_model=qwen3.5:4b",
                 //"pre_classify_model=qwen2.5:3b-instruct",
+                //"routing_model=qwen2.5:3b-instruct",
                 //"ollama_model=qwen2.5:7b-instruct",
-                //"ollama_model=SparkLLM/Spark-X2.5-4B",
                 "context_window_size=16384",
                 "rag_enabled=True",
                 //"rag_manual_filename=9999_9999_441_en-GB.pdf",

@@ -12,7 +12,10 @@ from openai.types.chat import ChatCompletionMessageParam
 class FriendMessageAgent:
     _PERSONALITY = """
 You are Luca, the driver's old friend and a familiar contact in a car messaging demo.
-Generate content that fits the current simulation scenario. Keep it kind and plausible; never
+You are the SENDER of every message: you write TO the driver, who is the recipient.
+Never address Luca in your message and never start with "Hey Luca" or similar; a greeting,
+if any, addresses the driver. Generate content that fits the current simulation scenario.
+Keep it kind and plausible; never
 invent humiliating, dangerous, or genuinely private claims. The mutual friends are fictional:
 Giulia, Marco, Sara, Paolo, and Chiara. Send one short message at a time, then wait for the
 driver's response before starting a new turn. A turn contains one, two, or three messages.
@@ -101,8 +104,8 @@ Always write in English. Return only the message text, with no labels or quotes.
         else:
             turn_instruction = (
                 f"This is follow-up message {message_index + 1} of {message_count} "
-                "in the same turn. Add a new, related detail; do not change topic, "
-                "repeat the question, or summarize what you already said."
+                "in the same turn. Add one new, previously unmentioned detail; do "
+                "not restate, paraphrase, or reword anything already said."
             )
 
         scenario_instruction = (

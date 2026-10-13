@@ -87,6 +87,12 @@ def make_agent(context: list[str] | None = None) -> AutomotiveAgent:
     agent.tasks = {
         _TaskType.MESSAGES: messages.MessagesTask(agent.opt, agent.log_llm_usage, agent=agent),
     }
+    agent.tasks[_TaskType.MESSAGES].backend = Mock(run=AsyncMock(
+        return_value=SimpleNamespace(text=(
+            "David, Giulia left dinner early after an unexpected phone call. "
+            "Luca also has news that Marco is planning a surprise party for Sara."
+        ))
+    ))
     agent._message_simulator = SimpleNamespace(
         submit_driver_reply=Mock(return_value=False),
         cancel=Mock(),
@@ -406,7 +412,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
 
             self.assertEqual(list(agent.messages_task.pending_messages), [PendingMessage(message)])
             self.assertEqual(agent.messages_task.pending_count, 1)
-            self.assertEqual(agent.messages_task._published_unread_count, 1)
+            self.assertEqual(agent.messages_task.published_unread_count, 1)
             self.assertTrue(agent.event_queue.empty())
             agent.cancel_message_tasks()
             await asyncio.sleep(0)
@@ -454,12 +460,17 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         self.assertIs(agent.messages_task.read_task, read_task)
         await read_task
         self.assertFalse(agent.messages_task.pending_messages)
-        self.assertEqual(agent.voice_llm.chat.completions.create.await_count, 1)
-        summary_request = agent.voice_llm.chat.completions.create.await_args.kwargs
-        self.assertIn("Do not use report formulas", summary_request["messages"][0]["content"])
-        self.assertIn('"recipient_name": "David"', summary_request["messages"][1]["content"])
-        self.assertIn("unexpected phone call", summary_request["messages"][1]["content"])
-        self.assertIn("surprise party for Sara", summary_request["messages"][1]["content"])
+        manager = agent.messages_task
+        self.assertEqual(manager.backend.run.await_count, 1)
+        run_call = manager.backend.run.await_args
+        self.assertEqual(run_call.args[1], {
+            "recipient_name": "David",
+            "messages": (
+                "Luca: Giulia left dinner early after an unexpected phone call.\n"
+                "Luca: Marco is planning a surprise party for Sara."
+            ),
+        })  # relay payload threads the name and every queued message
+        self.assertIn("first sentence must already be concrete and informative", manager.relay_crew.tasks[0].description)
         self.assertEqual(
             [line for line in agent.conversation_history if line["role"] == "assistant"],
             [
@@ -535,21 +546,20 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         manager.pending_messages.append(PendingMessage(IncomingMessage(sender="Luca", text="Can you call me now?")))
         manager.handle_action(ActionType.READ_PENDING_MESSAGES)
         await manager.read_task
-        request = agent.voice_llm.chat.completions.create.await_args.kwargs
-        self.assertIn('"recipient_name": "Alex"', request["messages"][1]["content"])
-        self.assertIn("Do not use report formulas", request["messages"][0]["content"])
-        self.assertEqual(request["reasoning_effort"], "none")
+        inputs = manager.backend.run.await_args.args[1]
+        self.assertIn("recipient_name", inputs)
+        self.assertEqual(inputs["recipient_name"], "Alex")
+        self.assertIn("first sentence must already be concrete and informative", manager.relay_crew.tasks[0].description)
 
     async def test_read_action_speaks_original_messages_when_summary_is_empty(self):
         agent = make_agent()
         message = IncomingMessage(sender="Luca", text="Giulia has a new ride.")
-        agent.messages_task.pending_messages.append(PendingMessage(message))
-        agent.voice_llm.chat.completions.create.return_value.choices[
-            0
-        ].message.content = ""
+        manager = agent.messages_task
+        manager.pending_messages.append(PendingMessage(message))
+        manager.backend.run = AsyncMock(side_effect=RuntimeError("relay crew unavailable"))
 
         agent.action_manager.handle_decision(ActionType.READ_PENDING_MESSAGES)
-        await agent.messages_task.read_task
+        await manager.read_task
 
         self.assertEqual(
             agent.conversation_history[-1],

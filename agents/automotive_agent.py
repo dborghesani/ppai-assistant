@@ -11,17 +11,17 @@ from agents.tasks import comfort, driving, meeting, messages, mood_music, vehicl
 from agents.backends.crewai_backend import CrewAIBackend
 from agents.backends.laya_backend import LayaBackend
 from agents.backends.ollama_backend import OllamaBackend
-from agents.tasks.conversation import ConversationDelivery, ConversationInput, ConversationTask, ConversationToneTask
-from agents.tasks import mood_music as music_task, confirmation as confirmation_task
+from agents.tasks.conversation import ConversationDelivery, ConversationInput, ConversationTask
+from agents.tasks import mood_music
 from agents.tasks.pre_classify import PreClassification, PreClassificationUpdate, PreClassificationInput, RequestPreClassifier, ResponseSource
 from agents.tasks.routing import RoutingInput, TaskType, TelemetryRouter
 from agents.tasks.vehicle_manual import response_context as manual_response_context
 from config import ConfigAssistant
 from crewai import LLM
-from data.events import CarEvent, EventName, IncomingMessage
+from data.events import CarEvent, EventName
 from openai import AsyncOpenAI
-from data.agents_dataclasses import SkillType
 from managers.vehicle_manual_manager import VehicleManualManager
+from sim.friend_message_agent import FriendMessageAgent
 
 if TYPE_CHECKING:
     from voice.tts_manager import TTSManager
@@ -32,15 +32,9 @@ DECISION_TASKS = {task.task_type: task for task in (
     wellbeing.TASK, driving.TASK, comfort.TASK, mood_music.TASK, messages.TASK, meeting.TASK,
 )}
 
-from data.agents_dataclasses import ActionType, AssistantStatus, InterventionType, ToneType, UrgencyType
+from data.agents_dataclasses import ActionType, AssistantStatus, InterventionType, SkillType, ToneType, UrgencyType
 from managers.action_manager import ActionManager
 from data.assistant_dataclasses import DriverPreferences
-
-class PendingConfirmation:
-    def __init__(self, action: ActionType, parameters: dict[str, Any] | None = None, response_context: str | None = None):
-        self.action = action
-        self.parameters = parameters or {}
-        self.response_context = response_context
 
 
 @dataclass
@@ -73,11 +67,6 @@ class AutomotiveAgent:
         self.recent_notifications: list[dict] = []
         self.minimum_urgency = UrgencyType.MEDIUM
         self.duplicate_suppression_enabled = False
-        self.pending_confirmation: PendingConfirmation | None = None
-        self.pending_music_selection: dict[str, Any] | None = None
-        self.pending_music_prompt: str | None = None
-        self._last_music_proposal_selection: str | None = None
-        self._last_music_proposal_attempt = float("-inf")
         self.conversation_history: list[dict[str, str]] = []
         self.manual_manager = VehicleManualManager(opt) if opt.rag_enabled else None
         self.response_context_providers: dict[ResponseSource, Callable[[str, list[dict[str, str]]], Awaitable[tuple[str, str]]]] = {
@@ -88,6 +77,7 @@ class AutomotiveAgent:
         self.knowledge_facts_provider: Callable[[], dict[str, str]] = lambda: {}
 
         self.action_manager = ActionManager(self)
+        self._message_simulator = None
         self.on_music_update: Callable[[dict[str, Any]], None] | None = None
         self.music_preferences_provider: Callable[[], str] = lambda: ""
         self.driver_preferences_provider: Callable[[], dict[str, Any]] = lambda: {"driver_name": DriverPreferences().driver_name}
@@ -97,16 +87,30 @@ class AutomotiveAgent:
             TaskType.WELLBEING: wellbeing.WellbeingTask(opt, self.log_llm_usage, backend=self.crewai_backend),
             TaskType.DRIVING: driving.DrivingTask(opt, self.log_llm_usage, backend=self.crewai_backend),
             TaskType.COMFORT: comfort.ComfortTask(opt, self.log_llm_usage, backend=self.crewai_backend),
-            TaskType.MOOD_MUSIC: mood_music.MoodMusicTask(opt, self.log_llm_usage, backend=self.crewai_backend),
-            TaskType.MESSAGES: messages.MessagesTask(opt, self.log_llm_usage, backend=self.crewai_backend),
-            TaskType.MEETING: meeting.MeetingTask(opt, self.log_llm_usage, backend=self.crewai_backend),
+            TaskType.MOOD_MUSIC: mood_music.MoodMusicTask(
+                opt, self.log_llm_usage, backend=self.crewai_backend,
+                respond=self._music_respond,
+                speak=self.speak,
+                notify_music_update=self._notify_music_update,
+                preferences_provider=lambda: self.music_preferences_provider(),
+                emotion_provider=lambda: self.emotion_state(),
+                set_status=self.set_assistant_status,
+            ),
+            TaskType.MESSAGES: messages.MessagesTask(
+                opt, self.log_llm_usage, backend=self.crewai_backend,
+                agent=self,
+            ),
+            TaskType.MEETING: meeting.MeetingTask(
+                opt, self.log_llm_usage, backend=self.crewai_backend,
+                speak=self.speak,
+                on_confirm=self.action_manager.confirm_attend_meeting,
+                on_decline=self.action_manager.decline_attend_meeting,
+            ),
         }
         self.command_task = vehicle_command.VehicleCommandTask(
             opt, self.log_llm_usage, backend=self.crewai_backend,
             registered_actions=self.action_manager.registered_actions,
         )
-        self.confirmation_task = confirmation_task.ConfirmationTask(opt, self.log_llm_usage, backend=self.crewai_backend)
-        self.conversation_tone_task = ConversationToneTask(opt, self.log_llm_usage, backend=self.crewai_backend)
         if opt.routing_backend == "laya":
             router_backend = LayaBackend(opt.routing_model_laya, self.log_llm_usage)
         else:
@@ -132,35 +136,33 @@ class AutomotiveAgent:
         self._assistant_status = AssistantStatus.IDLE
 
     def _notify_music_update(self, value: dict[str, Any]) -> None:
-        return music_task._notify_music_update(self, value)
+        if self.on_music_update is not None:
+            self.on_music_update(value)
 
-    def publish_pending_music_selection(self) -> None:
-        return music_task.publish_pending_music_selection(self)
+    @property
+    def music_task(self) -> mood_music.MoodMusicTask:
+        return self.tasks[TaskType.MOOD_MUSIC]
 
-    def clear_pending_music_selection(self, *, publish: bool=True) -> None:
-        return music_task.clear_pending_music_selection(self, publish=publish)
+    @property
+    def pending_music_selection(self) -> dict[str, Any] | None:
+        return self.music_task.pending_selection
 
-    def confirm_pending_music_selection(self, accepted: bool) -> bool:
-        return music_task.confirm_pending_music_selection(self, accepted)
+    @property
+    def messages_task(self):
+        return self.tasks[TaskType.MESSAGES]
 
-    async def execute_music_action(self, action: ActionType, request: str) -> None:
-        return await music_task.execute_music_action(self, action, request)
+    async def _music_respond(self, user_input: str, reply_context: tuple[str, str]) -> str:
+        event = CarEvent(
+            skill=SkillType.CONVERSATION, event_name=EventName.USER_INPUT,
+            event_value=user_input, context=self.knowledge_context(), user_input=user_input,
+        )
+        return await self.stream_user_response(event, response_context=reply_context)
 
     def notify_incoming_message_classification(
         self, tone: ToneType, urgency: UrgencyType
     ) -> None:
         if self.on_incoming_message_classified is not None:
             self.on_incoming_message_classified(tone, urgency)
-
-    def remember_pending_message_classification(
-        self, event_value: dict[str, Any], tone: ToneType, urgency: UrgencyType
-    ) -> None:
-        self.action_manager.message_manager.remember_classification(event_value, tone, urgency)
-
-    def most_urgent_pending_message_classification(
-        self,
-    ) -> tuple[ToneType, UrgencyType] | None:
-        return self.action_manager.message_manager.most_urgent_classification()
 
     @property
     def llm(self) -> LLM:
@@ -189,7 +191,7 @@ class AutomotiveAgent:
 
     @property
     def pending_message_count(self) -> int:
-        return self.action_manager.message_manager.pending_count
+        return self.messages_task.pending_count
 
     @property
     def driver_name(self) -> str:
@@ -199,7 +201,15 @@ class AutomotiveAgent:
 
     @property
     def message_simulator(self):
-        return self.action_manager.message_manager.simulator
+        """The external friend-message simulation source (kept out of the task)."""
+        if self._message_simulator is None:
+            self._message_simulator = FriendMessageAgent(
+                llm_client=self.voice_llm,
+                model=self.opt.ollama_model,
+                on_message=self.messages_task.receive,
+                on_usage=self.log_llm_usage,
+            )
+        return self._message_simulator
 
     def set_knowledge_facts_provider(
         self, provider: Callable[[], dict[str, str]]
@@ -211,25 +221,25 @@ class AutomotiveAgent:
         return list(self.knowledge_facts_provider().values())
 
     def emotion_state(self) -> dict[str, str]:
-        return music_task.emotion_state(self)
-
-    def should_offer_music_proposal(self) -> bool:
-        return music_task.should_offer_music_proposal(self)
+        """DriverEmotionState measures from the knowledge base, keyed by measure name."""
+        emotion_state: dict[str, str] = {}
+        for key, fact in self.knowledge_facts_provider().items():
+            name, separator, measure = key.partition(".")
+            if separator and name == "DriverEmotionState":
+                emotion_state[measure] = fact
+        return emotion_state
 
     def start_message_simulation(self) -> bool:
         return self.message_simulator.start()
 
     async def stop_message_simulation(self) -> bool:
-        return await self.action_manager.message_manager.stop_simulation()
+        stopped = await self.message_simulator.stop()
+        return stopped
 
     def cancel_message_tasks(self) -> None:
-        self.action_manager.message_manager.close()
-
-    async def _receive_incoming_message(self, message: IncomingMessage) -> None:
-        await self.action_manager.message_manager.receive(message)
-
-    def handle_pending_message_action(self, action_type: ActionType) -> None:
-        self.action_manager.message_manager.handle_action(action_type)
+        if self._message_simulator is not None:
+            self._message_simulator.cancel()
+        self.messages_task.close()
 
     def log_llm_usage(self, call_name: str, usage: Any | None) -> None:
         def usage_value(name: str) -> Any | None:
@@ -293,7 +303,7 @@ class AutomotiveAgent:
                 continue
 
             if event.user_input:
-                event = self._take_latest_user_event(event)
+                event = self.take_latest_user_event(event)
 
             self.is_processing_event = True
             try:
@@ -303,7 +313,7 @@ class AutomotiveAgent:
             finally:
                 self.is_processing_event = False
 
-    def _take_latest_user_event(self, event: CarEvent) -> CarEvent:
+    def take_latest_user_event(self, event: CarEvent) -> CarEvent:
         """Drop stale queued user turns while preserving system events."""
         latest_event = event
         deferred_events: list[CarEvent] = []
@@ -380,15 +390,7 @@ class AutomotiveAgent:
         return result.text
 
 
-    async def classify_conversation_tone(
-        self, event: CarEvent, context: str
-    ) -> ToneType:
-        """Delegate the delivery-tone choice to the backend's conversation tone crew."""
-        return await self.conversation_tone_task.execute(
-            event.user_input, context, self.conversation_history
-        )
-
-    def cancel_voice_response(self) -> None:
+    async def cancel_voice_response(self) -> None:
         if (
             self.voice_response_task is not None
             and not self.voice_response_task.done()
@@ -397,8 +399,8 @@ class AutomotiveAgent:
 
     def clear_conversation(self) -> None:
         self.cancel_voice_response()
-        self.pending_confirmation = None
-        self.clear_pending_music_selection()
+        self.tasks[TaskType.MEETING].reset()
+        self.music_task.reset()
         self.conversation_history.clear()
 
     def set_minimum_urgency(self, urgency: str) -> None:
@@ -425,11 +427,6 @@ class AutomotiveAgent:
         return False, ""
     
     async def process_event(self, event: CarEvent) -> None:
-        if (
-            event.event_name is EventName.PENDING_MESSAGES_REMINDER
-            and self.pending_message_count == 0
-        ):
-            return
         self.logger.info("Received event", event_name=event.event_name, event_value=event.event_value)
         if event.user_input:
             await self.process_direct_user_input(event)
@@ -448,20 +445,22 @@ class AutomotiveAgent:
             for index, (key, value) in enumerate(changes.items())
         }
         facts.update(changed_facts)
-        if event.event_name in {EventName.INCOMING_MESSAGE_RECEIVED, EventName.PENDING_MESSAGES_REMINDER}:
-            task_types = [TaskType.MESSAGES]
-        else:
-            direct_tasks = []
+        direct_tasks = []
+        if "DriverAgenda.late_for_meeting" in changes or any(
+            key == "UnreadMessages.count" for key in changes
+        ):
             if "DriverAgenda.late_for_meeting" in changes:
                 direct_tasks.append(TaskType.MEETING)
-            if self.pending_message_count:
-                direct_tasks.append(TaskType.MESSAGES)
-            routing_facts = {
-                key: value for key, value in changed_facts.items()
-                if not key.startswith("DriverAgenda.")
-            }
-            route = await self.telemetry_router.execute(RoutingInput(routing_facts)) if routing_facts else None
-            task_types = direct_tasks + (route.tasks if route is not None else [])
+            direct_tasks.append(TaskType.MESSAGES)
+        elif self.pending_message_count:
+            direct_tasks.append(TaskType.MESSAGES)
+        routing_facts = {
+            key: value for key, value in changed_facts.items()
+            if not key.startswith("DriverAgenda.")
+            and not key.startswith("UnreadMessages.")
+        }
+        route = await self.telemetry_router.execute(RoutingInput(routing_facts)) if routing_facts else None
+        task_types = direct_tasks + (route.tasks if route is not None else [])
         self.logger.info("[LLM] Event dispatched", tasks=[task.value for task in task_types])
         decisions = []
         for task_type in task_types:
@@ -473,8 +472,10 @@ class AutomotiveAgent:
             decision = await self.tasks[task_type].execute(DecisionInput(**{
                 "event_name": event.event_name, "driver_name": self.driver_name,
                 "pending_message_count": self.pending_message_count,
-                "event_details": json.dumps(event.event_value, default=str) if task_type is TaskType.MESSAGES
-                    else "No additional event-specific details.",
+                "event_details": (json.dumps(
+                    {"changes": changes, "newest_message": self.messages_task.newest_message},
+                    default=str) if task_type is TaskType.MESSAGES
+                    else "No additional event-specific details."),
                 "changed_facts": "\n".join(f"- {fact}" for fact in selected_changes.values())
                     or "No specific vehicle fact changed.",
                 "context": "\n".join(f"- {fact}" for fact in supporting)
@@ -482,28 +483,33 @@ class AutomotiveAgent:
             }))
             decisions.append((task_type, decision))
             break   # Only process the first task decision for now
+        # Determine if there is an acute hazard based on the urgency of the decisions
         acute_hazard = any(
             task_type in {TaskType.DRIVING, TaskType.WELLBEING} and decision.urgency.rank >= UrgencyType.HIGH.rank
             for task_type, decision in decisions
         )
         executed_actions = set()
         for task_type, decision in sorted(decisions, key=lambda item: item[1].urgency.rank, reverse=True):
-            if self.action_manager.message_manager.simulation_stopped(event):
-                return
-            if task_type is TaskType.MOOD_MUSIC and (acute_hazard or self.pending_confirmation is not None):
+            # Skip processing if there is an acute hazard and the task is not critical
+            if task_type is TaskType.MOOD_MUSIC and (
+                acute_hazard or self.music_task.active
+            ):
                 continue
+            # Skip processing if the action has already been executed
             if decision.action is not ActionType.NONE and decision.action in executed_actions:
                 continue
             self.logger.info(
                 "[LLM] Task decision", task=task_type.value, action=decision.action.value,
                 urgency=decision.urgency.value, reason=decision.reason,
             )
-            await self.handle_notification_decision(event, decision)
+            await self.handle_notification_decision(event, decision, task_type=task_type)
             executed_actions.add(decision.action)
 
     async def process_direct_user_input(self, event: CarEvent) -> None:
-        if self.pending_confirmation is not None:
-            await self.handle_pending_confirmation(event.user_input)
+        if self.music_task.awaiting_reply:
+            await self.music_task.handle_user_input(event.user_input, self.conversation_history)
+        elif self.tasks[TaskType.MEETING].awaiting_reply:
+            await self.tasks[TaskType.MEETING].handle_user_input(event.user_input, self.conversation_history)
         else:
             await self.handle_direct_user_input(event)
 
@@ -671,15 +677,20 @@ class AutomotiveAgent:
         )
         self.start_conversation_response(event, source=decision.response_source)
 
-    async def handle_notification_decision(self, event: CarEvent, decision: NotificationDecision) -> None:
-        if event.event_name is EventName.INCOMING_MESSAGE_RECEIVED:
-            self.remember_pending_message_classification(event.event_value, decision.tone, decision.urgency)
+    async def handle_notification_decision(
+        self, event: CarEvent, decision: NotificationDecision,
+        *, task_type: TaskType | None = None,
+    ) -> None:
+        if task_type is TaskType.MESSAGES and decision.action is not ActionType.ASK_PERMISSION_TO_TALK:
+            await self.messages_task.handle_decision(
+                event, decision,
+                on_classified=self.notify_incoming_message_classification,
+            )
+            return
+        if task_type is TaskType.MESSAGES:
             self.notify_incoming_message_classification(decision.tone, decision.urgency)
-        elif event.event_name is EventName.PENDING_MESSAGES_REMINDER:
-            classification = self.most_urgent_pending_message_classification()
-            if classification is not None:
-                decision.tone, decision.urgency = classification
-            self.notify_incoming_message_classification(decision.tone, decision.urgency)
+            self.action_manager.handle_decision(decision.action, {})
+            return
         if decision.action is ActionType.POSTPONE_NOTIFICATION_DELIVERY:
             self.action_manager.handle_decision(decision.action, {})
             return
@@ -695,19 +706,22 @@ class AutomotiveAgent:
             self.action_manager.handle_decision(decision.action, {})
             return
         if decision.action in ActionType.ASK_ATTEND_MEETING:
-            if decision.spoken_message:
-                await self.speak(decision.spoken_message, tone=decision.tone)
-            self.action_manager.handle_decision(decision.action, {})
-            self.pending_confirmation = PendingConfirmation(action=decision.action)
-            return
-        if decision.action in ActionType.PROPOSE_MUSIC:
-            if not self.should_offer_music_proposal():
+            meeting_task = self.tasks[TaskType.MEETING]
+            if meeting_task.awaiting_reply:
+                self.logger.info("[LLM] Meeting permission already pending; skipping repeated ask")
                 return
             if decision.spoken_message:
                 await self.speak(decision.spoken_message, tone=decision.tone)
-            self.pending_confirmation = PendingConfirmation(action=decision.action)
-            self.pending_music_selection = None
-            self.pending_music_prompt = None
+            await meeting_task.on_asked()
+            return
+        if decision.action in ActionType.PROPOSE_MUSIC:
+            if not self.music_task.should_offer(
+                self.music_task.emotion, self.music_task.preferences,
+                self.opt.music_cooldown_seconds,
+            ):
+                return
+            await self.speak(await self.music_task.compose_suggestion(self.driver_name), tone=decision.tone)
+            self.music_task.start_offering()
             return
         if not decision.notify:
             return
@@ -797,11 +811,3 @@ class AutomotiveAgent:
             if self.on_speaking_tone_changed is not None:
                 self.on_speaking_tone_changed(None)
             self.set_assistant_status(AssistantStatus.IDLE)
-
-    async def handle_pending_confirmation(self, user_input: str) -> None:
-        return await confirmation_task.handle_pending_confirmation(self, user_input)
-
-    async def interpret_confirmation(self, user_input: str) -> bool | None:
-        """Ask the conversational LLM, using the chat history, whether the driver just confirmed."""
-        return await self.confirmation_task.execute(user_input, self.conversation_history)
-

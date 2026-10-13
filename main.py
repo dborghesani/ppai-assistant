@@ -244,6 +244,12 @@ async def main(opt: ConfigAssistant):
         opt=opt,
     )
     agent.set_knowledge_facts_provider(lambda: dict(knowledge_manager.context))
+    # the message queue mirrors its unread count into the knowledge base
+    agent.messages_task.update_knowledge = lambda name, values: (
+        knowledge_manager.event_queue.put_nowait(
+            {"type": "measurements_updated", "name": name, "values": values}
+        )
+    )
     # publish the known baseline (doors closed, lights off, ...) before any
     # real telemetry source starts feeding data
     await knowledge_manager.seed_default_knowledge()

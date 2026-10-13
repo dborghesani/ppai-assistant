@@ -120,7 +120,6 @@ def test_manual_passages_reach_ollama_without_entering_history(rag_enabled, manu
         agent = AutomotiveAgent.__new__(AutomotiveAgent)
         agent.opt = ConfigAssistant()
         agent.conversation_history = []
-        agent.classify_conversation_tone = AsyncMock(return_value=ToneType.CALM)
         agent.manual_manager = SimpleNamespace(context_for=AsyncMock(
             return_value="Source: manual.pdf; PDF page 1\nUse the steering wheel button."
         )) if rag_enabled else None

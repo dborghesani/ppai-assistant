@@ -70,6 +70,7 @@ class WebUIServer:
             "knowledgeUpdated",
             "knowledgeChanged",
             "friendMessageSimulationChanged",
+            "scenarioCompleted",
             "musicUpdated",
         ):
             bridge.on(

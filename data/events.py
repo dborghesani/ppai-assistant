@@ -8,9 +8,7 @@ from data.agents_dataclasses import SkillType
 
 
 class EventName(StrEnum):
-    INCOMING_MESSAGE_RECEIVED = "incoming_message_received"
     KNOWLEDGE_UPDATED = "knowledge_updated"
-    PENDING_MESSAGES_REMINDER = "pending_messages_reminder"
     USER_INPUT = "user_input"
 
 

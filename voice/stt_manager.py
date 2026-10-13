@@ -527,7 +527,7 @@ class STTManager:
                             last_activity = time.time()
                             if utterance:
                                 logger.info(
-                                    f">>> STT utterance ready: {speech_duration:.2f}s speech, "
+                                    f"STT utterance ready: {speech_duration:.2f}s speech, "
                                     f"{tail_latency:.2f}s tail latency",
                                     text=utterance,
                                 )

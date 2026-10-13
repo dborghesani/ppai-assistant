@@ -300,6 +300,14 @@ class DetectedObjects:
     )
 
 @dataclass
+class UnreadMessages:
+    count: int | None = knowledge_field(
+        default=0,
+        change_threshold=1.0,
+        value_kind="count",
+    )
+
+@dataclass
 class DriverPhysicalState:
     activity: str | None = knowledge_field(default="Idle")  # Includes "Children out of place".
     attention_level: float | None = knowledge_field(

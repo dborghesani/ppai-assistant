@@ -59,6 +59,9 @@ class VehicleBridge:
             "assistantStatusChanged", status.value
         )
         self.agent.action_manager.on_action = self.apply_vehicle_action
+        self.agent.action_manager.on_meeting_completed = lambda: self._emit(
+            "scenarioCompleted", "late_for_meeting"
+        )
         self.agent.on_music_update = lambda value: self._emit("musicUpdated", value)
         self.agent.music_preferences_provider = lambda: self.dumpDriverPreferences().get("preferred_music") or ""
         self.agent.driver_preferences_provider = self.dumpDriverPreferences
@@ -504,16 +507,16 @@ class VehicleBridge:
                 "status": "proposal", "autoplay": False,
                 **self.agent.pending_music_selection,
             }
-        manager = getattr(self.agent.action_manager, "music_manager", None)
-        return {**manager.current, "autoplay": False} if manager is not None else {"status": "disabled"}
+        return {**self.agent.music_task.current, "autoplay": False}
 
     def dumpAssistantStatus(self) -> str:
         return self.agent.assistant_status.value
 
     def musicControl(self, command: str) -> None:
         if command == "stop":
-            self.agent.clear_pending_music_selection()
-        self.agent.action_manager.music_manager.control(command)
+            self.agent.music_task.clear_pending_selection()
+            self.agent.music_task.reset()
+        self.agent.music_task.control_playback(command)
 
     def on_knowledge_changed(self, changes: list[str]) -> None:
         self._emit("knowledgeChanged", changes)

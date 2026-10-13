@@ -565,6 +565,19 @@ function setFriendSimulation(active) {
   button.setAttribute("aria-pressed", String(active));
 }
 
+function setScenarioActive(scenarioId, active) {
+  if (active) {
+    activeScenario = scenarioId;
+  } else if (activeScenario === scenarioId || scenarioId === "") {
+    activeScenario = null;
+  }
+  controlContent.querySelectorAll(".scenario-button").forEach(btn => {
+    if (!btn.dataset.simulation) {
+      btn.setAttribute("aria-pressed", String(btn.dataset.scenario === activeScenario));
+    }
+  });
+}
+
 function formatValue(value, format) {
   const number = Number(value);
   if (format === "percent") return `${Math.round(number * 100)}%`;
@@ -734,10 +747,7 @@ controlContent.addEventListener("click", event => {
   button.disabled = true;
   bridge.call("setScenario", scenarioId, !wasActive)
     .then(() => {
-      activeScenario = wasActive ? null : scenarioId;
-      controlContent.querySelectorAll(".scenario-button").forEach(btn => {
-        btn.setAttribute("aria-pressed", String(btn.dataset.scenario === activeScenario));
-      });
+      setScenarioActive(wasActive ? "" : scenarioId, !wasActive);
       showToast(wasActive ? `Scenario stopped: ${button.textContent}` : `Scenario triggered: ${button.textContent}`);
     })
     .catch(() => {})
@@ -950,6 +960,7 @@ bridge.on("incomingMessageClassified", data => setIncomingMessageClassification(
 bridge.on("assistantStatusChanged", data => { setAssistantStatus(data[0]); updateMusicVolume(); });
 bridge.on("musicUpdated", data => renderMusic(data[0]));
 bridge.on("friendMessageSimulationChanged", data => setFriendSimulation(Boolean(data[0])));
+bridge.on("scenarioCompleted", data => setScenarioActive("", false));
 bridge.on("userSpeechReceived", data => addMessage("user", data[0]));
 bridge.on("knowledgeUpdated", data => renderKnowledge(data[0]));
 bridge.on("knowledgeChanged", data => renderChangedEvents(data[0]));

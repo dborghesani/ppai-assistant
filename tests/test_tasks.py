@@ -607,6 +607,7 @@ def test_telemetry_router_uses_its_own_llm_model(routing_model, expected):
 
 
 def make_routed_agent(task_types):
+    import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
     from agents.automotive_agent import AutomotiveAgent
@@ -615,13 +616,16 @@ def make_routed_agent(task_types):
 
     agent = AutomotiveAgent.__new__(AutomotiveAgent)
     agent.logger = Mock()
-    agent.pending_confirmation = None
     agent.knowledge_facts_provider = lambda: {}
-    agent.action_manager = SimpleNamespace(message_manager=SimpleNamespace(
-        pending_count=0, simulation_stopped=Mock(return_value=False),
-    ))
+    agent.event_queue = asyncio.Queue()
+    agent.action_manager = SimpleNamespace(
+        registered_actions=frozenset(), registered_action_options="",
+        registered_action_guidance="",
+    )
     agent.telemetry_router = SimpleNamespace(execute=AsyncMock(return_value=TaskRoute(tasks=task_types)))
-    agent.tasks = {task_type: SimpleNamespace(execute=AsyncMock(return_value=NotificationDecision(
+    agent.tasks = {task_type: SimpleNamespace(
+        pending_count=0,
+        execute=AsyncMock(return_value=NotificationDecision(
             urgency=UrgencyType.NONE, tone=ToneType.DISCREET,
             intervention_type=InterventionType.NONE, action=ActionType.NONE,
             suggestion_type=SuggestionType.NONE, reason="Routine facts.",
@@ -647,19 +651,6 @@ def test_process_event_dispatches_by_input_without_global_backend_mode(user_inpu
     other = agent.process_car_event if user_input else agent.process_direct_user_input
     selected.assert_awaited_once_with(event)
     other.assert_not_awaited()
-
-
-def test_process_event_skips_empty_pending_message_reminders():
-    import asyncio
-    from unittest.mock import AsyncMock
-    from data.events import CarEvent, EventName
-    from data.agents_dataclasses import SkillType
-
-    agent = make_routed_agent([])
-    agent.process_car_event = AsyncMock()
-    event = CarEvent(SkillType.NONE, EventName.PENDING_MESSAGES_REMINDER, {}, [])
-    asyncio.run(agent.process_event(event))
-    agent.process_car_event.assert_not_awaited()
 
 
 def test_automotive_agent_dispatches_with_only_task_context():

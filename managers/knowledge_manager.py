@@ -125,6 +125,15 @@ class KnowledgeManager:
         ),
     }
     _COUNT_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[int], str]] = {
+        ("UnreadMessages", "count"): lambda value: (
+            "There are no unread messages."
+            if value == 0
+            else "There {} {} unread message{}.".format(
+                "is" if value == 1 else "are",
+                value,
+                "" if value == 1 else "s",
+            )
+        ),
         ("DetectedObjects", "people_around"): lambda value: (
             "No people are currently detected around the vehicle."
             if value == 0

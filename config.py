@@ -18,7 +18,7 @@ class ConfigAssistant:
     ollama_port: int = 11434
     ollama_model: str = "qwen3.5:4b"
     pre_classify_backend: str = "llm"
-    pre_classify_model: str | None = "qwen2.5:3b-instruct"
+    pre_classify_model: str | None = None
     pre_classify_model_laya: str | None = None
     routing_backend: str = "llm"
     routing_model: str | None = "qwen2.5:3b-instruct"

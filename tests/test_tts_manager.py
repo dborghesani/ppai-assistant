@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from data.agents_dataclasses import ToneType
 from voice.hf_cache import download_hf_file_cache_first
 from voice.tts_manager import TTSManager
@@ -129,3 +133,46 @@ def test_set_voice_uses_cached_voice_embedding_without_hub_download(
     assert model.calls == [
         ("make_condition_attributes", [cached_voice], 3.0)
     ]
+
+
+@pytest.mark.parametrize("reference", ["weights.safetensors", "hf://kyutai/model/weights.safetensors"])
+def test_moshi_hub_loader_preserves_revision(monkeypatch, tmp_path, reference):
+    from inspect import signature
+
+    from huggingface_hub import hf_hub_download
+    from moshi.models import loaders
+
+    downloaded_file = tmp_path / "weights.safetensors"
+    calls = []
+
+    def fake_download(repo_id, filename, *, revision=None):
+        signature(hf_hub_download).bind(repo_id, filename, revision=revision)
+        calls.append((repo_id, filename, revision))
+        return str(downloaded_file)
+
+    monkeypatch.setattr(loaders, "hf_hub_download", fake_download)
+
+    assert loaders.hf_get(reference, "kyutai/model", revision="test-revision") == downloaded_file
+    assert calls == [("kyutai/model", "weights.safetensors", "test-revision")]
+
+
+def test_moshi_checkpoint_loader_handles_hub_missing_config(monkeypatch):
+    from huggingface_hub.errors import EntryNotFoundError
+    from moshi.models import loaders
+
+    def missing_config(*args, **kwargs):
+        raise EntryNotFoundError("config.json is missing")
+
+    monkeypatch.setattr(loaders, "hf_hub_download", missing_config)
+    with pytest.warns(UserWarning, match="contains no config.json"):
+        checkpoint = loaders.CheckpointInfo.from_hf_repo(
+            "kyutai/legacy-model",
+            moshi_weights=Path("moshi.safetensors"),
+            mimi_weights=Path("mimi.safetensors"),
+            tokenizer=Path("tokenizer.model"),
+        )
+
+    assert checkpoint.moshi_weights == Path("moshi.safetensors")
+    assert checkpoint.mimi_weights == Path("mimi.safetensors")
+    assert checkpoint.tokenizer == Path("tokenizer.model")
+    assert checkpoint.lm_config is None

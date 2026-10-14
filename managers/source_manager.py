@@ -41,6 +41,7 @@ class SourceManager:
         self.previous_timestamp: int | None = None
         self.logger = structlog.get_logger()
         self.server_ready = asyncio.Event()
+        self._mqtt_broker_ready = asyncio.Event()
 
     @staticmethod
     def deserialize(payload: dict[str, Any]) -> Any | None:
@@ -490,10 +491,7 @@ class SourceManager:
 
     async def run_embedded_broker(self) -> None:
         if Broker is None:
-            self.logger.error(
-                "amqtt is not installed, cannot start embedded MQTT broker"
-            )
-            return
+            raise RuntimeError("amqtt is not installed, cannot start embedded MQTT broker")
 
         broker_config = {
             "listeners": {
@@ -517,6 +515,7 @@ class SourceManager:
         )
         broker = Broker(broker_config)
         await broker.start()
+        self._mqtt_broker_ready.set()
         self.logger.info(
             "Embedded MQTT broker running",
             host=self.opt.mqtt_host,
@@ -525,11 +524,12 @@ class SourceManager:
         try:
             await asyncio.Future()
         finally:
+            self._mqtt_broker_ready.clear()
             await broker.shutdown()
 
     async def run_mqtt(self) -> None:
         if self.opt.mqtt_embedded_broker:
-            await asyncio.sleep(0.5)
+            await self._mqtt_broker_ready.wait()
 
         loop = asyncio.get_running_loop()
 

@@ -5,6 +5,7 @@ from datetime import datetime
 @dataclass
 class ConfigAssistant:
     crewai_verbose: bool = False
+    log_level: str = "INFO"
 
     # Browser dashboard
     web_ui_host: str = "127.0.0.1"
@@ -22,9 +23,16 @@ class ConfigAssistant:
     pre_classify_model: str | None = None
     routing_backend: str = "crew"
     routing_model: str | None = None
+    # Which decision-model engine powers the "decision" backend option:
+    # "laya" (local laya typed-decisions checkpoint) or "kev" (Kev decision model
+    # from the Hugging Face Hub, e.g. jaredpalmer/kev-0.8b).
+    decision_model: str = "laya"
+    kev_model: str = "jaredpalmer/kev-0.8b"
+    laya_model: str | None = None
     
     max_tokens: int = 1024
     context_window_size: int = 4096
+    wait_message_delay_seconds: float = 0.75
 
     rag_enabled: bool = False
     rag_manual_directory: str = "user_manual"

@@ -157,12 +157,18 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `ollama_port` | Ollama server port | `11434` |
 | `ollama_llm` | LLM model to use | `qwen2.5:3b-instruct` |
 | `ollama_timeout` | LLM timeout in seconds | `1200` |
-| `pre_classify_backend` | User-request preclassification: `llm` or `laya`; independent of telemetry routing | `llm` |
-| `pre_classify_model_laya` | Optional local LAYA preclassification checkpoint; unset uses the pretrained typed-decisions model | `None` |
-| `routing_backend` | Telemetry router: `llm` (Ollama) or `laya`; independent of specialist backends | `llm` |
-| `laya_routing_model` | Optional local LAYA routing checkpoint; unset uses the pretrained typed-decisions model | `None` |
+| `log_level` | Application logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` | `INFO` |
+| `pre_classify_backend` | User-request preclassification: `llm`, `crew` or `decision` (LAYA/Kev via `decision_model`); independent of telemetry routing | `llm` |
+| `pre_classify_model` | Optional decision-model checkpoint for preclassification (LAYA dir or Kev HF repo); unset uses the default | `None` |
+| `routing_backend` | Telemetry router: `llm` (Ollama), `crew` or `decision`; independent of specialist backends | `crew` |
+| `routing_model` | Optional LLM model or decision-model checkpoint for the router | `None` |
+| `decision_model` | Engine used by the `decision` backend option: `laya` or `kev` | `laya` |
+| `kev_model` | Kev decision-model checkpoint from the Hugging Face Hub (used when `decision_model=kev`) | `jaredpalmer/kev-0.8b` |
+| `laya_model` | Optional local Laya typed-decisions checkpoint directory; unset uses the pretrained model | `None` |
+
 | `max_tokens` | Max tokens generated per LLM response | `1024` |
 | `context_window_size` | LLM context window size | `4096` |
+| `wait_message_delay_seconds` | Delay before generating an acknowledgement for pending work; `0` starts immediately | `0.75` |
 | `data_websocket_url` | WebSocket URL for telemetry source | `ws://localhost:4545/socket` |
 | `data_replay_folder` | Path to JSON dataset folder for telemetry replay | `""` |
 | `mqtt_enabled` | Enable MQTT telemetry broker and client integration | `False` |
@@ -195,6 +201,34 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `influxdb_bucket` | InfluxDB bucket | `assistant-bucket` |
 | `is_socket_enabled` | Enable the WebSocket telemetry ingress source | `True` |
 | `socket_url` | WebSocket URL for telemetry source (used by `SourceManager`) | `ws://localhost:4545/socket` |
+
+At `INFO`, each Ollama/CrewAI call emits one final `[LLM] Call finished` event
+with generated `response_text`, `duration_ms`, token usage and `status`.
+Streaming calls include `ttft_ms` when text was received. The duration measures
+the backend call, not manual retrieval or TTS playback. Use `log_level=DEBUG`
+to also see the separate first-token, token-usage and timing details. Response
+text is logged, so logs can contain sensitive conversation content.
+
+Before opening the dashboard, startup warms each configured Ollama model with
+a short prompt and at most two generated tokens, keeping it loaded for 30 minutes.
+It also runs one synthetic typed-decision inference per active Kev/Laya backend
+instance; shared routing/preclassification backends are warmed only once. These
+requests do not enter conversation history or execute vehicle actions. Decision
+warmup errors prevent startup from reporting readiness. Warmup reduces first-call
+overhead but does not eliminate input-shape initialization or reloads after model
+eviction, especially when several models share limited GPU memory.
+
+Kev runs in-process from the Hugging Face checkpoint, without an extra server.
+The `kev` dependency points to the explicit local fork in
+[agents/backends/kev](agents/backends/kev/FORK.md), based on upstream `kev-1.0`.
+Its NumPy and Torch constraints have been adapted for the voice stack. The local
+[voice/moshi](voice/moshi/FORK.md) fork of Moshi 0.2.13 updates only its Hub and
+Safetensors dependency ranges; model code is unchanged. Install both with
+`uv sync`, including the test dependencies. No extras are required. Kev is available on Python
+3.12/3.13; the base assistant retains Python 3.10 through 3.14 support.
+Dependency resolution, import checks, Moshi's small reference-model/audio tests
+and focused assistant tests pass with Torch 2.9.1. Full pretrained TTS/STT and
+Kev inference with real audio/model checkpoints has not been validated.
 
 **Examples:**
 ```bash
@@ -314,25 +348,38 @@ history through a single `process_event` entry point. Each task owns its prompts
 contracts and interpretation, and uses its configured technical backend from `agents/backends`.
 There is no global LLM/LAYA event-processing mode.
 
-The telemetry router defaults to Ollama and can instead use LAYA:
+The telemetry router defaults to Ollama and can instead use a decision model
+(LAYA or Kev, selected by `decision_model`):
 
 ```bash
-uv run python main.py routing_backend=laya
+uv run python main.py routing_backend=decision
+uv run python main.py routing_backend=decision decision_model=kev kev_model=jaredpalmer/kev-0.8b
 ```
 
-LAYA evaluates an independent `route`/`skip` choice for each telemetry domain, allowing
+The decision backend evaluates an independent `route`/`skip` choice for each telemetry domain, allowing
 multiple tasks for a mixed update. Messages and meeting scenarios keep direct entry points;
-set `pre_classify_backend=laya` to also use LAYA for direct user requests:
+set `pre_classify_backend=decision` to also use it for direct user requests:
 
 ```bash
-uv run python main.py routing_backend=laya pre_classify_backend=laya
+uv run python main.py routing_backend=decision pre_classify_backend=decision
 ```
 
 `TelemetryRouter` and `RequestPreClassifier` keep the same classes and input/output contracts
-for both backends. The LAYA preclassifier selects whether full action classification is required
+for both backends. The decision preclassifier selects whether full action classification is required
 and the response source (`general`, `vehicle_state`, `vehicle_manual`). It does not generate a
-holding phrase: `wait_message` is empty, and the orchestrator uses its short fallback for action
-requests. Invalid predictions fall back to full action classification without exposing partial
+holding phrase: `wait_message` is empty. For action classification or manual retrieval still
+pending after `wait_message_delay_seconds` (default 0.75 seconds), a separate Ollama call generates a brief acknowledgement in the
+driver's language. Generation is cancelled if the pending work finishes first; an acknowledgement
+is received in streaming mode so its final log includes TTFT, but the complete phrase is validated
+before delivery. Brevity is guided by the prompt, without hard character or word-count limits;
+empty output, questions and multiline output are still rejected. A cancelled or failed generation that delivered nothing releases the turn's
+acknowledgement reservation, so a later slow phase can still acknowledge the request. Once
+delivery starts, the turn remains covered to prevent duplicate acknowledgements. Debug logs
+explain why a message was skipped or cancelled. An acknowledgement
+already being spoken finishes before the final response. Existing streamed preclassifier phrases
+are retained. Wait phrases are not added to conversation history, and generation failure does not
+block the response. This adds an LLM request on slow paths; latency under concurrent Ollama load
+needs measurement on the target GPU. Invalid predictions fall back to full action classification without exposing partial
 route updates. Matching LAYA model settings share one loaded backend instance.
 
 Set `pre_classify_model_laya=/path/to/checkpoint` for a compatible request-preclassification

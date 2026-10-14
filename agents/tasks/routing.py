@@ -7,7 +7,7 @@ from typing import Any, Callable, Literal, cast
 import structlog
 from crewai import Agent, Crew, Process, Task
 from agents.backends.ollama_backend import OllamaBackend
-from agents.backends.laya_backend import LayaBackend
+from agents.backends.decision_backend import DecisionBackend
 from agents.backends.crewai_backend import CrewAIBackend
 from pydantic import BaseModel, Field, field_validator
 
@@ -95,7 +95,7 @@ class TelemetryRouter:
     }
 
     def __init__(self, opt: ConfigAssistant, on_usage: Callable[[str, Any], None], *,
-                 backend: CrewAIBackend | OllamaBackend | LayaBackend | None = None):
+                 backend: CrewAIBackend | OllamaBackend | DecisionBackend | None = None):
         self.model = (opt.routing_model or opt.ollama_model).removeprefix("ollama/")
         self.backend = backend if backend is not None else CrewAIBackend(opt, on_usage, model=opt.routing_model)
         self.logger = structlog.get_logger()
@@ -125,8 +125,8 @@ class TelemetryRouter:
                 cast(Crew, self.crew), {"changed_facts": changed_facts},
                 TaskRoute, "telemetry routing",
             )
-        if isinstance(self.backend, LayaBackend):
-            return await self._execute_with_laya(task_input)
+        if isinstance(self.backend, DecisionBackend):
+            return await self._execute_with_decision(task_input)
         return await self._execute_with_ollama(task_input)
 
     async def _execute_with_ollama(self, task_input: RoutingInput) -> TaskRoute:
@@ -150,13 +150,13 @@ class TelemetryRouter:
             )
             return TaskRoute.model_validate_json(response.choices[0].message.content or "")
         finally:
-            self.logger.info(
+            self.logger.debug(
                 "[LLM] Task routing time", model=self.model,
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
             )
 
 
-    async def _execute_with_laya(self, task_input: RoutingInput) -> TaskRoute:
+    async def _execute_with_decision(self, task_input: RoutingInput) -> TaskRoute:
         questions = {
             task_type.value: {
                 "type": "choice",
@@ -174,22 +174,22 @@ class TelemetryRouter:
             }
             for task_type, scope in self.TASK_CRITERIA.items()
         }
-        result = await cast(LayaBackend, self.backend).predict(
+        result = await cast(DecisionBackend, self.backend).execute_decision(
             {"changed_facts": dict(task_input.changed_facts)}, questions,
             call_name="telemetry routing",
         )
         answers = result.get("answers") if isinstance(result, dict) else None
         if not isinstance(answers, dict):
-            raise ValueError("LAYA routing did not return an answers object")
+            raise ValueError("decision routing did not return an answers object")
         tasks = []
         for task_type in self.TASK_CRITERIA:
             if task_type.value not in answers:
-                raise ValueError(f"LAYA routing omitted {task_type.value}")
-            answer = LayaRoutingAnswer.model_validate(answers[task_type.value])
+                raise ValueError(f"decision routing omitted {task_type.value}")
+            answer = DecisionRoutingAnswer.model_validate(answers[task_type.value])
             if answer.choice == "route":
                 tasks.append(task_type)
         return TaskRoute(tasks=tasks)
 
 
-class LayaRoutingAnswer(BaseModel):
+class DecisionRoutingAnswer(BaseModel):
     choice: Literal["route", "skip"]

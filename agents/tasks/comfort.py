@@ -26,6 +26,25 @@ Optimal temperature, no temperature trigger, unknown required control state,
 or required control already on => silence, action=none. Never reverse on/off.
 Heating and seat heating are different controls. Do not request a target value
 or claim measured temperature changed or physical actuation was confirmed.
+
+Trigger discipline (mandatory):
+- The ONLY valid trigger for enable_heating is a changed fact that explicitly
+  states the cabin temperature is low or too low, with vehicle state confirming
+  heating is off. The ONLY valid trigger for enable_air_conditioning is a
+  changed fact that explicitly states the cabin temperature is high or too
+  high, with air conditioning off.
+- DriverPreferences.preferred_cabin_temperature is a target the driver set, a
+  constant, and NEVER a measuring of how warm or cold the cabin is. Never use
+  it, alone or combined, as evidence that the cabin is too low, too high, or
+  that any action is needed. 22 degC preference + heating off = silence.
+- A changed fact that merely updates a temperature value without describing it
+  as low/too low/high/too high is routine, not a trigger: silence.
+- If the changed facts contain no explicit "low"/"too low"/"high"/"too high"
+  cabin temperature condition, return silence even if you could "reason" you
+  would feel cold. Reference the facts literally; do not infer comfort needs.
+- Acknowledgement wording: say at most that heating/air conditioning has been
+  enabled to reach the preferred comfort; do not imply a temperature was
+  measured.
 """,
 )
 

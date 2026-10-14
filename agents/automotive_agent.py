@@ -2,16 +2,17 @@ import asyncio
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import structlog
 from agents.tasks.decision import DecisionInput, NotificationDecision
 from agents.tasks import comfort, driving, meeting, messages, mood_music, vehicle_command, wellbeing
 from agents.backends.crewai_backend import CrewAIBackend
-from agents.backends.laya_backend import LayaBackend
+from agents.backends.decision_backend import DecisionBackend, KevBackend, LayaBackend
 from agents.backends.ollama_backend import OllamaBackend
-from agents.tasks.conversation import ConversationDelivery, ConversationInput, ConversationTask
+from agents.backends.llm_logging import usage_log_fields
+from agents.tasks.conversation import ConversationDelivery, ConversationInput, ConversationTask, WaitMessageTask
 from agents.tasks import mood_music
 from agents.tasks.pre_classify import PreClassification, PreClassificationUpdate, PreClassificationInput, RequestPreClassifier, ResponseSource
 from agents.tasks.routing import RoutingInput, TaskType, TelemetryRouter
@@ -44,6 +45,7 @@ class DirectInputPreparation:
     wait_task: asyncio.Task[None] | None
     response_task: asyncio.Task[None] | None
     response_gate: asyncio.Event
+    wait_message_claimed: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class AutomotiveAgent:
@@ -52,10 +54,14 @@ class AutomotiveAgent:
     ):
         if opt.music_cooldown_seconds < 0:
             raise ValueError("Music cooldown must be non-negative")
-        if opt.routing_backend not in {"crew", "llm", "laya"}:
-            raise ValueError("routing_backend must be 'crew', 'llm' or 'laya'")
-        if opt.pre_classify_backend not in {"crew", "llm", "laya"}:
-            raise ValueError("pre_classify_backend must be 'crew', 'llm' or 'laya'")
+        if opt.wait_message_delay_seconds < 0:
+            raise ValueError("wait_message_delay_seconds must be non-negative")
+        if opt.routing_backend not in {"crew", "llm", "decision"}:
+            raise ValueError("routing_backend must be 'crew', 'llm' or 'decision'")
+        if opt.pre_classify_backend not in {"crew", "llm", "decision"}:
+            raise ValueError("pre_classify_backend must be 'crew', 'llm' or 'decision'")
+        if opt.decision_model not in {"laya", "kev"}:
+            raise ValueError("decision_model must be 'laya' or 'kev'")
         self.logger = logger
         self.opt = opt
         self.is_active = True
@@ -70,7 +76,7 @@ class AutomotiveAgent:
         self.conversation_history: list[dict[str, str]] = []
         self.manual_manager = VehicleManualManager(opt) if opt.rag_enabled else None
         self.response_context_providers: dict[ResponseSource, Callable[[str, list[dict[str, str]]], Awaitable[tuple[str, str]]]] = {
-            ResponseSource.VEHICLE_MANUAL: self._manual_response_context,
+            ResponseSource.VEHICLE_MANUAL: self.manual_response_context,
         }
         self.ollama_backend = OllamaBackend(opt, self.log_llm_usage)
         self.voice_llm = self.ollama_backend.client
@@ -111,21 +117,26 @@ class AutomotiveAgent:
             opt, self.log_llm_usage, backend=self.crewai_backend,
             registered_actions=self.action_manager.registered_actions,
         )
-        if opt.routing_backend == "laya":
-            router_backend = LayaBackend(opt.routing_model, self.log_llm_usage)
+        def build_decision_backend(model: str | None) -> DecisionBackend:
+            if opt.decision_model == "kev":
+                return KevBackend(opt, self.log_llm_usage, model=model)
+            return LayaBackend(opt.laya_model, self.log_llm_usage)
+
+        if opt.routing_backend == "decision":
+            router_backend = build_decision_backend(opt.routing_model)
         elif opt.routing_backend == "crew":
             router_backend = CrewAIBackend(opt, self.log_llm_usage, model=opt.routing_model)
         else:
             router_backend = self.ollama_backend
         self.telemetry_router = TelemetryRouter(opt, self.log_llm_usage, backend=router_backend)
-        if opt.pre_classify_backend == "laya":
+        if opt.pre_classify_backend == "decision":
             if (
-                opt.routing_backend == "laya"
+                opt.routing_backend == "decision"
                 and opt.pre_classify_model == opt.routing_model
             ):
                 pre_classifier_backend = router_backend
             else:
-                pre_classifier_backend = LayaBackend(opt.pre_classify_model, self.log_llm_usage)
+                pre_classifier_backend = build_decision_backend(opt.pre_classify_model)
         else:
             # "llm" keeps streaming Ollama (the wait-message path needs incremental
             # output); "crew" selects the Crew engine with streaming disabled.
@@ -133,7 +144,6 @@ class AutomotiveAgent:
         self.request_pre_classifier = RequestPreClassifier(
             opt, self.log_llm_usage,
             backend=pre_classifier_backend,
-            streaming=opt.pre_classify_backend == "llm",
         )
 
         self.on_response: Callable[[str], None] | None = None
@@ -250,49 +260,8 @@ class AutomotiveAgent:
         self.messages_task.close()
 
     def log_llm_usage(self, call_name: str, usage: Any | None) -> None:
-        def usage_value(name: str) -> Any | None:
-            if isinstance(usage, dict):
-                return usage.get(name)
-            return getattr(usage, name, None)
-
-        prompt_tokens = usage_value("prompt_tokens")
-        completion_tokens = usage_value("completion_tokens")
-        total_tokens = usage_value("total_tokens")
-        if (
-            not isinstance(prompt_tokens, int)
-            or not isinstance(completion_tokens, int)
-            or prompt_tokens < 0
-            or completion_tokens < 0
-            or prompt_tokens + completion_tokens == 0
-        ):
-            prompt_tokens = None
-            completion_tokens = None
-            total_tokens = None
-            context_tokens = None
-            context_percent = None
-        else:
-            context_tokens = prompt_tokens + completion_tokens
-            if not isinstance(total_tokens, int) or total_tokens <= 0:
-                total_tokens = context_tokens
-            context_window = self.opt.context_window_size
-            context_percent = (
-                round(context_tokens / context_window * 100, 1)
-                if context_window > 0
-                else None
-            )
-
-        context_window = self.opt.context_window_size
-        self.logger.info(
-            "[LLM] Token usage",
-            llm_call=call_name,
-            available=prompt_tokens is not None,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            context_tokens=context_tokens,
-            context_window_tokens=context_window,
-            context_window_percent=context_percent,
-        )
+        self.logger.debug("[LLM] Token usage", llm_call=call_name,
+                          **usage_log_fields(usage, self.opt.context_window_size))
 
 
 
@@ -349,9 +318,25 @@ class AutomotiveAgent:
     async def prepare_user_response(
         self, event: CarEvent, source: ResponseSource,
         *, response_gate: asyncio.Event | None = None,
+        wait_message_claimed: asyncio.Event | None = None,
     ) -> None:
-        provider = self.response_context_providers.get(source, self._empty_response_context)
-        response_context = await provider(event.user_input, self.conversation_history)
+        provider = self.response_context_providers.get(source, self.empty_response_context)
+        if source is ResponseSource.VEHICLE_MANUAL:
+            context_task = asyncio.create_task(provider(event.user_input, self.conversation_history))
+            wait_task = asyncio.create_task(self.generate_wait_message(
+                event, source, context_task, response_gate=response_gate,
+                wait_message_claimed=wait_message_claimed,
+            ))
+            try:
+                response_context = await context_task
+                await wait_task
+            finally:
+                for task in (context_task, wait_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(context_task, wait_task, return_exceptions=True)
+        else:
+            response_context = await provider(event.user_input, self.conversation_history)
         if source is not ResponseSource.VEHICLE_STATE:
             event = CarEvent(
                 event.skill, event.event_name, event.event_value, [], event.user_input,
@@ -364,10 +349,10 @@ class AutomotiveAgent:
             )
 
     @staticmethod
-    async def _empty_response_context(question: str, history: list[dict[str, str]]) -> tuple[str, str]:
+    async def empty_response_context(question: str, history: list[dict[str, str]]) -> tuple[str, str]:
         return "", ""
 
-    async def _manual_response_context(self, question: str, history: list[dict[str, str]]) -> tuple[str, str]:
+    async def manual_response_context(self, question: str, history: list[dict[str, str]]) -> tuple[str, str]:
         return await manual_response_context(self.manual_manager, question, history)
 
     async def stream_user_response(
@@ -507,7 +492,27 @@ class AutomotiveAgent:
         else:
             await self.handle_direct_user_input(event)
 
+    async def handle_direct_user_input(self, event: CarEvent) -> None:
+        pending_count = self.pending_message_count
+        preparation = await self.preclassify_direct_input(event, pending_count)
+        if not preparation.pre_classification.requires_action_classification:
+            self.logger.info(
+                "Direct input routed to conversation without full action classification",
+                response_source=preparation.pre_classification.response_source.value,
+            )
+            self.release_prepared_response(preparation)
+            return
+        else:
+            decision = await self.resolve_action_decision(preparation)
+            await self.dispatch_direct_decision(event, decision, preparation, pending_count=pending_count)
+
+    def release_prepared_response(self, preparation: DirectInputPreparation) -> None:
+        """Allow the prepared response to reach the UI and TTS."""
+        assert preparation.response_task is not None
+        preparation.response_gate.set()
+
     async def preclassify_direct_input(self, event: CarEvent, pending_count: int) -> DirectInputPreparation:
+        """Preclassify the request and start its speculative response and optional action tasks."""
         command_task = self.command_task
         options = command_task.direct_action_options + "\n" + self.action_manager.registered_action_options
         if pending_count:
@@ -526,6 +531,7 @@ class AutomotiveAgent:
         wait_task: asyncio.Task | None = None
         response_task: asyncio.Task | None = None
         response_gate = asyncio.Event()
+        wait_message_claimed = asyncio.Event()
         wait_chunks: asyncio.Queue[str | None] = asyncio.Queue()
         wait_chunk_count = 0
         requires_action_classification = False
@@ -549,11 +555,12 @@ class AutomotiveAgent:
             if response_task is not None:
                 return
             self.logger.info(
-                "[LLM] Starting speculative response generation",
+                "[LLM] Starting speculative response preparation",
                 response_source=source.value,
             )
             response_task = asyncio.create_task(self.prepare_user_response(
                 event, source, response_gate=response_gate,
+                wait_message_claimed=wait_message_claimed,
             ))
             self.track_voice_response_task(response_task)
 
@@ -564,7 +571,8 @@ class AutomotiveAgent:
                 start_classifier(requires_action_classification)
             if update.response_source is not None:
                 start_response(update.response_source)
-            if update.wait_message_chunk is not None and requires_action_classification:
+            if update.wait_message_chunk and update.wait_message_chunk.strip() and requires_action_classification:
+                wait_message_claimed.set()
                 start_wait_message_stream()
                 wait_chunks.put_nowait(update.wait_message_chunk)
                 if update.wait_message_chunk.strip():
@@ -579,7 +587,7 @@ class AutomotiveAgent:
             if response_task is None:
                 start_response(pre_classification.response_source)
             return DirectInputPreparation(
-                pre_classification, None, None, response_task, response_gate,
+                pre_classification, None, None, response_task, response_gate, wait_message_claimed,
             )
 
         requires_action_classification = True
@@ -588,62 +596,79 @@ class AutomotiveAgent:
             classifier_task = asyncio.create_task(command_task.execute(classifier_inputs))
         if response_task is None:
             start_response(pre_classification.response_source)
-        start_wait_message_stream()
-        if wait_chunk_count == 0:
-            wait_chunks.put_nowait(pre_classification.wait_message.strip() or "Hm.")
-        wait_chunks.put_nowait(None)
+        if wait_chunk_count == 0 and not pre_classification.wait_message.strip():
+            wait_task = asyncio.create_task(self.generate_wait_message(
+                event, pre_classification.response_source, classifier_task,
+                wait_message_claimed=wait_message_claimed, action_pending=True,
+            ))
+        else:
+            wait_message_claimed.set()
+            start_wait_message_stream()
+            if wait_chunk_count == 0:
+                wait_chunks.put_nowait(pre_classification.wait_message.strip())
+            wait_chunks.put_nowait(None)
         return DirectInputPreparation(
-            pre_classification, classifier_task, wait_task, response_task, response_gate,
+            pre_classification, classifier_task, wait_task, response_task, response_gate, wait_message_claimed,
         )
 
-    async def handle_direct_user_input(self, event: CarEvent) -> None:
-        backend = self.command_task
-        pending_count = self.pending_message_count
-        preparation = await self.preclassify_direct_input(
-            event, pending_count,
-        )
-        pre_classification = preparation.pre_classification
-        if not pre_classification.requires_action_classification:
-            self.logger.info(
-                "Direct input routed to conversation without full action classification",
-                response_source=pre_classification.response_source.value,
-            )
-            assert preparation.response_task is not None
-            preparation.response_gate.set()
-            return
-
+    async def resolve_action_decision(self, preparation: DirectInputPreparation) -> NotificationDecision:
+        """Wait for classification and acknowledgement, cleaning up on failure or interruption."""
         assert preparation.classifier_task is not None
-        assert preparation.wait_task is not None
         assert preparation.response_task is not None
         self.logger.info(
             "Starting action classification for user input",
-            response_source=pre_classification.response_source.value,
+            response_source=preparation.pre_classification.response_source.value,
         )
         try:
             decision = await preparation.classifier_task
-            await preparation.wait_task
-        except Exception:
+            if preparation.wait_task is not None:
+                # Finish any acknowledgement before releasing the final reply.
+                await preparation.wait_task
+        except (Exception, asyncio.CancelledError):
+            await self.cancel_direct_input(preparation)
+            raise
+        return decision
+
+    async def cancel_direct_input(self, preparation: DirectInputPreparation) -> None:
+        pending_tasks = [task for task in (
+            preparation.classifier_task, preparation.wait_task, preparation.response_task,
+        ) if task is not None]
+        for task in pending_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+    async def cancel_prepared_response(self, preparation: DirectInputPreparation) -> None:
+        if preparation.response_task is not None:
             preparation.response_task.cancel()
             await asyncio.gather(preparation.response_task, return_exceptions=True)
-            if not preparation.wait_task.done():
-                await preparation.wait_task
-            raise
 
+    async def dispatch_direct_decision(
+        self, event: CarEvent, decision: NotificationDecision, preparation: DirectInputPreparation,
+        *, pending_count: int,
+    ) -> None:
+        """Reuse the prepared reply, switch its information source, or execute the selected action."""
+        backend = self.command_task
+        pre_classification = preparation.pre_classification
+
+        # The full classifier can revise the provisional source: discard the
+        # prepared reply rather than answer from the wrong context.
         if (
             decision.action is ActionType.NONE
             and decision.response_source is not pre_classification.response_source
         ):
-            preparation.response_task.cancel()
-            await asyncio.gather(preparation.response_task, return_exceptions=True)
-            self.start_conversation_response(event, source=decision.response_source)
+            await self.cancel_prepared_response(preparation)
+            self.start_conversation_response(
+                event, source=decision.response_source, wait_message_claimed=preparation.wait_message_claimed,
+            )
             return
 
         if decision.action is ActionType.NONE:
-            preparation.response_gate.set()
+            self.release_prepared_response(preparation)
             return
 
-        preparation.response_task.cancel()
-        await asyncio.gather(preparation.response_task, return_exceptions=True)
+        # A real action replaces the speculative informational reply.
+        await self.cancel_prepared_response(preparation)
         if decision.action in self.action_manager.registered_actions and decision.intervention_type is InterventionType.ACT:
             self.start_conversation_response(event, action=decision.action)
             return
@@ -669,7 +694,9 @@ class AutomotiveAgent:
             skill=decision.skill.value, suggestion_type=decision.suggestion_type.value,
             decision_reason=decision.reason, spoken_message=decision.spoken_message,
         )
-        self.start_conversation_response(event, source=decision.response_source)
+        self.start_conversation_response(
+            event, source=decision.response_source, wait_message_claimed=preparation.wait_message_claimed,
+        )
 
     async def handle_notification_decision(
         self, event: CarEvent, decision: NotificationDecision,
@@ -739,9 +766,10 @@ class AutomotiveAgent:
             self.action_manager.handle_decision(decision.action, {})
 
     def start_conversation_response(self, event: CarEvent, action: ActionType | None = None,
-                                     source: ResponseSource = ResponseSource.GENERAL) -> None:
+                                     source: ResponseSource = ResponseSource.GENERAL,
+                                     *, wait_message_claimed: asyncio.Event | None = None) -> None:
         response = (self.action_manager.execute_registered_action(action, event.user_input) if action is not None
-                    else self.prepare_user_response(event, source))
+                    else self.prepare_user_response(event, source, wait_message_claimed=wait_message_claimed))
         response_task = asyncio.create_task(response)
         self.track_voice_response_task(response_task)
 
@@ -757,6 +785,71 @@ class AutomotiveAgent:
                 self.logger.error("[LLM] Voice response failed", error=str(task.exception()))
 
         response_task.add_done_callback(response_done)
+
+    async def generate_wait_message(
+        self, event: CarEvent, source: ResponseSource, ready_task: asyncio.Task,
+        *, response_gate: asyncio.Event | None = None,
+        wait_message_claimed: asyncio.Event | None = None,
+        action_pending: bool = False,
+    ) -> None:
+        generation_task: asyncio.Task | None = None
+        gate_task: asyncio.Task | None = None
+        claimed_here = False
+        delivery_started = False
+        try:
+            if response_gate is not None and not response_gate.is_set():
+                gate_task = asyncio.create_task(response_gate.wait())
+                done, _ = await asyncio.wait({ready_task, gate_task}, return_when=asyncio.FIRST_COMPLETED)
+                if ready_task in done:
+                    self.logger.debug("Wait message skipped", reason="work finished before route confirmation")
+                    return
+            done, _ = await asyncio.wait({ready_task}, timeout=self.opt.wait_message_delay_seconds)
+            if done:
+                self.logger.debug("Wait message skipped", reason="work finished before delay")
+                return
+            if wait_message_claimed is not None:
+                if wait_message_claimed.is_set():
+                    self.logger.debug("Wait message skipped", reason="turn already covered")
+                    return
+                wait_message_claimed.set()
+                claimed_here = True
+            purpose = (
+                "Reviewing the requested action; do not promise execution or success, and do not name an"
+                " information source such as the vehicle manual or live vehicle state."
+                if action_pending
+                else (
+                    "Looking up the vehicle manual; do not claim to have found information yet."
+                    if source is ResponseSource.VEHICLE_MANUAL
+                    else "Reviewing the requested action; do not promise execution or success."
+                )
+            )
+            task = WaitMessageTask(self.opt, self.ollama_backend)
+            self.logger.debug("Starting wait message generation", response_source=source.value)
+            generation_task = asyncio.create_task(task.execute(
+                event.user_input, list(self.conversation_history), purpose=purpose,
+            ))
+            done, _ = await asyncio.wait({ready_task, generation_task}, return_when=asyncio.FIRST_COMPLETED)
+            if ready_task in done:
+                self.logger.debug("Wait message cancelled", reason="work finished during generation")
+                return
+            message = await generation_task
+            if ready_task.done():
+                return
+            chunks: asyncio.Queue[str | None] = asyncio.Queue()
+            chunks.put_nowait(message)
+            chunks.put_nowait(None)
+            delivery_started = True
+            await self.speak_wait_message_chunks(chunks)
+        except Exception as error:
+            self.logger.warning("Wait message generation failed; continuing without it", error=str(error))
+        finally:
+            tasks = [task for task in (generation_task, gate_task) if task is not None]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if claimed_here and not delivery_started and wait_message_claimed is not None:
+                wait_message_claimed.clear()
 
     async def speak_wait_message_chunks(
         self, chunks: asyncio.Queue[str | None]

@@ -3,6 +3,9 @@
         ".venv/bin/python": true,
         ".venv/bin/pytest": true,
         "test": true,
-        "uv": true
+        "uv": true,
+        "git -C /tmp/ppai-kev-upstream": true,
+        "mkdir": true,
+        "cp": true
     }
 }

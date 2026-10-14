@@ -14,7 +14,7 @@ from crewai import Agent, Crew, Process, Task
 
 from config import ConfigAssistant
 from agents.backends.crewai_backend import CrewAIBackend
-from agents.backends.laya_backend import LayaBackend
+from agents.backends.decision_backend import DecisionBackend, KevBackend
 from agents.backends.ollama_backend import OllamaBackend
 
 logger = structlog.get_logger()
@@ -39,7 +39,9 @@ PRE_CLASSIFY_INSTRUCTIONS = """
     It should only signal that you are preparing or checking the request. Do not answer,
     acknowledge the request (for example, "Sure, I can help"), ask a question, request
     make/model/details, or add another sentence. Use at most 12 words. If false, use an
-    empty string.
+    empty string. Since the request may resolve to a directly executed action, never
+    name an information source in the holding utterance: do not mention the manual,
+    the vehicle state or looking anything up.
 
     For informational requests, choose response_source=vehicle_state for live vehicle
     facts, vehicle_manual for this vehicle's features or procedures, and general for
@@ -95,11 +97,11 @@ class PreClassificationUpdate:
     wait_message_chunk: str | None = None
 
 
-class LayaActionRoute(BaseModel):
+class DecisionActionRoute(BaseModel):
     choice: Literal["required", "not_required"]
 
 
-class LayaResponseSource(BaseModel):
+class DecisionResponseSource(BaseModel):
     choice: ResponseSource
 
 
@@ -120,15 +122,14 @@ class RequestPreClassifier(LLMTask[PreClassificationInput, PreClassification, Pr
         opt: ConfigAssistant,
         on_usage: Callable[[str, Any], None],
         *,
-        streaming: bool = True,
-        backend: OllamaBackend | CrewAIBackend | LayaBackend | None = None,
+        backend: OllamaBackend | CrewAIBackend | DecisionBackend | None = None,
     ):
         model_name = opt.pre_classify_model or opt.ollama_model
         self.model = model_name.removeprefix("ollama/")
-        self.streaming = streaming
+        self.streaming = opt.pre_classify_backend == "llm"
         self.on_usage = on_usage
-        self.backend: OllamaBackend | CrewAIBackend | LayaBackend
-        if isinstance(backend, LayaBackend):
+        self.backend: OllamaBackend | CrewAIBackend | DecisionBackend
+        if isinstance(backend, DecisionBackend):
             self.backend = backend
         elif self.streaming:
             self.backend = backend if backend is not None else OllamaBackend(opt, on_usage)
@@ -168,8 +169,8 @@ class RequestPreClassifier(LLMTask[PreClassificationInput, PreClassification, Pr
         *,
         on_update: Callable[[PreClassificationUpdate], None] | None = None,
     ) -> PreClassification:
-        if isinstance(self.backend, LayaBackend):
-            return await self._execute_with_laya(task_input, on_update=on_update)
+        if isinstance(self.backend, DecisionBackend):
+            return await self._execute_with_decision(task_input, on_update=on_update)
         if not self.streaming:
             return await self._execute_with_crew(task_input, on_update=on_update)
         return await self._execute_streaming(task_input, on_update=on_update)
@@ -363,7 +364,7 @@ class RequestPreClassifier(LLMTask[PreClassificationInput, PreClassification, Pr
                     await stream.aclose()
                 except Exception as error:
                     logger.warning(f"Failed to close pre-classification stream: {error}")
-            logger.info(
+            logger.debug(
                 "[LLM] Response generation time",
                 llm_call="direct request pre-classification",
                 model=self.model,
@@ -403,7 +404,7 @@ class RequestPreClassifier(LLMTask[PreClassificationInput, PreClassification, Pr
                 on_update(PreClassificationUpdate(wait_message_chunk=""))
             return PreClassification(requires_action_classification=True)
         finally:
-            logger.info(
+            logger.debug(
                 "[LLM] Response generation time",
                 llm_call="direct request pre-classification",
                 model=self.model,
@@ -411,7 +412,7 @@ class RequestPreClassifier(LLMTask[PreClassificationInput, PreClassification, Pr
                 time_to_first_token_ms=None,
             )
 
-    async def _execute_with_laya(
+    async def _execute_with_decision(
         self,
         task_input: PreClassificationInput,
         *,
@@ -450,23 +451,23 @@ class RequestPreClassifier(LLMTask[PreClassificationInput, PreClassification, Pr
             },
         }
         try:
-            result = await cast(LayaBackend, self.backend).predict({
+            result = await cast(DecisionBackend, self.backend).execute_decision({
                 "user_input": task_input.user_input,
                 "conversation_history": task_input.history[-6:],
                 "pending_message_count": task_input.pending_message_count,
             }, questions, call_name="direct request pre-classification")
             answers = result.get("answers") if isinstance(result, dict) else None
             if not isinstance(answers, dict):
-                raise ValueError("LAYA pre-classification did not return an answers object")
-            route = LayaActionRoute.model_validate(answers.get("requires_action_classification"))
-            source = LayaResponseSource.model_validate(answers.get("response_source"))
+                raise ValueError("Decision pre-classification did not return an answers object")
+            route = DecisionActionRoute.model_validate(answers.get("requires_action_classification"))
+            source = DecisionResponseSource.model_validate(answers.get("response_source"))
             classification = PreClassification(
                 requires_action_classification=route.choice == "required",
                 response_source=source.choice,
                 wait_message="",
             )
         except Exception as error:
-            logger.warning("LAYA pre-classification failed; using full classifier", error=str(error))
+            logger.warning("Decision pre-classification failed; using full classifier", error=str(error))
             classification = PreClassification(requires_action_classification=True)
 
         if on_update is not None:

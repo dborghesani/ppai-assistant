@@ -1,0 +1,98 @@
+"""Source conventions: facts that have one canonical home must not be re-derived elsewhere.
+
+Each rule is (what it guards, regex, files allowed to match). A failure means a second copy of a rule that already has
+a home; call the canonical helper instead (the table in .agents/skills/thermonuclear-code-review/SKILL.md lists them).
+Run: uv run python -m pytest tests/test_conventions.py -q
+"""
+import re
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SCANNED = ("kev", "scripts", "space", "tests", "modal_app.py")
+
+RULES = [
+    ("head.pt is read and written through kev.checkpoint (Meta, read_meta, write_meta)",
+     r"torch\.(load|save)\([^\n]*head\.pt", {"kev/checkpoint.py"}),
+    ("KEV_DTYPE/KEV_MERGE/KEV_ATTN/KEV_LORA_SCALE/KEV_TEMPERATURE/KEV_BACKEND/KEV_CUDA_GRAPHS are read only by LoadOptions.from_env",
+     r"environ(\.get)?\(?\[?\s*\"KEV_(DTYPE|MERGE|ATTN|LORA_SCALE|TEMPERATURE|BACKEND|CUDA_GRAPHS)\"", {"kev/checkpoint.py"}),
+    ("whether a checkpoint is a LoRA adapter or full weights, and where its shards are, is kev.checkpoint.Checkpoint.full / shards (the loader rule)",
+     r"glob\(\"model\*\.safetensors\"\)|adapter_config\.json\"\)\.exists\(\)", {"kev/checkpoint.py"}),
+    ("a checkpoint becomes a model only through kev.checkpoint (Checkpoint.load picks the torch or MLX implementation)",
+     r"MLXDecisionModel\(|merge_lora\(", {"kev/checkpoint.py", "kev/mlx_model.py", "tests/test_mlx.py"}),
+    ("option keys come from kev.api.question_keys",
+     r"\[\s*\"false\"\s*,\s*\"true\"\s*\]|\[str\(i\) for i in range\(len\(", {"kev/api.py", "tests/test_unit.py"}),   # the unit test pins the contract
+    ("the training context is kev.model.MAX_STATE/MAX_BRANCH/MAX_PACKED, lifted only through kev.model.training_context (kev.suite.CONTEXT in manifests), and kev.model.fits",
+     r"(?<![\w.])(>|<=|>=|<)\s*2048\b|\b2048\s*(<|>)|max_(branch|state|packed)\"?\s*[=:]\s*\d{3,}", {"kev/model.py"}),
+    ("the serving / long-state limits (SERVE_MAX_*, ROW_PASS_TOKENS, MAX_TRAIN_STATE) and the pre-64k aliases the frozen suites' builders "
+     "rebuild byte for byte with (SERVE_MAX_*_8K, MAX_TRAIN_STATE_8K) are defined only in kev.model",
+     r"^\s*(SERVE_MAX_(STATE|BRANCH|PACKED)|ROW_PASS_TOKENS|MAX_TRAIN_STATE)(_8K)?\s*(=|,[^\n=]*=)|(?<![\w.])7552\b", {"kev/model.py"}),
+    ("a request is admitted to the serving context (state refused over SERVE_MAX_STATE unless truncation is opted into, "
+     "question rows over SERVE_MAX_BRANCH refused) only by kev.model.admit, which kev.serve and the Space call",
+     r"max_state=SERVE_MAX_STATE|max_branch=SERVE_MAX_BRANCH", {"kev/model.py"}),
+    ("the serving contexts manifests record (SERVING_CONTEXT, and SERVING_CONTEXT_8K for the suites frozen before 64k states) are defined only in kev.suite",
+     r"^\s*SERVING_CONTEXT(_8K)?\s*=", {"kev/suite.py"}),
+    ("text files are read and written as UTF-8 (kev.suite.read_json/read_jsonl/write_json/write_jsonl, or an explicit encoding=); "
+     "the platform locale must never decide how a frozen partition is decoded (issue #12)",
+     r"\.read_text\(\)|\.write_text\((?![^\n]*encoding=)|json\.loads?\(open\(|encoding=None|(?<![\w.])open\((?![^\n]*encoding=)(?![^\n]*\"[rwax]b\")", {"kev/suite.py"}),
+    ("suite manifests are read through kev.suite.read_manifest",
+     r"manifest\.json\"\)\.read_text\(\)", {"kev/suite.py"}),
+    ("device selection, synchronize and empty_cache go through kev.device (the Space is a CUDA-only one-off)",
+     r"is_available\(\) else|torch\.(mps|cuda)\.(synchronize|empty_cache|current_allocated_memory|max_memory_allocated)\(", {"kev/device.py", "space/app.py"}),
+    ("the isolation sibling probe is kev.experiment.ISOLATION_PROBE (fp32 mechanism check and served isolation read the same question)",
+     r"CRANE-9274", {"kev/experiment.py"}),
+    ("which partitions stay out of git is kev.suite.GIT_LIMIT",
+     r"10 \* 1024 \* 1024", {"kev/suite.py"}),
+    ("the pinned Qwen3.5 tokenizer suite builders admit records under is kev.suite.ADMISSION_TOKENIZER",
+     r"1001bb4d826a52d1f399e183466143f4da7b741b", {"kev/suite.py", "kev/transfer_v9.py"}),   # transfer_v9 pins every Qwen3.5 base it scores
+    ("a trial's served temperature (fitted on its own development rows), clean rows served with unknowable records kept, and "
+     "the registered paired read (2,000 resamples, seed 0, micro) are kev.rounds.temperature / served_clean / paired",
+     r"development/rows\.json\"\), \[\]\)\[0\]|tempered_row\(raw_row\(recorded\(|SAMPLES = 2000|def (boot|knowable)\(|knowable = lambda",
+     {"kev/rounds.py", "kev/metrics.py"}),   # kev.metrics.served_at is the scored-rows form the helpers build on
+    ("calibration by state-token length is kev.metrics.calibration_by_length (LENGTH_EDGES), and whether a temperature fit set "
+     "shares data with a checkpoint's training is kev.rounds.pool_conflicts (round pools and scripts/calibrate_checkpoint.py alike)",
+     r"\(8192, 16384, 32768, 65536\)|def (pool_conflicts|calibration_by_length)\(|FIT_SPLITS = ", {"kev/metrics.py", "kev/rounds.py"}),
+    ("the kernel set a read's logits depend on (package versions, the DeltaNet kernels transformers bound, TRITON_F32_DEFAULT) "
+     "is kev.predictors.kernel_environment, which report.json and trial provenance both record",
+     r"getclosurevars|environ\.get\(\"TRITON_F32_DEFAULT\"|version\([\"'](triton|flash-linear-attention|causal-conv1d)[\"']\)", {"kev/predictors.py", "tests/test_unit.py"}),   # the unit test pins the contract
+    ("a state's normalised-text hash (text_sha256) is kev.suite.text_digest",
+     r"\.casefold\(\)\.split\(\)\)\.encode\(\)", {"kev/suite.py", "kev/data.py"}),   # kev.suite imports kev.data, so kev.data keeps its inline copy
+]
+
+
+def sources():
+    for entry in SCANNED:
+        path = ROOT / entry
+        yield from (p for p in ([path] if path.is_file() else sorted(path.rglob("*.py"))) if "__pycache__" not in p.parts and p != Path(__file__))
+
+
+def test_private_suites_keep_their_partitions_out_of_git():
+    """A manifest that names its own mirror (kev.suite: a held-out suite) publishes hashes only: no partition in git."""
+    import json, subprocess
+    tracked = set(subprocess.run(["git", "ls-files", "evals"], cwd=ROOT, capture_output=True, text=True, check=True).stdout.split())
+    for manifest in sorted((ROOT / "evals").rglob("manifest.json")):
+        if "mirror" not in json.loads(manifest.read_text(encoding="utf-8")): continue
+        leaked = [f for f in tracked if f.startswith(str(manifest.parent.relative_to(ROOT)) + "/") and f.endswith(".jsonl")]
+        assert not leaked, f"{manifest.parent} names a private mirror but tracks partitions: {leaked}"
+
+
+def test_published_claims_trace_to_committed_evidence():
+    from scripts.verify_claims import verify
+
+    assert verify(ROOT) == []
+
+
+@pytest.mark.parametrize("what,pattern,allowed", RULES, ids=[r[0][:60] for r in RULES])
+def test_single_home(what, pattern, allowed):
+    regex = re.compile(pattern)
+    offenders = []
+    for path in sources():
+        rel = str(path.relative_to(ROOT))
+        if rel in allowed:
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            code = line.split("#", 1)[0]
+            if regex.search(code):
+                offenders.append(f"{rel}:{n}: {line.strip()}")
+    assert not offenders, f"{what}\n" + "\n".join(offenders)

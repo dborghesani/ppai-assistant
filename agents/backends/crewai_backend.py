@@ -7,6 +7,7 @@ from crewai import Crew, LLM
 from pydantic import BaseModel
 
 from config import ConfigAssistant
+from agents.backends.llm_logging import usage_log_fields
 
 Output = TypeVar("Output", bound=BaseModel)
 
@@ -39,12 +40,18 @@ class CrewAIBackend:
         async with self._lock:
             started = time.perf_counter()
             before = self.usage_snapshot()
+            value = None
+            status = "error"
             try:
                 result = await crew.kickoff_async(inputs=inputs)
                 value = getattr(result, "pydantic", None)
                 if not isinstance(value, output):
                     raise ValueError(f"{name} did not return {output.__name__}")
+                status = "completed"
                 return value
+            except asyncio.CancelledError:
+                status = "cancelled"
+                raise
             finally:
                 after = self.usage_snapshot()
                 usage = None
@@ -53,5 +60,11 @@ class CrewAIBackend:
                     if all(value >= 0 for value in delta.values()):
                         usage = delta
                 self.on_usage(name, usage)
-                self.logger.info("[LLM] Task execution time", task=name, model=self.model,
-                                 duration_ms=round((time.perf_counter() - started) * 1000, 2))
+                duration_ms = round((time.perf_counter() - started) * 1000, 2)
+                self.logger.debug("[LLM] Task execution time", task=name, model=self.model,
+                                  duration_ms=duration_ms)
+                self.logger.info(
+                    "[LLM] Call finished", llm_call=name, model=self.model, status=status,
+                    response_text=value.model_dump_json() if isinstance(value, output) else "",
+                    duration_ms=duration_ms, **usage_log_fields(usage, self.opt.context_window_size),
+                )

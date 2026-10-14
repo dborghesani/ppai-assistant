@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 import structlog
 from agents.automotive_agent import AutomotiveAgent
+from agents.backends.decision_backend import DecisionBackend
 from config import ConfigAssistant
 from crewai_core.printer import set_suppress_console_output
 from managers.database_manager import DatabaseManager
@@ -41,6 +42,15 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
+
+
+def configure_logging(level_name: str) -> None:
+    level_name = level_name.upper()
+    if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ValueError("log_level must be DEBUG, INFO, WARNING, ERROR or CRITICAL")
+    level = getattr(logging, level_name)
+    logging.getLogger().setLevel(level)
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(level))
 
 
 def browser_already_running() -> bool:
@@ -175,7 +185,9 @@ def _warmup_ollama_model(
             data=json.dumps(
                 {
                     "model": candidate,
-                    "prompt": "",
+                    "prompt": "Hello",
+                    "raw": True,
+                    "options": {"num_predict": 2, "temperature": 0},
                     "stream": False,
                     "keep_alive": "30m",
                 }
@@ -184,10 +196,13 @@ def _warmup_ollama_model(
             method="POST",
         )
         try:
-            with urlopen(request, timeout=opt.ollama_timeout):
-                logger.info("Ollama model loaded", model=candidate)
+            with urlopen(request, timeout=opt.ollama_timeout) as response:
+                payload = json.loads(response.read())
+                if not isinstance(payload, dict) or payload.get("error"):
+                    raise ValueError("Invalid Ollama warmup response")
+                logger.info("Ollama model warmed up", model=candidate)
             return candidate
-        except (URLError, TimeoutError, OSError) as error:
+        except (URLError, TimeoutError, OSError, ValueError) as error:
             logger.warning("Unable to warm up Ollama model", model=candidate, error=str(error))
 
     return raw_model
@@ -207,16 +222,32 @@ def preload_ollama_models(opt: ConfigAssistant) -> None:
         _warmup_ollama_model(opt, opt.routing_model.removeprefix("ollama/"))
 
     # pre_classify: "llm" streams via Ollama, "crew" uses CrewAIBackend with the
-    # same pre-classify model; "laya" runs its own checkpoint and keeps Ollama idle.
+    # same pre-classify model; "decision" runs its own checkpoint (laya or kev)
+    # and keeps Ollama idle.
     if opt.pre_classify_backend in {"llm", "crew"}:
         if opt.pre_classify_model:
             _warmup_ollama_model(opt, opt.pre_classify_model.removeprefix("ollama/"))
     else:
-        _stop_ollama_model(opt)
+        active_models = {opt.ollama_model.removeprefix("ollama/")}
+        if opt.routing_backend in {"llm", "crew"} and opt.routing_model:
+            active_models.add(opt.routing_model.removeprefix("ollama/"))
+        if (opt.pre_classify_model or "").removeprefix("ollama/") not in active_models:
+            _stop_ollama_model(opt)
+
+
+async def warmup_decision_models(agent: AutomotiveAgent) -> None:
+    warmed: set[int] = set()
+    for backend in (agent.telemetry_router.backend, agent.request_pre_classifier.backend):
+        if isinstance(backend, DecisionBackend) and id(backend) not in warmed:
+            logger.info("Warming up decision backend", backend=type(backend).__name__)
+            await backend.warmup()
+            warmed.add(id(backend))
+            logger.info("Decision backend ready", backend=type(backend).__name__)
 
 
 async def main(opt: ConfigAssistant):
 
+    configure_logging(opt.log_level)
     logger.info("Starting Automotive AI Agent...")
 
     set_suppress_console_output(not opt.crewai_verbose)
@@ -240,6 +271,7 @@ async def main(opt: ConfigAssistant):
     database_manager.app_start_timestamp = datetime.now(timezone.utc).isoformat()  # type: ignore[assignment]
 
     agent = AutomotiveAgent(tts_manager=None, opt=opt)
+    await warmup_decision_models(agent)
     if agent.manual_manager is not None:
         await agent.manual_manager.prepare()
 

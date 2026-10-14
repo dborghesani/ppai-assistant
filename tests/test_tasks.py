@@ -31,20 +31,20 @@ def test_laya_router_preserves_multiple_task_routes(selected):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.tasks.routing import TelemetryRouter, RoutingInput
     from config import ConfigAssistant
 
     answers = {task_type.value: {"choice": "route" if task_type in selected else "skip"}
                for task_type in TelemetryRouter.TASK_CRITERIA}
     backend = Mock(spec=LayaBackend)
-    backend.predict = AsyncMock(return_value={"answers": answers})
+    backend.execute_decision = AsyncMock(return_value={"answers": answers})
     router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
     changed = {"DriverPhysicalState.fatigue_level": "Fatigue level is high.",
                "DriverEmotionState.angry": "Anger level is high."}
     route = asyncio.run(router.execute(RoutingInput(changed, [{"role": "user", "content": "Old conversation"}])))
     assert route.tasks == selected
-    state, questions = backend.predict.await_args.args
+    state, questions = backend.execute_decision.await_args.args
     assert state == {"changed_facts": changed}
     assert set(questions) == {task_type.value for task_type in TelemetryRouter.TASK_CRITERIA}
     assert all(question["type"] == "choice" for question in questions.values())
@@ -59,12 +59,12 @@ def test_laya_router_rejects_invalid_or_incomplete_answers(result):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.tasks.routing import TelemetryRouter, RoutingInput
     from config import ConfigAssistant
 
     backend = Mock(spec=LayaBackend)
-    backend.predict = AsyncMock(return_value=result)
+    backend.execute_decision = AsyncMock(return_value=result)
     router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
     with pytest.raises(ValueError):
         asyncio.run(router.execute(RoutingInput({"VehicleMotion.speed": "Speed is high."})))
@@ -74,15 +74,15 @@ def test_laya_router_skips_inference_for_empty_changes():
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.tasks.routing import TelemetryRouter, RoutingInput
     from config import ConfigAssistant
 
     backend = Mock(spec=LayaBackend)
-    backend.predict = AsyncMock()
+    backend.execute_decision = AsyncMock()
     router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
     assert asyncio.run(router.execute(RoutingInput({}))).tasks == []
-    backend.predict.assert_not_awaited()
+    backend.execute_decision.assert_not_awaited()
 
 
 @pytest.mark.parametrize("confirmed", [True, False, None])
@@ -108,13 +108,19 @@ def test_crewai_backend_executes_supplied_crew_and_rejects_wrong_output():
 
     usage = Mock()
     backend = CrewAIBackend(ConfigAssistant(), usage)
+    backend.logger = Mock()
     crew = SimpleNamespace(kickoff_async=AsyncMock(return_value=SimpleNamespace(pydantic=Result(value="ok"))))
     assert asyncio.run(backend.run(crew, {"input": "data"}, Result, "test")).value == "ok"
+    backend.logger.info.assert_called_once()
+    assert backend.logger.info.call_args.kwargs["response_text"] == '{"value":"ok"}'
+    assert backend.logger.info.call_args.kwargs["status"] == "completed"
+    assert "ttft_ms" not in backend.logger.info.call_args.kwargs
     crew.kickoff_async.assert_awaited_once_with(inputs={"input": "data"})
     crew.kickoff_async.return_value = SimpleNamespace(pydantic=None)
     with pytest.raises(ValueError, match="did not return"):
         asyncio.run(backend.run(crew, {}, Result, "test"))
     assert usage.call_count == 2
+    assert backend.logger.info.call_args.kwargs["status"] == "error"
 
 
 def test_ollama_backend_closes_stream_and_reports_usage_on_early_exit():
@@ -134,6 +140,7 @@ def test_ollama_backend_closes_stream_and_reports_usage_on_early_exit():
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock(return_value=stream))))
     usage = Mock()
     backend = OllamaBackend(ConfigAssistant(), usage, client=client)
+    backend.logger = Mock()
 
     async def check():
         response = backend.stream(call_name="test", model="test", messages=[])
@@ -143,6 +150,118 @@ def test_ollama_backend_closes_stream_and_reports_usage_on_early_exit():
     asyncio.run(check())
     stream.close.assert_awaited_once()
     usage.assert_called_once_with("test", None)
+    backend.logger.info.assert_called_once()
+    assert backend.logger.info.call_args.kwargs["status"] == "cancelled"
+    assert backend.logger.info.call_args.kwargs["response_text"] == "Hi"
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_llm_call_logs_one_info_summary_with_output_timing_and_usage(streaming):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.automotive_agent import AutomotiveAgent
+    from agents.backends.ollama_backend import OllamaBackend
+    from config import ConfigAssistant
+
+    usage = SimpleNamespace(prompt_tokens=10, completion_tokens=4, total_tokens=14)
+    logger = Mock()
+    agent = AutomotiveAgent.__new__(AutomotiveAgent)
+    agent.opt = ConfigAssistant()
+    agent.logger = logger
+
+    class Stream:
+        close = AsyncMock()
+
+        async def __aiter__(self):
+            for text in ("[[tone:calm]]", "Hello."):
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))], usage=None)
+            yield SimpleNamespace(choices=[], usage=usage)
+
+    response = Stream() if streaming else SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="Hello."))], usage=usage,
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock(return_value=response))))
+    backend = OllamaBackend(agent.opt, agent.log_llm_usage, client=client)
+    backend.logger = logger
+
+    async def check():
+        if streaming:
+            async for _ in backend.stream(call_name="test", model="test-model", messages=[]):
+                pass
+        else:
+            await backend.complete(call_name="test", model="test-model", messages=[])
+
+    asyncio.run(check())
+    logger.info.assert_called_once()
+    assert logger.info.call_args.args == ("[LLM] Call finished",)
+    fields = logger.info.call_args.kwargs
+    assert fields["llm_call"] == "test"
+    assert fields["model"] == "test-model"
+    assert fields["response_text"] == "Hello."
+    assert fields["status"] == "completed"
+    assert fields["available"] is True
+    assert fields["prompt_tokens"] == 10
+    assert fields["completion_tokens"] == 4
+    assert fields["context_tokens"] == fields["total_tokens"] == 14
+    assert fields["context_window_tokens"] == 4096
+    assert fields["duration_ms"] >= 0
+    assert ("ttft_ms" in fields) == streaming
+    if streaming:
+        assert fields["duration_ms"] >= fields["ttft_ms"] >= 0
+        response.close.assert_awaited_once()
+    debug_events = [call.args[0] for call in logger.debug.call_args_list]
+    assert "[LLM] Token usage" in debug_events
+    assert "[LLM] Response generation time" in debug_events
+    assert ("[LLM] Time to first token" in debug_events) == streaming
+
+
+def test_empty_llm_stream_summary_has_no_invented_ttft():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.ollama_backend import OllamaBackend
+    from config import ConfigAssistant
+
+    class Stream:
+        close = AsyncMock()
+
+        async def __aiter__(self):
+            yield SimpleNamespace(choices=[], usage=None)
+
+    stream = Stream()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock(return_value=stream))))
+    backend = OllamaBackend(ConfigAssistant(), Mock(), client=client)
+    backend.logger = Mock()
+
+    async def check():
+        async for _ in backend.stream(call_name="empty", model="test", messages=[]):
+            pass
+
+    asyncio.run(check())
+    backend.logger.info.assert_called_once()
+    fields = backend.logger.info.call_args.kwargs
+    assert "ttft_ms" not in fields
+    assert fields["response_text"] == ""
+    assert fields["available"] is False
+
+
+def test_failed_llm_call_logs_error_summary_and_preserves_exception():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.ollama_backend import OllamaBackend
+    from config import ConfigAssistant
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=AsyncMock(side_effect=RuntimeError("backend unavailable")),
+    )))
+    backend = OllamaBackend(ConfigAssistant(), Mock(), client=client)
+    backend.logger = Mock()
+    with pytest.raises(RuntimeError, match="backend unavailable"):
+        asyncio.run(backend.complete(call_name="failed", model="test", messages=[]))
+    backend.logger.info.assert_called_once()
+    assert backend.logger.info.call_args.kwargs["status"] == "error"
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -185,14 +304,14 @@ def test_preclassifier_uses_injected_backend(streaming):
 def test_preclassifier_with_laya_preserves_contract_and_updates(required, source):
     import asyncio
     from unittest.mock import AsyncMock, Mock
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.tasks.pre_classify import (
         RequestPreClassifier, PreClassificationInput, PreClassificationUpdate, ResponseSource,
     )
     from config import ConfigAssistant
 
     backend = Mock(spec=LayaBackend)
-    backend.predict = AsyncMock(return_value={"answers": {
+    backend.execute_decision = AsyncMock(return_value={"answers": {
         "requires_action_classification": {"choice": "required" if required else "not_required"},
         "response_source": {"choice": source},
     }})
@@ -207,7 +326,7 @@ def test_preclassifier_with_laya_preserves_contract_and_updates(required, source
         PreClassificationUpdate(requires_action_classification=required),
         PreClassificationUpdate(response_source=ResponseSource(source)),
     ] + ([PreClassificationUpdate(wait_message_chunk="")] if required else [])
-    state, questions = backend.predict.await_args.args
+    state, questions = backend.execute_decision.await_args.args
     assert state == {"user_input": "Current turn", "conversation_history": history[-6:], "pending_message_count": 2}
     assert set(questions) == {"requires_action_classification", "response_source"}
     assert set(questions["response_source"]["criteria"]) == {"general", "vehicle_state", "vehicle_manual"}
@@ -223,12 +342,12 @@ def test_preclassifier_with_laya_preserves_contract_and_updates(required, source
 def test_preclassifier_with_laya_invalid_answers_fall_back_before_updates(result):
     import asyncio
     from unittest.mock import AsyncMock, Mock
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.tasks.pre_classify import RequestPreClassifier, PreClassificationInput
     from config import ConfigAssistant
 
     backend = Mock(spec=LayaBackend)
-    backend.predict = AsyncMock(return_value=result)
+    backend.execute_decision = AsyncMock(return_value=result)
     task = RequestPreClassifier(ConfigAssistant(), Mock(), backend=backend)
     updates = []
     output = asyncio.run(task.execute(PreClassificationInput("Ambiguous turn", [], 0), on_update=updates.append))
@@ -237,22 +356,22 @@ def test_preclassifier_with_laya_invalid_answers_fall_back_before_updates(result
     assert updates[0].requires_action_classification is True
 
 
-@pytest.mark.parametrize("routing_backend", ["llm", "laya"])
+@pytest.mark.parametrize("routing_backend", ["llm", "decision"])
 def test_agent_reuses_laya_backend_when_models_match(routing_backend):
     from unittest.mock import AsyncMock, Mock, patch
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.automotive_agent import AutomotiveAgent
     from config import ConfigAssistant
 
-    opt = ConfigAssistant(routing_backend=routing_backend, pre_classify_backend="laya")
+    opt = ConfigAssistant(routing_backend=routing_backend, pre_classify_backend="decision")
     backend = Mock(spec=LayaBackend)
-    backend.predict = AsyncMock()
+    backend.execute_decision = AsyncMock()
     with patch("agents.automotive_agent.LayaBackend", return_value=backend) as load:
         agent = AutomotiveAgent(opt)
     assert agent.request_pre_classifier.backend is backend
     assert all(task.backend is agent.crewai_backend for task in agent.tasks.values())
     assert load.call_count == 1
-    if routing_backend == "laya":
+    if routing_backend == "decision":
         assert agent.telemetry_router.backend is backend
         assert agent.telemetry_router.backend is agent.request_pre_classifier.backend
     else:
@@ -269,27 +388,478 @@ def test_agent_rejects_unknown_preclassification_backend():
 
 def test_agent_keeps_distinct_laya_checkpoints_separate():
     from unittest.mock import AsyncMock, Mock, patch
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.automotive_agent import AutomotiveAgent
     from config import ConfigAssistant
 
-    opt = ConfigAssistant(routing_backend="laya", pre_classify_backend="laya",
+    opt = ConfigAssistant(routing_backend="decision", pre_classify_backend="decision",
                           routing_model="router-model", pre_classify_model="request-model")
     router_backend, request_backend = Mock(spec=LayaBackend), Mock(spec=LayaBackend)
-    router_backend.predict = AsyncMock()
-    request_backend.predict = AsyncMock()
+    router_backend.execute_decision = AsyncMock()
+    request_backend.execute_decision = AsyncMock()
     with patch("agents.automotive_agent.LayaBackend", side_effect=[router_backend, request_backend]) as load:
         agent = AutomotiveAgent(opt)
     assert agent.telemetry_router.backend is router_backend
     assert agent.request_pre_classifier.backend is request_backend
-    assert [call.args[0] for call in load.call_args_list] == ["router-model", "request-model"]
+    # The laya engine uses the shared laya_model checkpoint; both backends are
+    # still distinct instances.
+    assert [call.args[0] for call in load.call_args_list] == [None, None]
 
 
-def test_laya_preclassification_uses_agent_holding_phrase_fallback():
+@pytest.mark.parametrize("message,valid", [
+    ("Controllo il manuale.", True),
+    ("I'm currently checking your vehicle's manual for the cruise control activation steps.", True),
+    ("A" * 120, True),
+    (" ".join(["ok"] * 20), True),
+    ("", False),
+    ("I'm checking the vehicle manual for the cruise control instructions so I can give you the right steps for your particular vehicle.", True),
+    (" ".join(["ok"] * 21), True),
+    ("Va bene?", False),
+    ("First\nSecond", False),
+])
+def test_wait_message_task_generates_and_validates_short_acknowledgement(message, valid):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock
-    from agents.backends.laya_backend import LayaBackend
+    from agents.tasks.conversation import WaitMessageTask
+    from config import ConfigAssistant
+
+    class Stream:
+        aclose = AsyncMock()
+
+        async def __aiter__(self):
+            for text in (None, message[:len(message) // 2], message[len(message) // 2:]):
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
+            yield SimpleNamespace(choices=[], usage=None)
+
+    stream = Stream()
+    backend = SimpleNamespace(stream=Mock(return_value=stream))
+    task = WaitMessageTask(ConfigAssistant(), backend)
+    request = task.execute("Come si attiva il cruise control?", [], purpose="vehicle manual lookup")
+    if valid:
+        assert asyncio.run(request) == message
+    else:
+        with pytest.raises(ValueError, match="Invalid wait message"):
+            asyncio.run(request)
+    assert backend.stream.call_args.kwargs["call_name"] == "wait message"
+    assert backend.stream.call_args.kwargs["reasoning_effort"] == "none"
+    prompt = backend.stream.call_args.kwargs["messages"][0]["content"]
+    assert "characters" not in prompt
+    assert "4-10" not in prompt
+    stream.aclose.assert_awaited_once()
+
+
+def make_wait_message_backend(message="Controllo la richiesta."):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    async def chunks(**kwargs):
+        for text in (message[:len(message) // 2], message[len(message) // 2:]):
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
+        yield SimpleNamespace(choices=[], usage=None)
+
+    return SimpleNamespace(stream=Mock(side_effect=chunks))
+
+
+def test_streaming_wait_message_logs_ttft_in_final_summary():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.ollama_backend import OllamaBackend
+    from agents.tasks.conversation import WaitMessageTask
+    from config import ConfigAssistant
+
+    class Stream:
+        close = AsyncMock()
+
+        async def __aiter__(self):
+            yield SimpleNamespace(choices=[], usage=None)
+            for text in ("Controllo ", "il manuale."):
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))], usage=None)
+            yield SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=10, completion_tokens=4, total_tokens=14))
+
+    stream = Stream()
+    create = AsyncMock(return_value=stream)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    opt = ConfigAssistant()
+    usage = Mock()
+    backend = OllamaBackend(opt, usage, client=client)
+    backend.logger = Mock()
+    task = WaitMessageTask(opt, backend)
+    assert asyncio.run(task.execute("Cruise control?", [], purpose="manual lookup")) == "Controllo il manuale."
+    assert create.await_args.kwargs["stream"] is True
+    assert create.await_args.kwargs["stream_options"] == {"include_usage": True}
+    backend.logger.info.assert_called_once()
+    summary = backend.logger.info.call_args.kwargs
+    assert summary["llm_call"] == "wait message"
+    assert summary["response_text"] == "Controllo il manuale."
+    assert summary["status"] == "completed"
+    assert summary["duration_ms"] >= summary["ttft_ms"] >= 0
+    assert summary["total_tokens"] == 14
+    stream.close.assert_awaited_once()
+    usage.assert_called_once()
+
+
+@pytest.mark.parametrize("delay", [0, 0.1, 0.75])
+def test_wait_message_uses_configured_delay(delay):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from omegaconf import OmegaConf
+    from agents.tasks.pre_classify import ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = OmegaConf.to_object(OmegaConf.merge(
+            OmegaConf.structured(ConfigAssistant),
+            OmegaConf.from_dotlist([f"wait_message_delay_seconds={delay}"]),
+        ))
+        ready = asyncio.create_task(asyncio.Event().wait())
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Cruise control?", [], "Cruise control?")
+        try:
+            with patch("agents.automotive_agent.asyncio.wait", new_callable=AsyncMock,
+                       return_value=({ready}, set())) as wait:
+                await agent.generate_wait_message(event, ResponseSource.VEHICLE_MANUAL, ready)
+            wait.assert_awaited_once_with({ready}, timeout=delay)
+        finally:
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+def test_agent_rejects_negative_wait_message_delay():
+    from agents.automotive_agent import AutomotiveAgent
+    from config import ConfigAssistant
+
+    with pytest.raises(ValueError, match="wait_message_delay_seconds"):
+        AutomotiveAgent(ConfigAssistant(wait_message_delay_seconds=-0.1))
+
+
+def test_slow_manual_lookup_speaks_llm_acknowledgement_before_final_response():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.tasks.pre_classify import ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = ConfigAssistant()
+        agent.conversation_history = []
+        agent.opt.wait_message_delay_seconds = 0
+        lookup_released, lookup_done = asyncio.Event(), asyncio.Event()
+        speech_started, speech_released = asyncio.Event(), asyncio.Event()
+        agent.ollama_backend = make_wait_message_backend("Controllo il manuale.")
+
+        async def lookup(*args):
+            await lookup_released.wait()
+            lookup_done.set()
+            return "manual instructions", "manual passages"
+
+        async def speak(message):
+            speech_started.set()
+            lookup_released.set()
+            await speech_released.wait()
+
+        agent.response_context_providers = {ResponseSource.VEHICLE_MANUAL: lookup}
+        agent.tts_manager = SimpleNamespace(speak=AsyncMock(side_effect=speak))
+        agent.on_response, agent.on_response_update = Mock(), Mock()
+        agent.stream_user_response = AsyncMock()
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Cruise control?", [], "Cruise control?")
+        response = asyncio.create_task(agent.prepare_user_response(event, ResponseSource.VEHICLE_MANUAL))
+        try:
+            await asyncio.wait_for(speech_started.wait(), 1)
+            await asyncio.wait_for(lookup_done.wait(), 1)
+            agent.stream_user_response.assert_not_awaited()
+            speech_released.set()
+            await asyncio.wait_for(response, 1)
+        finally:
+            response.cancel()
+            await asyncio.gather(response, return_exceptions=True)
+        agent.tts_manager.speak.assert_awaited_once_with("Controllo il manuale.")
+        agent.on_response.assert_called_once_with("Controllo il manuale.\n")
+        assert agent.conversation_history == []
+        assert agent.stream_user_response.await_args.kwargs["response_context"] == (
+            "manual instructions", "manual passages",
+        )
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("outcome", ["ready", "cancel", "error"])
+def test_manual_lookup_cleans_up_pending_wait_generation(outcome):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.tasks.pre_classify import ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = ConfigAssistant()
+        agent.conversation_history = []
+        agent.opt.wait_message_delay_seconds = 0
+        lookup_released, lookup_cancelled = asyncio.Event(), asyncio.Event()
+        generation_started, generation_cancelled = asyncio.Event(), asyncio.Event()
+        claimed = asyncio.Event()
+
+        async def generate(**kwargs):
+            generation_started.set()
+            try:
+                yield SimpleNamespace(choices=[])
+                await asyncio.Future()
+            finally:
+                generation_cancelled.set()
+
+        async def lookup(*args):
+            try:
+                await lookup_released.wait()
+                if outcome == "error":
+                    raise RuntimeError("lookup failed")
+                return "", ""
+            finally:
+                lookup_cancelled.set()
+
+        agent.ollama_backend = SimpleNamespace(stream=Mock(side_effect=generate))
+        agent.response_context_providers = {ResponseSource.VEHICLE_MANUAL: lookup}
+        agent.speak_wait_message_chunks = AsyncMock()
+        agent.stream_user_response = AsyncMock()
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Cruise control?", [], "Cruise control?")
+        response = asyncio.create_task(agent.prepare_user_response(
+            event, ResponseSource.VEHICLE_MANUAL, wait_message_claimed=claimed,
+        ))
+        try:
+            await asyncio.wait_for(generation_started.wait(), 1)
+            if outcome == "cancel":
+                response.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await response
+            else:
+                lookup_released.set()
+                if outcome == "error":
+                    with pytest.raises(RuntimeError, match="lookup failed"):
+                        await asyncio.wait_for(response, 1)
+                else:
+                    await asyncio.wait_for(response, 1)
+            assert generation_cancelled.is_set()
+            assert lookup_cancelled.is_set()
+            assert not claimed.is_set()
+            agent.speak_wait_message_chunks.assert_not_awaited()
+            assert agent.stream_user_response.await_count == (1 if outcome == "ready" else 0)
+        finally:
+            response.cancel()
+            await asyncio.gather(response, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+def test_unspoken_wait_does_not_suppress_later_manual_acknowledgement():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.tasks.pre_classify import ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = ConfigAssistant()
+        agent.conversation_history = []
+        agent.opt.wait_message_delay_seconds = 0
+        generation_started, generation_closed = asyncio.Event(), asyncio.Event()
+        first_ready, second_ready = asyncio.Event(), asyncio.Event()
+        claimed = asyncio.Event()
+
+        async def interrupted_stream():
+            try:
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="Controllo"))])
+                generation_started.set()
+                await asyncio.Future()
+            finally:
+                generation_closed.set()
+
+        agent.ollama_backend = SimpleNamespace(stream=Mock(side_effect=[
+            interrupted_stream(), make_wait_message_backend("Consulto il manuale.").stream(),
+        ]))
+        agent.speak_wait_message_chunks = AsyncMock()
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Cruise control?", [], "Cruise control?")
+        first_work = asyncio.create_task(first_ready.wait())
+        second_work = asyncio.create_task(second_ready.wait())
+        first_wait = asyncio.create_task(agent.generate_wait_message(
+            event, ResponseSource.GENERAL, first_work, wait_message_claimed=claimed,
+        ))
+        try:
+            await asyncio.wait_for(generation_started.wait(), 1)
+            assert claimed.is_set()
+            first_ready.set()
+            await asyncio.wait_for(first_wait, 1)
+            assert generation_closed.is_set()
+            assert not claimed.is_set()
+            agent.speak_wait_message_chunks.assert_not_awaited()
+            await asyncio.wait_for(agent.generate_wait_message(
+                event, ResponseSource.VEHICLE_MANUAL, second_work, wait_message_claimed=claimed,
+            ), 1)
+            assert claimed.is_set()
+            assert agent.ollama_backend.stream.call_count == 2
+            agent.speak_wait_message_chunks.assert_awaited_once()
+        finally:
+            for task in (first_wait, first_work, second_work):
+                task.cancel()
+            await asyncio.gather(first_wait, first_work, second_work, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+def test_action_and_manual_wait_share_one_generation_per_turn():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from agents.tasks.pre_classify import ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = ConfigAssistant()
+        agent.conversation_history = []
+        agent.opt.wait_message_delay_seconds = 0
+        agent.ollama_backend = make_wait_message_backend()
+        agent.speak_wait_message_chunks = AsyncMock()
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Cruise control?", [], "Cruise control?")
+        ready = asyncio.create_task(asyncio.Event().wait())
+        claimed = asyncio.Event()
+        gate = asyncio.Event()
+        try:
+            await agent.generate_wait_message(event, ResponseSource.GENERAL, ready, wait_message_claimed=claimed)
+            gate.set()
+            await agent.generate_wait_message(
+                event, ResponseSource.VEHICLE_MANUAL, ready,
+                response_gate=gate, wait_message_claimed=claimed,
+            )
+            agent.ollama_backend.stream.assert_called_once()
+            agent.speak_wait_message_chunks.assert_awaited_once()
+            await agent.generate_wait_message(
+                event, ResponseSource.VEHICLE_MANUAL, ready, wait_message_claimed=asyncio.Event(),
+            )
+            assert agent.ollama_backend.stream.call_count == 2
+        finally:
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("mode", ["informational", "classified", "failed"])
+def test_manual_response_does_not_require_a_separate_wait_task(mode):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from agents.automotive_agent import DirectInputPreparation
+    from agents.tasks.pre_classify import PreClassification, ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = ConfigAssistant()
+        agent.conversation_history = []
+        decision = agent.tasks[TaskType.WELLBEING].execute.return_value.model_copy(
+            update={"response_source": ResponseSource.VEHICLE_MANUAL},
+        )
+
+        async def classify():
+            if mode == "failed":
+                raise RuntimeError("classification failed")
+            return decision
+
+        classifier = asyncio.create_task(classify()) if mode != "informational" else None
+        preparation = DirectInputPreparation(
+            pre_classification=PreClassification(
+                requires_action_classification=mode != "informational",
+                response_source=ResponseSource.VEHICLE_MANUAL,
+            ), classifier_task=classifier, wait_task=None, response_task=None, response_gate=asyncio.Event(),
+        )
+        agent.command_task = SimpleNamespace()
+        agent.response_context_providers = {ResponseSource.VEHICLE_MANUAL: AsyncMock(return_value=("", "manual"))}
+        agent.generate_wait_message = AsyncMock()
+        agent.stream_user_response = AsyncMock()
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Cruise control?", [], "Cruise control?")
+        preparation.response_task = asyncio.create_task(agent.prepare_user_response(
+            event, ResponseSource.VEHICLE_MANUAL, response_gate=preparation.response_gate,
+            wait_message_claimed=preparation.wait_message_claimed,
+        ))
+        agent.preclassify_direct_input = AsyncMock(return_value=preparation)
+        try:
+            if mode == "failed":
+                with pytest.raises(RuntimeError, match="classification failed"):
+                    await agent.handle_direct_user_input(event)
+                assert preparation.response_task.done()
+            else:
+                await agent.handle_direct_user_input(event)
+                await asyncio.wait_for(preparation.response_task, 1)
+                assert preparation.response_gate.is_set()
+                agent.stream_user_response.assert_awaited_once()
+                agent.generate_wait_message.assert_awaited_once()
+        finally:
+            tasks = [task for task in (classifier, preparation.response_task) if task is not None]
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+def test_wait_message_generation_failure_is_nonfatal():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.tasks.pre_classify import ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = ConfigAssistant()
+        agent.conversation_history = []
+        agent.opt.wait_message_delay_seconds = 0
+        agent.ollama_backend = SimpleNamespace(stream=Mock(side_effect=RuntimeError("LLM unavailable")))
+        agent.speak_wait_message_chunks = AsyncMock()
+        claimed = asyncio.Event()
+        ready = asyncio.create_task(asyncio.Event().wait())
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Open windows", [], "Open windows")
+        try:
+            await asyncio.wait_for(agent.generate_wait_message(
+                event, ResponseSource.GENERAL, ready, wait_message_claimed=claimed,
+            ), 1)
+            assert not ready.done()
+            assert not claimed.is_set()
+            agent.speak_wait_message_chunks.assert_not_awaited()
+            agent.logger.warning.assert_called_once()
+        finally:
+            ready.cancel()
+            await asyncio.gather(ready, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("slow_classifier", [False, True])
+def test_decision_preclassification_uses_llm_wait_only_for_slow_classifier(slow_classifier):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.decision_backend import LayaBackend
     from agents.tasks.pre_classify import RequestPreClassifier
     from config import ConfigAssistant
     from data.events import CarEvent, EventName
@@ -299,15 +869,24 @@ def test_laya_preclassification_uses_agent_holding_phrase_fallback():
         agent = make_routed_agent([])
         agent.opt = ConfigAssistant()
         agent.conversation_history = []
+        agent.opt.wait_message_delay_seconds = 0
+        classifier_released = asyncio.Event()
+        agent.ollama_backend = make_wait_message_backend()
         agent.action_manager.registered_action_options = ""
         agent.action_manager.registered_action_guidance = ""
+
+        async def classify(inputs):
+            if slow_classifier:
+                await classifier_released.wait()
+            return agent.tasks[TaskType.WELLBEING].execute.return_value
+
         agent.command_task = SimpleNamespace(
             direct_action_options="vehicle options", vehicle_action_guidance="vehicle reference",
             decision_options={"skill_options": "skills", "tone_options": "tones"},
-            execute=AsyncMock(return_value=agent.tasks[TaskType.WELLBEING].execute.return_value),
+            execute=AsyncMock(side_effect=classify),
         )
         backend = Mock(spec=LayaBackend)
-        backend.predict = AsyncMock(return_value={"answers": {
+        backend.execute_decision = AsyncMock(return_value={"answers": {
             "requires_action_classification": {"choice": "required"},
             "response_source": {"choice": "general"},
         }})
@@ -318,20 +897,60 @@ def test_laya_preclassification_uses_agent_holding_phrase_fallback():
             while (chunk := await chunks.get()) is not None:
                 if chunk.strip():
                     wait_messages.append(chunk)
+                    classifier_released.set()
 
-        async def prepare_response(event, source, *, response_gate):
+        async def prepare_response(event, source, *, response_gate, wait_message_claimed):
             await response_gate.wait()
 
         agent.speak_wait_message_chunks = AsyncMock(side_effect=speak_wait)
         agent.prepare_user_response = AsyncMock(side_effect=prepare_response)
         event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Open the windows", [], "Open the windows")
         preparation = await agent.preclassify_direct_input(event, 0)
-        await preparation.classifier_task
-        await preparation.wait_task
-        assert wait_messages == ["Hm."]
+        await asyncio.wait_for(preparation.classifier_task, 1)
+        await asyncio.wait_for(preparation.wait_task, 1)
+        assert wait_messages == (["Controllo la richiesta."] if slow_classifier else [])
+        assert agent.ollama_backend.stream.call_count == (1 if slow_classifier else 0)
         assert preparation.pre_classification.wait_message == ""
         preparation.response_gate.set()
         await preparation.response_task
+
+    asyncio.run(check())
+
+
+def test_speculative_manual_wait_message_does_not_speak_before_route_confirmation():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from agents.tasks.pre_classify import ResponseSource
+    from config import ConfigAssistant
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    async def check():
+        agent = make_routed_agent([])
+        agent.opt = ConfigAssistant()
+        agent.conversation_history = []
+        agent.opt.wait_message_delay_seconds = 0
+        agent.ollama_backend = make_wait_message_backend()
+        agent.speak_wait_message_chunks = AsyncMock()
+        lookup_released = asyncio.Event()
+        ready = asyncio.create_task(lookup_released.wait())
+        response_gate = asyncio.Event()
+        event = CarEvent(SkillType.NONE, EventName.USER_INPUT, "Cruise control?", [], "Cruise control?")
+        wait_task = asyncio.create_task(agent.generate_wait_message(
+            event, ResponseSource.VEHICLE_MANUAL, ready, response_gate=response_gate,
+        ))
+        try:
+            await asyncio.sleep(0)
+            agent.ollama_backend.stream.assert_not_called()
+            lookup_released.set()
+            await asyncio.wait_for(wait_task, 1)
+            agent.ollama_backend.stream.assert_not_called()
+            agent.speak_wait_message_chunks.assert_not_awaited()
+        finally:
+            for task in (ready, wait_task):
+                task.cancel()
+            await asyncio.gather(ready, wait_task, return_exceptions=True)
 
     asyncio.run(check())
 
@@ -366,7 +985,7 @@ def test_agent_owns_preclassification_orchestration(requires_action):
             execute=AsyncMock(side_effect=classify),
         )
 
-        async def prepare_response(event, source, *, response_gate):
+        async def prepare_response(event, source, *, response_gate, wait_message_claimed):
             events.append("response_started")
             response_started.set()
             await response_gate.wait()
@@ -416,10 +1035,162 @@ def test_agent_owns_preclassification_orchestration(requires_action):
     asyncio.run(check())
 
 
+@pytest.mark.parametrize("cuda_available", [False, True])
+def test_kev_backend_loads_during_init_and_reuses_model(cuda_available):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from agents.backends.decision_backend import KevBackend
+    from config import ConfigAssistant
+
+    tokenizer, model, encodings = Mock(), Mock(), Mock()
+    model.probs.return_value = [[0.9, 0.1]]
+    checkpoint = Mock(meta=SimpleNamespace(temperature=2.0))
+    checkpoint.load.return_value = (tokenizer, model)
+    with (
+        patch("torch.cuda.is_available", return_value=cuda_available),
+        patch("kev.checkpoint.Checkpoint", return_value=checkpoint) as load_checkpoint,
+        patch("kev.model.admit", return_value=encodings) as admit,
+    ):
+        usage = Mock()
+        backend = KevBackend(ConfigAssistant(), usage)
+        load_checkpoint.assert_called_once_with("jaredpalmer/kev-0.8b")
+        checkpoint.load.assert_called_once()
+        assert checkpoint.load.call_args.args[0] == ("cuda" if cuda_available else "cpu")
+        assert model.head.temperature == 2.0
+        model.probs.assert_not_called()
+
+        async def check():
+            for _ in range(2):
+                result = await backend.execute_decision(
+                    {"fatigue": "high"},
+                    {"task": {"type": "choice", "criteria": {"route": None, "skip": None}}},
+                )
+                assert result["answers"]["task"]["choice"] == "route"
+
+        asyncio.run(check())
+        load_checkpoint.assert_called_once()
+        checkpoint.load.assert_called_once()
+        assert model.probs.call_count == 2
+        assert admit.call_args.args[:2] == (model, tokenizer)
+        assert usage.call_count == 2
+
+
+@pytest.mark.parametrize("hub_disabled,transformers_enabled", [
+    (False, True), (True, True), (False, False), (True, False),
+])
+@pytest.mark.parametrize("load_fails", [False, True])
+def test_kev_loading_hides_progress_and_restores_previous_state(hub_disabled, transformers_enabled, load_fails):
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from huggingface_hub.utils import are_progress_bars_disabled, disable_progress_bars, enable_progress_bars
+    from transformers.utils import logging as transformers_logging
+    from agents.backends.decision_backend import KevBackend
+    from config import ConfigAssistant
+
+    original_hub_disabled = are_progress_bars_disabled()
+    original_transformers_enabled = transformers_logging.is_progress_bar_enabled()
+    checkpoint = Mock(meta=SimpleNamespace(temperature=1.0))
+    logger = Mock()
+
+    def load(*args):
+        assert are_progress_bars_disabled()
+        assert not transformers_logging.is_progress_bar_enabled()
+        if load_fails:
+            raise RuntimeError("checkpoint load failed")
+        return Mock(), Mock()
+
+    checkpoint.load.side_effect = load
+    try:
+        if transformers_enabled:
+            transformers_logging.enable_progress_bar()
+        else:
+            transformers_logging.disable_progress_bar()
+        if hub_disabled:
+            disable_progress_bars()
+        else:
+            enable_progress_bars()
+        with (
+            patch("kev.checkpoint.Checkpoint", return_value=checkpoint),
+            patch("agents.backends.decision_backend.structlog.get_logger", return_value=logger),
+        ):
+            if load_fails:
+                with pytest.raises(RuntimeError, match="checkpoint load failed"):
+                    KevBackend(ConfigAssistant(), Mock())
+            else:
+                KevBackend(ConfigAssistant(), Mock())
+        assert are_progress_bars_disabled() == hub_disabled
+        assert transformers_logging.is_progress_bar_enabled() == transformers_enabled
+        assert logger.debug.call_count == (1 if load_fails else 2)
+    finally:
+        if original_transformers_enabled:
+            transformers_logging.enable_progress_bar()
+        else:
+            transformers_logging.disable_progress_bar()
+        if original_hub_disabled:
+            disable_progress_bars()
+        else:
+            enable_progress_bars()
+
+
+def test_kev_backend_logs_traceback_and_propagates_inference_failure():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from agents.backends.decision_backend import KevBackend
+    from config import ConfigAssistant
+
+    checkpoint = Mock(meta=SimpleNamespace(temperature=1.0))
+    checkpoint.load.return_value = (Mock(), Mock())
+    usage = Mock()
+    with patch("kev.checkpoint.Checkpoint", return_value=checkpoint):
+        backend = KevBackend(ConfigAssistant(), usage)
+    backend.logger = Mock()
+    failure = RuntimeError("CUBLAS_STATUS_EXECUTION_FAILED")
+    with patch.object(backend, "_decide_sync", side_effect=failure):
+        with pytest.raises(RuntimeError) as raised:
+            asyncio.run(backend.execute_decision({}, {}, call_name="test decision"))
+    assert raised.value is failure
+    backend.logger.exception.assert_called_once_with(
+        "[KEV] Decision failed", task="test decision", model=backend.model,
+    )
+    usage.assert_called_once_with("test decision", None)
+
+
+@pytest.mark.parametrize("routing_backend", ["llm", "decision"])
+def test_agent_initializes_kev_before_first_request(routing_backend):
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+    from agents.automotive_agent import AutomotiveAgent
+    from config import ConfigAssistant
+
+    checkpoint = Mock(meta=SimpleNamespace(temperature=1.0))
+    checkpoint.load.return_value = (Mock(), Mock())
+    with patch("kev.checkpoint.Checkpoint", return_value=checkpoint) as load_checkpoint:
+        agent = AutomotiveAgent(ConfigAssistant(
+            routing_backend=routing_backend, pre_classify_backend="decision",
+            decision_model="kev",
+        ))
+    load_checkpoint.assert_called_once_with("jaredpalmer/kev-0.8b")
+    checkpoint.load.assert_called_once()
+    if routing_backend == "decision":
+        assert agent.telemetry_router.backend is agent.request_pre_classifier.backend
+
+
+def test_agent_does_not_load_kev_when_decision_backend_is_unused():
+    from unittest.mock import patch
+    from agents.automotive_agent import AutomotiveAgent
+    from config import ConfigAssistant
+
+    with patch("kev.checkpoint.Checkpoint") as load_checkpoint:
+        AutomotiveAgent(ConfigAssistant(decision_model="kev"))
+    load_checkpoint.assert_not_called()
+
+
 def test_laya_backend_only_predicts_with_supplied_state_and_questions():
     import asyncio
     from unittest.mock import Mock
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from config import ConfigAssistant
 
     predictor = Mock()
@@ -427,11 +1198,11 @@ def test_laya_backend_only_predicts_with_supplied_state_and_questions():
     usage = Mock()
     backend = LayaBackend(None, usage, predictor=predictor)
     state, questions = {"fatigue": "high"}, {"task": {"type": "choice"}}
-    assert asyncio.run(backend.predict(state, questions)) == predictor.predict.return_value
+    assert asyncio.run(backend.execute_decision(state, questions)) == predictor.predict.return_value
     predictor.predict.assert_called_once_with(state, questions)
     assert not hasattr(backend, "agent")
     assert not hasattr(backend, "process_event")
-    usage.assert_called_once_with("laya prediction", None)
+    usage.assert_called_once_with("decision", None)
 
 
 @pytest.mark.parametrize("module_name,class_name", [
@@ -514,29 +1285,28 @@ def test_agent_builds_specialist_tasks_without_connecting_to_ollama():
 def test_agent_selects_laya_router_without_changing_specialist_backends():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, Mock, patch
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
     from agents.automotive_agent import AutomotiveAgent
     from agents.tasks.routing import TelemetryRouter
     from config import ConfigAssistant
 
-    opt = ConfigAssistant(routing_backend="laya", routing_model="router-model",
-                          laya_custom_model="old-decision-model")
+    opt = ConfigAssistant(routing_backend="decision", routing_model="router-model",
+                          laya_model="router-checkpoint")
     backend = Mock(spec=LayaBackend)
-    backend.predict = AsyncMock()
+    backend.execute_decision = AsyncMock()
     with patch("agents.automotive_agent.LayaBackend", return_value=backend) as build_backend:
         agent = AutomotiveAgent(opt)
     assert isinstance(agent.telemetry_router, TelemetryRouter)
     assert agent.telemetry_router.backend is backend
     assert all(task.backend is agent.crewai_backend for task in agent.tasks.values())
-    assert build_backend.call_args.args[0] == "router-model"
-    assert opt.laya_custom_model == "old-decision-model"
+    assert build_backend.call_args.args[0] == "router-checkpoint"
 
 
 @pytest.mark.parametrize("model_kind", ["default", "path", "string"])
 def test_laya_backend_loads_model_without_assistant_configuration(tmp_path, model_kind):
     from types import SimpleNamespace
     from unittest.mock import Mock, patch
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
 
     predictor = Mock()
     load = Mock(return_value=predictor)
@@ -553,7 +1323,7 @@ def test_laya_backend_loads_model_without_assistant_configuration(tmp_path, mode
 def test_laya_backend_rejects_missing_local_model(tmp_path):
     from types import SimpleNamespace
     from unittest.mock import Mock, patch
-    from agents.backends.laya_backend import LayaBackend
+    from agents.backends.decision_backend import LayaBackend
 
     load = Mock()
     with patch.dict("sys.modules", {"laya": SimpleNamespace(load=load)}):
@@ -576,11 +1346,11 @@ def test_routing_configuration_can_be_selected_through_omegaconf():
 
     configuration = OmegaConf.merge(
         OmegaConf.structured(ConfigAssistant),
-        OmegaConf.from_dotlist(["routing_backend=laya", "routing_model=/tmp/router-checkpoint",
+        OmegaConf.from_dotlist(["routing_backend=decision", "routing_model=/tmp/router-checkpoint",
                        "pre_classify_model=/tmp/request-checkpoint", "routing_model=router-llm"]),
     )
     opt = OmegaConf.to_object(configuration)
-    assert opt.routing_backend == "laya"
+    assert opt.routing_backend == "decision"
     assert opt.pre_classify_model == "/tmp/request-checkpoint"
     assert opt.routing_model == "router-llm"
     assert not hasattr(opt, "use_laya")
@@ -735,9 +1505,15 @@ def test_conversation_task_streams_without_agent_and_hides_tone_metadata():
     assert "[[tone:" not in str(speak.await_args_list)
     assert stream.closed
     create.assert_awaited_once()
-    ttft_calls = [call for call in logger.info.call_args_list if call.args[0] == "[LLM] Time to first token"]
+    ttft_calls = [call for call in logger.debug.call_args_list if call.args[0] == "[LLM] Time to first token"]
     assert len(ttft_calls) == 1
     assert ttft_calls[0].kwargs["llm_call"] == "conversation response"
+    logger.info.assert_called_once()
+    summary = logger.info.call_args.kwargs
+    assert summary["response_text"] == "Hello. Take care."
+    assert summary["status"] == "completed"
+    assert summary["ttft_ms"] >= 0
+    assert summary["duration_ms"] >= summary["ttft_ms"]
 
 
 def test_knowledge_publishes_one_unscoped_snapshot_with_motion():

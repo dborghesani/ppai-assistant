@@ -259,6 +259,17 @@ python main.py \
   tts_enabled=True stt_enabled=True
 ```
 
+### Conversational Responses
+
+The conversation task follows two complementary styles: vehicle commands, status questions and
+alerts get direct, concise answers, while general-knowledge, cultural or conversational questions
+get richer, more engaging responses of roughly 100–200 words, still suitable for spoken delivery.
+Bare acknowledgements ("ok", "yes", "thanks") receive one short friendly line and never volunteer
+vehicle status or suggestions unless asked.
+
+Typing in the dashboard chat behaves like a voice barge-in: it stops any response the assistant is
+still generating or speaking before the new request is processed.
+
 ## Driver Identity And Messages
 
 The Driver tab includes an editable `driver_name` preference, defaulting to `David`.

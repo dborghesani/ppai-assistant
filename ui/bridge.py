@@ -325,6 +325,12 @@ class VehicleBridge:
         if not text:
             return
 
+        # Typed input acts like voice barge-in: stop the assistant mid-response.
+        self.loop.call_soon_threadsafe(self.agent.cancel_voice_response)
+        tts_manager = self.agent.tts_manager
+        if tts_manager is not None and tts_manager.is_speaking:
+            self.loop.call_soon_threadsafe(tts_manager.stop)
+
         context = list(self.knowledge_manager.context.values())
         event = CarEvent(
             skill=SkillType.CONVERSATION,

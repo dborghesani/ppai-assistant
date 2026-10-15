@@ -383,12 +383,10 @@ class AutomotiveAgent:
         return result.text
 
 
-    async def cancel_voice_response(self) -> None:
-        if (
-            self.voice_response_task is not None
-            and not self.voice_response_task.done()
-        ):
-            self.voice_response_task.cancel()
+    def cancel_voice_response(self) -> None:
+        task = self.voice_response_task
+        if task is not None and not task.done():
+            task.cancel()
 
     def clear_conversation(self) -> None:
         self.cancel_voice_response()

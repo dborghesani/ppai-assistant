@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, DefaultDict, Tuple
 import structlog
 from data.agents_dataclasses import ActionType
 from agents.automotive_agent import AutomotiveAgent
+from agents.tasks.surroundings import VIDEO_ID_PATTERN
 from config import ConfigAssistant
 from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
 from managers.database_manager import DatabaseManager
@@ -65,6 +66,12 @@ class VehicleBridge:
         self.agent.on_music_update = lambda value: self._emit("musicUpdated", value)
         self.agent.music_preferences_provider = lambda: self.dumpDriverPreferences().get("preferred_music") or ""
         self.agent.driver_preferences_provider = self.dumpDriverPreferences
+        self.agent.driving_frame_provider = self.capture_driving_frame
+
+        self._driving_video_url = ""
+        self._driving_capture_result: dict | None = None
+        self._driving_capture_event: asyncio.Event | None = None
+        self._last_driving_time: dict | None = None
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:
@@ -270,11 +277,47 @@ class VehicleBridge:
         if not url.startswith(("http://", "https://")):
             self.logger.warning("Ignoring invalid driving simulation URL", url=url)
             url = self.opt.driving_video_url
+        self._driving_video_url = url
         self._emit("drivingSimulationChanged", {"active": True, "video_url": url})
         return url
 
     def stopDrivingSimulation(self) -> bool:
+        self._driving_video_url = ""
+        self._driving_capture_result = None
         self._emit("drivingSimulationChanged", {"active": False, "video_url": ""})
+        return True
+
+    async def capture_driving_frame(self) -> dict | None:
+        """Ask the Web UI for the current video id and playback time."""
+        if not self._driving_video_url:
+            return None
+        self._driving_capture_result = None
+        self._driving_capture_event = asyncio.Event()
+        self._emit("drivingVideoCaptureRequested", {})
+        try:
+            await asyncio.wait_for(self._driving_capture_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            self.logger.warning("Driving video capture time not reported by the UI")
+        result = self._driving_capture_result or {}
+        if result.get("video_id"):
+            return result
+        # Fall back to whatever time the UI last reported, or the start of the
+        # video; without a precise frame time the assistant still works from
+        # the video id (thumbnail or beginning of the clip).
+        fallback = self._last_driving_time or {}
+        video_id = result.get("video_id") or fallback.get("video_id")
+        if not video_id:
+            match = VIDEO_ID_PATTERN.search(self._driving_video_url)
+            video_id = match.group(1) if match else None
+        if not video_id:
+            return None
+        return {"video_id": video_id, "seconds": fallback.get("seconds")}
+
+    def reportDrivingVideoTime(self, video_id: str | None, seconds: float | None) -> bool:
+        self._last_driving_time = {"video_id": video_id or None, "seconds": seconds}
+        self._driving_capture_result = self._last_driving_time
+        if self._driving_capture_event is not None:
+            self._driving_capture_event.set()
         return True
 
     def send_event(self, ui_event_type: str, value: Any):
@@ -338,11 +381,12 @@ class VehicleBridge:
         if not text:
             return
 
-        # Typed input acts like voice barge-in: stop the assistant mid-response.
-        self.loop.call_soon_threadsafe(self.agent.cancel_voice_response)
+        # Typed input acts like voice barge-in, but we let the word currently
+        # being spoken finish so the cut never sounds like an audio glitch.
         tts_manager = self.agent.tts_manager
         if tts_manager is not None and tts_manager.is_speaking:
-            self.loop.call_soon_threadsafe(tts_manager.stop)
+            self.loop.call_soon_threadsafe(tts_manager.stop, True)
+        self.loop.call_soon_threadsafe(self.agent.cancel_voice_response)
 
         context = list(self.knowledge_manager.context.values())
         event = CarEvent(

@@ -22,6 +22,7 @@ class WebUIServer:
         "stopFriendMessageSimulation",
         "startDrivingSimulation",
         "stopDrivingSimulation",
+        "reportDrivingVideoTime",
         "intChanged",
         "minimumUrgencyChanged",
         "musicControl",
@@ -75,6 +76,7 @@ class WebUIServer:
             "scenarioCompleted",
             "musicUpdated",
             "drivingSimulationChanged",
+            "drivingVideoCaptureRequested",
         ):
             bridge.on(
                 event_name,

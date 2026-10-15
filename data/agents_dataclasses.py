@@ -91,6 +91,7 @@ class ActionType(str, Enum):
     ENABLE_FOG_LIGHTS = "enable_fog_lights"
     DISABLE_FOG_LIGHTS = "disable_fog_lights"
     FIND_REST_AREA = "find_rest_area"
+    DESCRIBE_SURROUNDINGS = "describe_surroundings"
     ASK_ATTEND_MEETING = "ask_attend_meeting"
     PROPOSE_MUSIC = "propose_music"
     EVALUATE_MUSIC_PROPOSAL = "evaluate_music_proposal"
@@ -158,6 +159,9 @@ class ActionType(str, Enum):
             ActionType.ENABLE_FOG_LIGHTS: "enable fog lights",
             ActionType.DISABLE_FOG_LIGHTS: "disable fog lights",
             ActionType.FIND_REST_AREA: "Find the next rest area.",
+            ActionType.DESCRIBE_SURROUNDINGS: (
+                "look at what the driver can currently see and describe it, offering more information about notable sights"
+            ),
             ActionType.ASK_ATTEND_MEETING: (
                 "Ask the driver whether the assistant should attend their upcoming "
                 "meeting on their behalf because they are running late."

@@ -27,6 +27,9 @@ Use default steps, never ask optional target values. Exact temperature/fan/volum
 setpoints are unsupported. Manual privacy is not an assistant action; for message
 delivery it is active when ON/unknown or when more than one occupant is detected.
 find_rest_area has no simulated vehicle-state effect: never claim a route was found.
+"What do you see?", "What is that?" or any request to describe what is currently
+visible outside in the driving video => describe_surroundings, whatever the driver
+means by it. Follow-ups about the described scene inherit describe_surroundings.
 Meeting attendance is a separate permission workflow. Polite/indirect requests are
 commands when they clearly ask a supported operation. Capability questions use none.
 """

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import structlog
 from agents.tasks.decision import DecisionInput, NotificationDecision
-from agents.tasks import comfort, driving, meeting, messages, mood_music, vehicle_command, wellbeing
+from agents.tasks import comfort, driving, meeting, messages, mood_music, vehicle_command, wellbeing, surroundings
 from agents.backends.crewai_backend import CrewAIBackend
 from agents.backends.decision_backend import DecisionBackend, KevBackend, LayaBackend
 from agents.backends.ollama_backend import OllamaBackend
@@ -32,6 +32,11 @@ logger = structlog.get_logger()
 DECISION_TASKS = {task.task_type: task for task in (
     wellbeing.TASK, driving.TASK, comfort.TASK, mood_music.TASK, messages.TASK, meeting.TASK,
 )}
+
+
+async def async_no_driving_frame() -> dict | None:
+    """Default driving-frame source when no UI is connected."""
+    return None
 
 from data.agents_dataclasses import ActionType, AssistantStatus, InterventionType, SkillType, ToneType, UrgencyType
 from managers.action_manager import ActionManager
@@ -117,6 +122,11 @@ class AutomotiveAgent:
             opt, self.log_llm_usage, backend=self.crewai_backend,
             registered_actions=self.action_manager.registered_actions,
         )
+        self.driving_frame_provider: Callable[[], Awaitable[dict | None]] = async_no_driving_frame
+        self.surroundings_task = surroundings.SurroundingsTask(
+            opt, self.log_llm_usage, backend=self.ollama_backend, speak=self.speak,
+            frame_provider=self._describe_frame,
+        )
         def build_decision_backend(model: str | None) -> DecisionBackend:
             if opt.decision_model == "kev":
                 return KevBackend(opt, self.log_llm_usage, model=model)
@@ -156,6 +166,18 @@ class AutomotiveAgent:
     def _notify_music_update(self, value: dict[str, Any]) -> None:
         if self.on_music_update is not None:
             self.on_music_update(value)
+
+    async def _describe_frame(self) -> "surroundings.SceneFrame | None":
+        try:
+            capture = await self.driving_frame_provider()
+            if not capture:
+                return None
+            return await surroundings.capture_scene_frame(
+                capture.get("video_id"), capture.get("seconds"),
+            )
+        except Exception as error:
+            self.logger.warning("Driving frame provider failed", error=str(error))
+            return None
 
     @property
     def music_task(self) -> mood_music.MoodMusicTask:
@@ -409,6 +431,7 @@ class AutomotiveAgent:
         self.cancel_voice_response()
         self.tasks[TaskType.MEETING].reset()
         self.music_task.reset()
+        self.surroundings_task.reset()
         self.conversation_history.clear()
 
     def set_minimum_urgency(self, urgency: str) -> None:
@@ -500,7 +523,9 @@ class AutomotiveAgent:
             executed_actions.add(decision.action)
 
     async def process_direct_user_input(self, event: CarEvent) -> None:
-        if self.music_task.awaiting_reply:
+        if self.surroundings_task.awaiting_reply:
+            await self.surroundings_task.handle_user_input(event.user_input, self.conversation_history)
+        elif self.music_task.awaiting_reply:
             await self.music_task.handle_user_input(event.user_input, self.conversation_history)
         elif self.tasks[TaskType.MEETING].awaiting_reply:
             await self.tasks[TaskType.MEETING].handle_user_input(event.user_input, self.conversation_history)
@@ -684,6 +709,23 @@ class AutomotiveAgent:
 
         # A real action replaces the speculative informational reply.
         await self.cancel_prepared_response(preparation)
+        if decision.action is ActionType.DESCRIBE_SURROUNDINGS:
+            # Frame capture and vision analysis can take a while; cover the whole
+            # turn with the standard wait-message mechanism until the reply lands.
+            # The task holds its replies until the acknowledgement has finished so
+            # chat text and speech stay in order even when the clip is cached and
+            # the analysis is fast.
+            self.surroundings_task.speak_gate = asyncio.Event()
+            describe_task = asyncio.create_task(
+                self.surroundings_task.describe(event.user_input, self.conversation_history)
+            )
+            await self.generate_wait_message(
+                event, pre_classification.response_source, describe_task,
+                wait_message_claimed=asyncio.Event(), action_pending=True,
+            )
+            self.surroundings_task.speak_gate.set()
+            await describe_task
+            return
         if decision.action in self.action_manager.registered_actions and decision.intervention_type is InterventionType.ACT:
             self.start_conversation_response(event, action=decision.action)
             return

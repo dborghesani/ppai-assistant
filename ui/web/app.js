@@ -206,6 +206,31 @@ function sendDrivingVideoCommand(command, args = []) {
   }
 }
 
+let drivingVideoPlayerTime = null;
+window.addEventListener("message", event => {
+  let payload = null;
+  try { payload = JSON.parse(event.data); } catch (_) { return; }
+  if (!payload || payload.event !== "infoDelivery" || !payload.info) return;
+  const info = payload.info;
+  const videoId = info.videoData?.video_id
+    || String(drivingVideoUrl).match(YOUTUBE_URL_PATTERN)?.[1] || null;
+  const seconds = typeof info.currentTime === "number" ? info.currentTime : drivingVideoPlayerTime?.seconds;
+  drivingVideoPlayerTime = { videoId, seconds };
+});
+
+bridge.on("drivingVideoCaptureRequested", () => {
+  if (!drivingSimulationActive) {
+    bridge.call("reportDrivingVideoTime", null, null).catch(() => {});
+    return;
+  }
+  sendDrivingVideoCommand("getCurrentTime");
+  sendDrivingVideoCommand("getVideoData");
+  setTimeout(() => {
+    const capture = drivingVideoPlayerTime;
+    bridge.call("reportDrivingVideoTime", capture?.videoId ?? null, capture?.seconds ?? null).catch(() => {});
+  }, 600);
+});
+
 function setDrivingSimulation(active) {
   drivingSimulationActive = active;
   if (!active) {

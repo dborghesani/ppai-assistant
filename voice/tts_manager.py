@@ -1,8 +1,9 @@
 import asyncio
-import queue
+import re
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import structlog
@@ -64,6 +65,7 @@ class TTSManager:
         self._condition_attributes = None
         self._cfg_coef = cfg_coef
         self._stop_flag = threading.Event()
+        self._finish_word = threading.Event()
         self._playback_stream = None
         self.is_speaking = False
         self._speech_lock = asyncio.Lock()
@@ -221,20 +223,50 @@ class TTSManager:
         except Exception as e:
             logger.warning("TTS warmup failed", error=str(e))
 
-    async def speak(self, text: str) -> None:
+    async def speak(self, text: str, on_word: Callable[[str], None] | None = None) -> None:
+        """Speak `text`, optionally reporting the spoken text prefix every time a
+        word finishes playing (word boundaries estimated proportionally to the
+        generated audio; accurate because the sentence is fully generated before
+        playback starts)."""
         if not self.enabled or not text:
             return
         async with self._speech_lock:
-            await asyncio.to_thread(self._speak_blocking, text)
+            await asyncio.to_thread(self._speak_blocking, text, on_word)
 
-    def stop(self) -> None:
-        """Immediately halt any ongoing playback (barge-in on user speech)."""
+    def stop(self, finish_word: bool = False) -> None:
+        """Halt any ongoing playback. With `finish_word=True` the word currently
+        being spoken is allowed to complete before playback stops (a natural
+        interruption instead of a mid-word cutoff)."""
         self._stop_flag.set()
+        if finish_word:
+            self._finish_word.set()
+            return
+        self._finish_word.clear()
         if self._playback_stream is not None:
             try:
                 self._playback_stream.abort()
             except Exception:
                 pass
+
+    @staticmethod
+    def _word_boundaries(text: str) -> tuple[list[str], list[int], list[int]]:
+        """Split `text` into words with their character start/end offsets."""
+        words, starts, ends = [], [], []
+        for match in re.finditer(r"\S+", text):
+            words.append(match.group())
+            starts.append(match.start())
+            ends.append(match.end())
+        return words, starts, ends
+
+    @staticmethod
+    def _word_end_samples(text: str, total_samples: int) -> list[int]:
+        """Estimated sample offset at which each word finishes, distributed
+        proportionally to character position across the generated audio."""
+        if not text or total_samples <= 0:
+            return []
+        _, _, ends = TTSManager._word_boundaries(text)
+        char_total = len(text.rstrip())
+        return [max(1, int(round(total_samples * min(end, char_total) / char_total))) for end in ends]
 
     def _push_playback_reference(self, pcm: np.ndarray) -> None:
         with self._playback_ring_lock:
@@ -253,8 +285,9 @@ class TTSManager:
             pad = n_samples - ring.shape[0]
             return np.concatenate([np.zeros(pad, dtype=np.float32), ring.copy()])
 
-    def _speak_blocking(self, text: str) -> None:
+    def _speak_blocking(self, text: str, on_word: Callable[[str], None] | None = None) -> None:
         self._stop_flag.clear()
+        self._finish_word.clear()
         self.is_speaking = True
         try:
             entries = self._model.prepare_script([text], padding_between=1)
@@ -268,10 +301,11 @@ class TTSManager:
             # reproduce the reference audio, not the requested text.
             skip_frames = self._prefix.shape[-1] if self._prefix is not None else 0
 
-            pcms: queue.Queue = queue.Queue()
-            playback_buffer = np.zeros(0, dtype=np.float32)
-            generation_done = threading.Event()
-            playback_done = threading.Event()
+            # Generate the full sentence first: playback is sequential anyway
+            # (one sentence at a time under the speech lock) and knowing the
+            # whole audio up-front gives exact word timing for on_word events
+            # and finish-word stops.
+            pcms: list[np.ndarray] = []
             frame_count = 0
 
             def _on_frame(frame):
@@ -283,57 +317,66 @@ class TTSManager:
                     if frame_count <= skip_frames:
                         return
                     pcm = self._model.mimi.decode(frame[:, 1:, :]).cpu().numpy()
-                    pcm = np.clip(pcm[0, 0], -1, 1)
-                    pcms.put_nowait(pcm)
+                    pcms.append(np.clip(pcm[0, 0], -1, 1))
 
-            def _audio_callback(outdata, _frames, _time_info, _status):
-                nonlocal playback_buffer
-
-                # A Mimi frame isn't guaranteed to have the same length as
-                # sounddevice's requested block. Keep surplus samples and
-                # combine short frames instead of producing gaps or shape
-                # errors in the PortAudio callback.
-                while playback_buffer.shape[0] < len(outdata):
-                    try:
-                        pcm = pcms.get(block=False)
-                    except queue.Empty:
-                        break
-                    if pcm.size:
-                        if playback_buffer.size:
-                            playback_buffer = np.concatenate((playback_buffer, pcm))
-                        else:
-                            playback_buffer = pcm
-
-                outdata.fill(0)
-                count = min(len(outdata), playback_buffer.shape[0])
-                if count:
-                    outdata[:count, 0] = playback_buffer[:count]
-                    playback_buffer = playback_buffer[count:]
-                    self._push_playback_reference(outdata[:count, 0])
-
-                if (
-                    generation_done.is_set()
-                    and pcms.empty()
-                    and playback_buffer.size == 0
-                ):
-                    playback_done.set()
-
-            with sd.OutputStream(
-                samplerate=self._model.mimi.sample_rate,
-                blocksize=1920,
-                channels=1,
-                callback=_audio_callback,
-            ) as stream:
-                self._playback_stream = stream
-                with GPU_LOCK, self._model.mimi.streaming(1):
-                    self._model.generate(
-                        [entries], attributes, prefixes=prefixes, on_frame=_on_frame
-                    )
-                generation_done.set()
-                while not playback_done.is_set() and not self._stop_flag.is_set():
-                    time.sleep(0.1)
+            with GPU_LOCK, self._model.mimi.streaming(1):
+                self._model.generate(
+                    [entries], attributes, prefixes=prefixes, on_frame=_on_frame
+                )
+            if self._stop_flag.is_set() or not pcms:
+                return
+            pcm = pcms[0] if len(pcms) == 1 else np.concatenate(pcms)
+            # Keep the GPU lock through playback: releasing it lets other CUDA
+            # work interleave with mimi's compiled (cudagraph) state and kills
+            # subsequent generations with "Offset increment outside graph
+            # capture encountered unexpectedly".
+            with GPU_LOCK:
+                self._play_audio(pcm, text, on_word)
         except Exception as e:
             logger.warning("TTS playback failed", error=str(e))
         finally:
             self._playback_stream = None
             self.is_speaking = False
+
+    def _play_audio(self, pcm: np.ndarray, text: str, on_word: Callable[[str], None] | None) -> None:
+        sample_rate = self._model.mimi.sample_rate
+        block = 1920
+        total = pcm.shape[0]
+        word_end_samples = self._word_end_samples(text, total) if on_word is not None else []
+        _, starts, ends = self._word_boundaries(text) if word_end_samples else ([], [], [])
+        next_word = 0
+        finish_at = -1  # sample index at which a finish-word stop must cut
+        played = 0
+
+        with sd.OutputStream(
+            samplerate=sample_rate, channels=1, dtype="float32"
+        ) as stream:
+            self._playback_stream = stream
+            for start in range(0, total, block):
+                if self._stop_flag.is_set():
+                    if not self._finish_word.is_set():
+                        return
+                    if finish_at < 0:
+                        # Finish the word currently being spoken: cut at the
+                        # first word boundary ahead of the playback position.
+                        finish_at = next(
+                            (end for end in word_end_samples if end > played),
+                            played,
+                        )
+                    if played >= finish_at:
+                        return
+                samples = np.clip(pcm[start:start + block], -1, 1)
+                try:
+                    stream.write(samples.reshape(-1, 1))
+                except Exception:
+                    return
+                played = min(start + block, total)
+                self._push_playback_reference(samples)
+                while next_word < len(word_end_samples) and played >= word_end_samples[next_word]:
+                    if on_word is not None and self.is_speaking:
+                        on_word(text[: ends[next_word]].strip())
+                    next_word += 1
+            while next_word < len(word_end_samples):
+                if on_word is not None and self.is_speaking:
+                    on_word(text[: ends[next_word]].strip())
+                next_word += 1

@@ -95,7 +95,8 @@ const CONTROL_GROUPS = {
   scenario: [
     { title: "Demo scenarios", type: "scenarios", hint: "Choose a scenario to add context or start a message simulation.", controls: [
       { label: "Driver late for a meeting", id: "late_for_meeting", description: "The driver is running late and may ask the assistant to attend the upcoming meeting." },
-      { label: "Messages from Luca", id: "friend_messages", description: "Luca sends occasional messages about mutual friends. Privacy mode queues them until you allow the assistant to read them.", simulation: "friend-messages" }
+      { label: "Messages from Luca", id: "friend_messages", description: "Luca sends occasional messages about mutual friends. Privacy mode queues them until you allow the assistant to read them.", simulation: "friend-messages" },
+      { label: "Driving simulation video", id: "driving_video", description: "Play a YouTube driving video in the assistant panel; you can keep chatting while it runs.", simulation: "driving-video" }
     ]}
   ]
 };
@@ -161,6 +162,81 @@ const clearConversationButton = document.querySelector("#clear-conversation");
 const duplicateSuppressionToggle = document.querySelector("#duplicate-suppression-toggle");
 let activeTab = "driver";
 let activeScenario = null;
+let drivingSimulationActive = false;
+let drivingVideoReady = false;
+const DEFAULT_DRIVING_VIDEO_URL = "https://www.youtube.com/watch?v=ytiM1nMv_xU";
+const YOUTUBE_URL_PATTERN = /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([\w-]{6,20})/;
+let drivingVideoUrl = DEFAULT_DRIVING_VIDEO_URL;
+
+function youtubeEmbedUrl(rawUrl, autoplay) {
+  const match = String(rawUrl || drivingVideoUrl).match(YOUTUBE_URL_PATTERN);
+  if (!match) return null;
+  const videoId = match[1];
+  return `https://www.youtube.com/embed/${videoId}?enablejsapi=1&rel=0&playsinline=1&autoplay=1`;
+}
+
+function loadDrivingVideo(rawUrl, autoplay = true) {
+  const holder = document.querySelector("#driving-video-frame-holder");
+  if (!holder) return false;
+  const embedUrl = youtubeEmbedUrl(rawUrl, autoplay);
+  if (!embedUrl) {
+    showToast("Invalid YouTube URL");
+    return false;
+  }
+  drivingVideoUrl = rawUrl;
+  drivingVideoReady = false;
+  holder.replaceChildren();
+  const frame = document.createElement("iframe");
+  frame.title = "Driving simulation video";
+  frame.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+  frame.allowFullscreen = true;
+  frame.src = `${embedUrl}&origin=${encodeURIComponent(location.origin)}`;
+  frame.addEventListener("load", () => { drivingVideoReady = true; });
+  holder.append(frame);
+  return true;
+}
+
+function sendDrivingVideoCommand(command, args = []) {
+  const frame = document.querySelector("#driving-video-frame-holder iframe");
+  if (!frame || !drivingVideoReady) return;
+  frame.contentWindow.postMessage(
+    JSON.stringify({ event: "command", func: command, args }), "*");
+  if (command === "seekTo") {
+    setTimeout(() => sendDrivingVideoCommand("playVideo"), 80);
+  }
+}
+
+function setDrivingSimulation(active) {
+  drivingSimulationActive = active;
+  if (!active) {
+    sendDrivingVideoCommand("pauseVideo");
+    drivingVideoReady = false;
+    document.querySelector("#driving-video-frame-holder")?.replaceChildren();
+  }
+  document.querySelector('#driving-simulation-toggle[data-simulation="driving-video"]')
+    ?.setAttribute("aria-pressed", String(active));
+  const buttons = [...controlContent.querySelectorAll('.scenario-button[data-simulation="driving-video"]')];
+  buttons.forEach(button => button.textContent = active ? "Stop simulation" : "Start simulation");
+  const input = document.querySelector("#driving-video-url");
+  if (input) {
+    input.value = "";
+    input.placeholder = drivingVideoUrl;
+  }
+  if (activeTab === "scenario") renderControls("scenario");
+}
+
+const DRIVING_VIDEO_BLOCK_HTML = `
+  <h3>Driving simulation video</h3>
+  <div class="driving-video-heading">
+    <input id="driving-video-url" type="url" placeholder="https://www.youtube.com/watch?v=..." aria-label="YouTube video URL">
+    <button id="driving-video-load" class="icon-button" type="button" title="Load video" aria-label="Load video">&#8601;</button>
+  </div>
+  <div id="driving-video-frame-holder" class="driving-video-frame-holder"></div>
+  <div class="driving-video-transport">
+    <button id="driving-video-play" class="icon-button" type="button" title="Play video" aria-label="Play video">\u25B6</button>
+    <button id="driving-video-pause" class="icon-button" type="button" title="Pause video" aria-label="Pause video">\u275A\u275A</button>
+    <button id="driving-video-restart" class="icon-button" type="button" title="Restart video" aria-label="Restart video">&#8634;</button>
+  </div>`;
 let conversationActive = false;
 let connectionState = "connecting";
 let socketWasOpen = false;
@@ -173,6 +249,7 @@ let showActPulse = false;
 let incomingMessageClassification = null;
 let incomingMessageTimer = null;
 let pendingAssistantMessage = null;
+let assistantTurnPaused = false;
 let friendSimulationActive = false;
 let permissionReturnRadius = null;
 let permissionReturnTimer = null;
@@ -508,6 +585,17 @@ function setAssistantStatus(status) {
   }
 
   assistantStatus = status;
+  // When the assistant pauses for low attention, close the current bubble
+  // with an ellipsis; the resumed speech opens a fresh bubble.
+  if (status === "paused_attention" && !assistantTurnPaused) {
+    assistantTurnPaused = true;
+    if (pendingAssistantMessage !== null) {
+      const bubble = pendingAssistantMessage.querySelector(".bubble");
+      const text = bubble.textContent.trim();
+      if (text) bubble.textContent = `${text} …`;
+      pendingAssistantMessage = null;
+    }
+  }
   if (status === "act") {
     showActPulse = true;
     clearTimeout(actPulseTimer);
@@ -559,7 +647,7 @@ function showToast(message) {
 
 function setFriendSimulation(active) {
   friendSimulationActive = active;
-  const button = document.querySelector("#friend-simulation-toggle");
+  const button = document.querySelector('#scenario-button[data-simulation="friend-messages"], #friend-simulation-toggle[data-simulation="friend-messages"]');
   if (!button) return;
   button.textContent = active ? "Stop simulation" : "Start simulation";
   button.setAttribute("aria-pressed", String(active));
@@ -614,8 +702,11 @@ function renderControls(tabName) {
       const hint = group.hint ? `<p class="scenario-hint">${escapeHtml(group.hint)}</p>` : "";
       const scenarios = group.controls.map(scenario => {
         const isSimulation = Boolean(scenario.simulation);
-        const active = isSimulation ? friendSimulationActive : activeScenario === scenario.id;
-        const buttonId = isSimulation ? ' id="friend-simulation-toggle"' : "";
+        const active = scenario.simulation === "driving-video" ? drivingSimulationActive
+          : isSimulation ? friendSimulationActive : activeScenario === scenario.id;
+        const buttonId = scenario.simulation === "driving-video"
+          ? ' id="driving-simulation-toggle"'
+          : isSimulation ? ' id="friend-simulation-toggle"' : "";
         const buttonLabel = isSimulation
           ? active ? "Stop simulation" : "Start simulation"
           : active ? "Stop scenario" : "Start scenario";
@@ -624,7 +715,7 @@ function renderControls(tabName) {
           : `data-scenario="${scenario.id}"`;
         return `<div class="scenario-item"><div class="scenario-copy"><h4>${escapeHtml(scenario.label)}</h4><p>${escapeHtml(scenario.description)}</p></div><button type="button" class="scenario-button"${buttonId} ${dataAttribute} aria-pressed="${active}">${buttonLabel}</button></div>`;
       }).join("");
-      return `<section class="control-section" data-type="scenarios"><h3>${group.title}</h3>${hint}${scenarios}</section>`;
+      return `<section class="control-section" data-type="scenarios"><h3>${group.title}</h3>${hint}${scenarios}${drivingSimulationActive ? `<section id="driving-video-block" class="driving-video-panel" aria-label="Driving simulation video">${DRIVING_VIDEO_BLOCK_HTML}</section>` : ""}</section>`;
     }
     const controls = group.controls.map(([label, key, min, max, value, step, format, ownClass]) => {
       const controlClass = ownClass || group.cls;
@@ -730,6 +821,22 @@ controlContent.addEventListener("change", event => {
 });
 
 controlContent.addEventListener("click", event => {
+  if (event.target.closest("#driving-video-play")) { sendDrivingVideoCommand("playVideo"); return; }
+  if (event.target.closest("#driving-video-pause")) { sendDrivingVideoCommand("pauseVideo"); return; }
+  if (event.target.closest("#driving-video-restart")) { sendDrivingVideoCommand("seekTo", [0, true]); return; }
+  if (event.target.closest("#driving-video-load")) {
+    const input = document.querySelector("#driving-video-url");
+    const requestedUrl = (input?.value || "").trim();
+    if (requestedUrl && loadDrivingVideo(requestedUrl)) {
+      drivingVideoUrl = requestedUrl;
+      if (input) {
+        input.value = "";
+        input.placeholder = drivingVideoUrl;
+      }
+      showToast("Driving video loaded");
+    }
+    return;
+  }
   const button = event.target.closest(".scenario-button");
   if (!button) return;
   if (button.dataset.simulation === "friend-messages") {
@@ -739,6 +846,17 @@ controlContent.addEventListener("click", event => {
       wasActive ? "stopMessageSimulation" : "startMessageSimulation"
     ).then(() => setFriendSimulation(!wasActive))
       .catch(() => showToast("Could not update friend message simulation"))
+      .finally(() => { button.disabled = false; });
+    return;
+  }
+  if (button.dataset.simulation === "driving-video") {
+    button.disabled = true;
+    const requestedUrl = (document.querySelector("#driving-video-url")?.value || "").trim() || drivingVideoUrl;
+    const request = drivingSimulationActive
+      ? bridge.call("stopDrivingSimulation")
+      : bridge.call("startDrivingSimulation", requestedUrl);
+    request
+      .catch(() => showToast("Could not update driving simulation"))
       .finally(() => { button.disabled = false; });
     return;
   }
@@ -803,7 +921,7 @@ duplicateSuppressionToggle.addEventListener("change", event => {
 });
 
 function addMessage(role, text) {
-  if (role === "user") pendingAssistantMessage = null;
+  if (role === "user") { pendingAssistantMessage = null; assistantTurnPaused = false; }
   welcomeState?.remove();
   const article = document.createElement("article");
   article.className = `message ${role}`;
@@ -824,6 +942,13 @@ function clearConversationView() {
 }
 
 function updateAssistantMessage(text, final = false) {
+  // After an attention pause the turn already shows two bubbles (the paused
+  // one closed with an ellipsis and the resumed one): the final full text
+  // would only duplicate them, so acknowledge it and stop.
+  if (final && assistantTurnPaused) {
+    assistantTurnPaused = false;
+    return;
+  }
   if (pendingAssistantMessage === null) {
     pendingAssistantMessage = addMessage("assistant", text);
   } else {
@@ -960,6 +1085,14 @@ bridge.on("incomingMessageClassified", data => setIncomingMessageClassification(
 bridge.on("assistantStatusChanged", data => { setAssistantStatus(data[0]); updateMusicVolume(); });
 bridge.on("musicUpdated", data => renderMusic(data[0]));
 bridge.on("friendMessageSimulationChanged", data => setFriendSimulation(Boolean(data[0])));
+bridge.on("drivingSimulationChanged", data => {
+  const state = data[0] || {};
+  const url = (state.video_url || "").trim();
+  const active = Boolean(state.active);
+  // Re-render first so the video block (and its frame holder) exists.
+  setDrivingSimulation(active);
+  if (active && url) loadDrivingVideo(url);
+});
 bridge.on("scenarioCompleted", data => setScenarioActive("", false));
 bridge.on("userSpeechReceived", data => addMessage("user", data[0]));
 bridge.on("knowledgeUpdated", data => renderKnowledge(data[0]));

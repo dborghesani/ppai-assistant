@@ -57,6 +57,9 @@ class ConfigAssistant:
     data_websocket_url: str = "ws://localhost:4545/stream"
     data_replay_folder: str = ""
 
+    # Driving simulation: YouTube video shown in the Web UI (Scenarios tab)
+    driving_video_url: str = "https://www.youtube.com/watch?v=ytiM1nMv_xU"
+
     # MQTT broker configuration
     mqtt_enabled: bool = False
     mqtt_embedded_broker: bool = False
@@ -101,6 +104,15 @@ class ConfigAssistant:
     # playback with no real interruption. Tune per your noise environment.
     conversation_barge_in_energy_threshold: float = 0.035
     conversation_barge_in_min_frames: int = 4
+    # Attention-based speech pause/resume (ported from the ppai-emotional-
+    # conversational-ai demo): when the knowledge-base attention fact reads
+    # "Attention level is low/very low" (or no attention is detected) the
+    # assistant interrupts its speech and waits silently; on recovery it
+    # re-prompts the LLM with the original request plus the already-spoken
+    # text as context and continues naturally without repeating itself.
+    conversation_attention_pause_enabled: bool = True
+    conversation_attention_poll_seconds: float = 0.5
+    conversation_attention_max_resumes: int = 4
     # Loud audio picked up while muted is cross-correlated against the audio
     # actually being played; above this threshold it's classified as TTS echo
     # (ignored) rather than a genuine user interruption.

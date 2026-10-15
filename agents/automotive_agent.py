@@ -247,6 +247,13 @@ class AutomotiveAgent:
                 emotion_state[measure] = fact
         return emotion_state
 
+    def attention_is_low(self) -> bool:
+        """True while the knowledge-base attention fact reads low/very low
+        (e.g. "Attention level is low.") or no attention is detected."""
+        fact = self.knowledge_facts_provider().get("DriverPhysicalState.attention_level", "")
+        lowered = fact.lower()
+        return "low" in lowered or "no attention" in lowered
+
     def start_message_simulation(self) -> bool:
         return self.message_simulator.start()
 
@@ -359,9 +366,15 @@ class AutomotiveAgent:
         self, event: CarEvent, *, response_context: tuple[str, str] = ("", ""),
         response_gate: asyncio.Event | None = None,
     ) -> str:
-        async def deliver_speech(sentence: str) -> None:
+        async def deliver_speech(sentence: str, on_word=None) -> None:
             if self.tts_manager is not None:
-                await self.tts_manager.speak(sentence)
+                await self.tts_manager.speak(sentence, on_word)
+
+        def interrupt_speech() -> None:
+            if self.tts_manager is not None:
+                # Natural interruption: let the word currently being spoken
+                # finish before halting playback.
+                self.tts_manager.stop(finish_word=True)
 
         task = ConversationTask(self.opt, self.log_llm_usage, client=self.voice_llm,
                     backend=getattr(self, "ollama_backend", None))
@@ -371,15 +384,19 @@ class AutomotiveAgent:
             ConversationDelivery(
                 deliver_speech, self.on_response_update or (lambda _: None),
                 self.on_speaking_tone_changed or (lambda _: None), self.set_assistant_status,
+                attention_low=self.attention_is_low,
+                interrupt_speech=interrupt_speech,
             ),
         )
         self.conversation_history.extend([
             {"role": "user", "content": event.user_input},
-            {"role": "assistant", "content": result.text},
+            # Keep history and chat aligned with what was actually spoken;
+            # un-spoken text dropped during attention pauses is not persisted.
+            {"role": "assistant", "content": result.spoken or result.text},
         ])
         self.conversation_history = self.conversation_history[-8:]
         if self.on_response is not None:
-            self.on_response(result.text + "\n")
+            self.on_response((result.spoken or result.text) + "\n")
         return result.text
 
 

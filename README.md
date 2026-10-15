@@ -194,6 +194,9 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `conversation_mute_mic_during_tts` | Don't transcribe mic audio while the assistant is speaking (avoids self-transcription feedback loops); set `False` only with headphones | `True` |
 | `conversation_barge_in_energy_threshold` | Raw audio RMS above which muted audio is considered for barge-in | `0.035` |
 | `conversation_barge_in_min_frames` | Consecutive loud audio callbacks required before barge-in triggers | `4` |
+| `conversation_attention_pause_enabled` | Interrupt speech and wait while the `DriverPhysicalState.attention_level` knowledge fact reads low/very low (or no attention); on recovery, re-prompt the LLM with the original request and the already-spoken text as context so it continues naturally without repeating | `True` |
+| `conversation_attention_poll_seconds` | How often attention is sampled while speaking | `0.5` |
+| `conversation_attention_max_resumes` | Max LLM resume re-prompts per response before giving up | `4` |
 | `conversation_echo_correlation_threshold` | Cross-correlation against the TTS's own recent output above which loud audio is classified as echo (ignored) rather than barge-in | `0.6` |
 | `influxdb_url` | InfluxDB server URL | `http://localhost:8086` |
 | `influxdb_token` | InfluxDB auth token | `my-super-secret-token` |

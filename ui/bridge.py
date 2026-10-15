@@ -264,6 +264,19 @@ class VehicleBridge:
     async def stopFriendMessageSimulation(self) -> bool:
         return await self.stopMessageSimulation()
 
+    def startDrivingSimulation(self, video_url: str | None = None) -> str:
+        """Show the driving-simulation YouTube video in the Web UI."""
+        url = (video_url or "").strip() or self.opt.driving_video_url
+        if not url.startswith(("http://", "https://")):
+            self.logger.warning("Ignoring invalid driving simulation URL", url=url)
+            url = self.opt.driving_video_url
+        self._emit("drivingSimulationChanged", {"active": True, "video_url": url})
+        return url
+
+    def stopDrivingSimulation(self) -> bool:
+        self._emit("drivingSimulationChanged", {"active": False, "video_url": ""})
+        return True
+
     def send_event(self, ui_event_type: str, value: Any):
         if not self.agent.is_listening:
             return

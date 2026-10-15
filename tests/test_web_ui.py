@@ -335,7 +335,7 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
                 pass
 
         class FakeTTS:
-            async def speak(self, text: str) -> None:
+            async def speak(self, text: str, on_word=None) -> None:
                 order.append(("speak", text))
 
         async def create(**kwargs):

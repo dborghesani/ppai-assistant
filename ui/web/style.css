@@ -223,6 +223,14 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 @keyframes message-in { from { opacity: 0; transform: translateY(7px); } }
 .composer { display: grid; grid-template-columns: 48px minmax(100px, 1fr) auto; gap: 9px; align-items: end; border-top: 1px solid var(--line); padding-top: 17px; }
 .music-panel { min-width: 0; border-top: 1px solid var(--line); padding: 12px 0; }
+.driving-video-panel { min-width: 0; border-top: 1px solid var(--line); padding: 12px; margin-top: 10px; }
+.driving-video-panel h3 { margin-bottom: 8px; font-size: 12px; }
+.driving-video-heading { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.driving-video-heading input { flex: 1 1 180px; min-width: 0; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface-2); color: inherit; font-size: 11px; }
+.driving-video-frame-holder { position: relative; aspect-ratio: 16 / 9; margin-top: 10px; border-radius: 8px; overflow: hidden; background: #000; }
+.driving-video-frame-holder iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.driving-video-transport { display: flex; gap: 6px; margin-top: 10px; }
+.driving-video-transport .icon-button { width: 36px; height: 32px; display: grid; place-items: center; padding: 0; font-size: 12px; }
 .music-heading { display: flex; flex-wrap: wrap; gap: 6px 12px; justify-content: space-between; font-size: 13px; }
 .music-heading strong { overflow-wrap: anywhere; }
 .music-heading span, .music-track small { color: var(--muted); font-size: 11px; }

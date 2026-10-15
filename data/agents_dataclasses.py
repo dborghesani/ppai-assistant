@@ -253,6 +253,7 @@ class AssistantStatus(str, Enum):
     ACT = "act"  # UI: brief enlargement pulse, then returns to idle size
     NOTIFY = "notify"  # UI: stationary white ball; no dedicated animation
     BACKGROUND_TASK_RUNNING = "background_task_running"  # UI: vertically focused wobble
+    PAUSED_ATTENTION = "paused_attention"  # UI: stationary white ball; speech halted on low driver attention
 
     @property
     def description(self) -> str:
@@ -264,4 +265,5 @@ class AssistantStatus(str, Enum):
             AssistantStatus.ACT: "The assistant is performing an action.",
             AssistantStatus.NOTIFY: "The assistant is notifying the user.",
             AssistantStatus.BACKGROUND_TASK_RUNNING: "The assistant is running a background task.",
+            AssistantStatus.PAUSED_ATTENTION: "The assistant paused speaking because the driver's attention is low.",
         }[self]

@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 @dataclass
@@ -57,8 +60,9 @@ class ConfigAssistant:
     data_websocket_url: str = "ws://localhost:4545/stream"
     data_replay_folder: str = ""
 
-    # Driving simulation: YouTube video shown in the Web UI (Scenarios tab)
-    driving_video_url: str = "https://www.youtube.com/watch?v=ytiM1nMv_xU"
+    # Driving simulation: local recording shown in the Web UI (Scenarios tab).
+    # Path relative to the project root; an extension is appended when missing.
+    driving_video: str = "recordings/rome.mp4"
 
     # MQTT broker configuration
     mqtt_enabled: bool = False

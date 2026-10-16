@@ -164,77 +164,115 @@ let activeTab = "driver";
 let activeScenario = null;
 let drivingSimulationActive = false;
 let drivingVideoReady = false;
-const DEFAULT_DRIVING_VIDEO_URL = "https://www.youtube.com/watch?v=ytiM1nMv_xU";
-const YOUTUBE_URL_PATTERN = /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([\w-]{6,20})/;
+const DEFAULT_DRIVING_VIDEO_URL = "/recordings/rome.mp4";
 let drivingVideoUrl = DEFAULT_DRIVING_VIDEO_URL;
-
-function youtubeEmbedUrl(rawUrl, autoplay) {
-  const match = String(rawUrl || drivingVideoUrl).match(YOUTUBE_URL_PATTERN);
-  if (!match) return null;
-  const videoId = match[1];
-  return `https://www.youtube.com/embed/${videoId}?enablejsapi=1&rel=0&playsinline=1&autoplay=1`;
-}
 
 function loadDrivingVideo(rawUrl, autoplay = true) {
   const holder = document.querySelector("#driving-video-frame-holder");
   if (!holder) return false;
-  const embedUrl = youtubeEmbedUrl(rawUrl, autoplay);
-  if (!embedUrl) {
-    showToast("Invalid YouTube URL");
-    return false;
-  }
   drivingVideoUrl = rawUrl;
   drivingVideoReady = false;
   holder.replaceChildren();
-  const frame = document.createElement("iframe");
-  frame.title = "Driving simulation video";
-  frame.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
-  frame.allowFullscreen = true;
-  frame.src = `${embedUrl}&origin=${encodeURIComponent(location.origin)}`;
-  frame.addEventListener("load", () => { drivingVideoReady = true; });
-  holder.append(frame);
+  const video = document.createElement("video");
+  video.title = "Driving simulation video";
+  video.src = drivingVideoUrl;
+  video.loop = true;
+  video.autoplay = autoplay;
+  video.muted = true;
+  video.playsInline = true;
+  video.addEventListener("canplay", () => { drivingVideoReady = true; });
+  video.addEventListener("play", () => setDrivingVideoToggleIcon(false));
+  video.addEventListener("pause", () => setDrivingVideoToggleIcon(true));
+  video.addEventListener("loadedmetadata", updateDrivingVideoSlider);
+  video.addEventListener("timeupdate", updateDrivingVideoSlider);
+  video.addEventListener("error", () => showToast("Could not load driving recording"));
+  holder.append(video);
   return true;
 }
 
-function sendDrivingVideoCommand(command, args = []) {
-  const frame = document.querySelector("#driving-video-frame-holder iframe");
-  if (!frame || !drivingVideoReady) return;
-  frame.contentWindow.postMessage(
-    JSON.stringify({ event: "command", func: command, args }), "*");
-  if (command === "seekTo") {
-    setTimeout(() => sendDrivingVideoCommand("playVideo"), 80);
+function drivingVideoElement() {
+  return document.querySelector("#driving-video-frame-holder video");
+}
+
+function setDrivingVideoToggleIcon(paused) {
+  const button = document.querySelector("#driving-video-toggle");
+  if (!button) return;
+  button.textContent = paused ? "\u25B6" : "\u275A\u275A";
+  button.title = paused ? "Play video" : "Pause video";
+}
+
+function sendDrivingVideoCommand(command, value) {
+  const video = drivingVideoElement();
+  if (command === "togglePlay") {
+    if (!video) return;
+    if (video.paused) video.play().catch(() => {});
+    else video.pause();
+  } else if (command === "seekTo") {
+    if (!video) return;
+    video.currentTime = typeof value === "number" ? value : 0;
+    if (video.paused) video.play().catch(() => {});
   }
 }
 
-let drivingVideoPlayerTime = null;
-window.addEventListener("message", event => {
-  let payload = null;
-  try { payload = JSON.parse(event.data); } catch (_) { return; }
-  if (!payload || payload.event !== "infoDelivery" || !payload.info) return;
-  const info = payload.info;
-  const videoId = info.videoData?.video_id
-    || String(drivingVideoUrl).match(YOUTUBE_URL_PATTERN)?.[1] || null;
-  const seconds = typeof info.currentTime === "number" ? info.currentTime : drivingVideoPlayerTime?.seconds;
-  drivingVideoPlayerTime = { videoId, seconds };
-});
+let drivingVideoScrubbing = false;
+let drivingVideoWasPlaying = false;
 
-bridge.on("drivingVideoCaptureRequested", () => {
-  if (!drivingSimulationActive) {
-    bridge.call("reportDrivingVideoTime", null, null).catch(() => {});
+function startDrivingVideoScrub() {
+  const video = drivingVideoElement();
+  if (!video || drivingVideoScrubbing) return;
+  drivingVideoScrubbing = true;
+  drivingVideoWasPlaying = !video.paused && !video.ended;
+  video.pause();
+}
+
+function scrubDrivingVideo(seconds) {
+  const video = drivingVideoElement();
+  if (!video || !Number.isFinite(seconds)) return;
+  video.currentTime = seconds;
+  updateDrivingVideoSlider(true);
+}
+
+function endDrivingVideoScrub() {
+  if (!drivingVideoScrubbing) return;
+  drivingVideoScrubbing = false;
+  if (drivingVideoWasPlaying) drivingVideoElement()?.play().catch(() => {});
+}
+
+function formatDrivingVideoTime(seconds) {
+  if (!Number.isFinite(seconds)) return "0:00";
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function updateDrivingVideoSlider(scrubbing = false) {
+  const video = drivingVideoElement();
+  const slider = document.querySelector("#driving-video-seek");
+  const label = document.querySelector("#driving-video-time");
+  if (!slider || !label) return;
+  if (!video || !Number.isFinite(video.duration) || video.duration <= 0) {
+    slider.value = 0; slider.disabled = true;
+    label.textContent = "0:00 / 0:00";
     return;
   }
-  sendDrivingVideoCommand("getCurrentTime");
-  sendDrivingVideoCommand("getVideoData");
-  setTimeout(() => {
-    const capture = drivingVideoPlayerTime;
-    bridge.call("reportDrivingVideoTime", capture?.videoId ?? null, capture?.seconds ?? null).catch(() => {});
-  }, 600);
+  slider.disabled = false;
+  slider.max = Math.floor(video.duration);
+  if (!scrubbing && !drivingVideoScrubbing && !slider.matches(":active")) {
+    slider.value = Math.floor(video.currentTime);
+  }
+  label.textContent = `${formatDrivingVideoTime(video.currentTime)} / ${formatDrivingVideoTime(video.duration)}`;
+}
+
+bridge.on("drivingVideoCaptureRequested", () => {
+  const video = drivingVideoElement();
+  const seconds = drivingSimulationActive && video && drivingVideoReady
+    ? video.currentTime : null;
+  bridge.call("reportDrivingVideoTime", null, seconds).catch(() => {});
 });
 
 function setDrivingSimulation(active) {
   drivingSimulationActive = active;
   if (!active) {
-    sendDrivingVideoCommand("pauseVideo");
+    drivingVideoElement()?.pause();
     drivingVideoReady = false;
     document.querySelector("#driving-video-frame-holder")?.replaceChildren();
   }
@@ -253,13 +291,16 @@ function setDrivingSimulation(active) {
 const DRIVING_VIDEO_BLOCK_HTML = `
   <h3>Driving simulation video</h3>
   <div class="driving-video-heading">
-    <input id="driving-video-url" type="url" placeholder="https://www.youtube.com/watch?v=..." aria-label="YouTube video URL">
+    <input id="driving-video-url" type="text" placeholder="e.g. paris (file in recordings folder)" aria-label="Recording name">
     <button id="driving-video-load" class="icon-button" type="button" title="Load video" aria-label="Load video">&#8601;</button>
   </div>
   <div id="driving-video-frame-holder" class="driving-video-frame-holder"></div>
+  <div class="driving-video-seek-row">
+    <input id="driving-video-seek" class="driving-video-seek" type="range" min="0" max="0" step="1" value="0" disabled aria-label="Video position">
+    <span id="driving-video-time" class="driving-video-time">0:00 / 0:00</span>
+  </div>
   <div class="driving-video-transport">
-    <button id="driving-video-play" class="icon-button" type="button" title="Play video" aria-label="Play video">\u25B6</button>
-    <button id="driving-video-pause" class="icon-button" type="button" title="Pause video" aria-label="Pause video">\u275A\u275A</button>
+    <button id="driving-video-toggle" class="icon-button" type="button" title="Play/Pause video" aria-label="Play or pause video">\u25B6</button>
     <button id="driving-video-restart" class="icon-button" type="button" title="Restart video" aria-label="Restart video">&#8634;</button>
   </div>`;
 let conversationActive = false;
@@ -820,6 +861,7 @@ controlContent.addEventListener("input", event => {
     controlState[controlStateKey(event.target.dataset.class, event.target.dataset.key)] = value;
     if (event.target.dataset.class === "VehicleState" && event.target.dataset.key === "audio_volume") updateMusicVolume();
   }
+  if (event.target.matches("#driving-video-seek")) scrubDrivingVideo(Number(event.target.value));
 });
 controlContent.addEventListener("change", event => {
   const target = event.target;
@@ -845,21 +887,32 @@ controlContent.addEventListener("change", event => {
   }
 });
 
+controlContent.addEventListener("pointerdown", event => {
+  if (event.target.matches("#driving-video-seek")) startDrivingVideoScrub();
+});
+controlContent.addEventListener("pointerup", event => {
+  if (event.target.matches("#driving-video-seek")) endDrivingVideoScrub();
+});
+controlContent.addEventListener("pointercancel", event => {
+  if (event.target.matches("#driving-video-seek")) endDrivingVideoScrub();
+});
+
 controlContent.addEventListener("click", event => {
-  if (event.target.closest("#driving-video-play")) { sendDrivingVideoCommand("playVideo"); return; }
-  if (event.target.closest("#driving-video-pause")) { sendDrivingVideoCommand("pauseVideo"); return; }
-  if (event.target.closest("#driving-video-restart")) { sendDrivingVideoCommand("seekTo", [0, true]); return; }
+  if (event.target.closest("#driving-video-toggle")) { sendDrivingVideoCommand("togglePlay"); return; }
+  if (event.target.closest("#driving-video-restart")) { sendDrivingVideoCommand("seekTo", 0); return; }
   if (event.target.closest("#driving-video-load")) {
     const input = document.querySelector("#driving-video-url");
-    const requestedUrl = (input?.value || "").trim();
-    if (requestedUrl && loadDrivingVideo(requestedUrl)) {
-      drivingVideoUrl = requestedUrl;
-      if (input) {
-        input.value = "";
-        input.placeholder = drivingVideoUrl;
-      }
-      showToast("Driving video loaded");
-    }
+    const requested = (input?.value || "").trim();
+    bridge.call("startDrivingSimulation", requested || null)
+      .then(name => {
+        if (!name) { showToast("Recording not found in recordings"); return; }
+        if (input) {
+          input.value = "";
+          input.placeholder = name;
+        }
+        showToast("Driving video loaded");
+      })
+      .catch(() => showToast("Could not load recording"));
     return;
   }
   const button = event.target.closest(".scenario-button");

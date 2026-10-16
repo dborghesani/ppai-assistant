@@ -6,6 +6,7 @@ from typing import Any
 import structlog
 from aiohttp import WSMsgType, web
 from ui.bridge import VehicleBridge
+from config import PROJECT_ROOT
 
 
 class WebUIServer:
@@ -56,6 +57,10 @@ class WebUIServer:
         self._app.router.add_get("/ws", self._websocket)
         self._app.router.add_get("/health", self._health)
         self._app.router.add_static("/static", static_dir)
+        driving_video = getattr(getattr(bridge, "opt", None), "driving_video", "") or "recordings/rome.mp4"
+        recordings_dir = PROJECT_ROOT / Path(driving_video).parent
+        recordings_dir.mkdir(parents=True, exist_ok=True)
+        self._app.router.add_static("/recordings", recordings_dir)
 
         for event_name in (
             "responseReceived",

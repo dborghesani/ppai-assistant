@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 import re
 import time
 from dataclasses import dataclass, field
@@ -17,10 +18,11 @@ from agents.tasks import mood_music
 from agents.tasks.pre_classify import PreClassification, PreClassificationUpdate, PreClassificationInput, RequestPreClassifier, ResponseSource
 from agents.tasks.routing import RoutingInput, TaskType, TelemetryRouter
 from agents.tasks.vehicle_manual import response_context as manual_response_context
-from config import ConfigAssistant
+from config import PROJECT_ROOT, ConfigAssistant
 from crewai import LLM
 from data.events import CarEvent, EventName
 from openai import AsyncOpenAI
+from tools.driving_frame_capture import capture_frame as capture_video_frame, RecordingFrameCapture
 from managers.vehicle_manual_manager import VehicleManualManager
 from sim.friend_message_agent import FriendMessageAgent
 
@@ -123,9 +125,12 @@ class AutomotiveAgent:
             registered_actions=self.action_manager.registered_actions,
         )
         self.driving_frame_provider: Callable[[], Awaitable[dict | None]] = async_no_driving_frame
+        self.frame_capture = RecordingFrameCapture(
+            PROJECT_ROOT / Path(opt.driving_video).parent
+        )
         self.surroundings_task = surroundings.SurroundingsTask(
             opt, self.log_llm_usage, backend=self.ollama_backend, speak=self.speak,
-            frame_provider=self._describe_frame,
+            frame_provider=self._describe_frame, set_status=self.set_assistant_status,
         )
         def build_decision_backend(model: str | None) -> DecisionBackend:
             if opt.decision_model == "kev":
@@ -172,8 +177,13 @@ class AutomotiveAgent:
             capture = await self.driving_frame_provider()
             if not capture:
                 return None
-            return await surroundings.capture_scene_frame(
-                capture.get("video_id"), capture.get("seconds"),
+            frame = await capture_video_frame(
+                self.frame_capture, capture.get("video_path"), capture.get("seconds"),
+            )
+            if frame is None:
+                return None
+            return surroundings.SceneFrame(
+                image_base64=frame.image_base64, source=frame.source,
             )
         except Exception as error:
             self.logger.warning("Driving frame provider failed", error=str(error))
@@ -218,15 +228,15 @@ class AutomotiveAgent:
         self.set_assistant_status(status)
 
     def set_assistant_status(self, status: AssistantStatus) -> None:
-        if self.assistant_status is status:
+        if getattr(self, "_assistant_status", None) is status:
             if (
                 status is AssistantStatus.ASK_PERMISSION_TO_TALK
-                and self.on_assistant_status_changed is not None
+                and getattr(self, "on_assistant_status_changed", None) is not None
             ):
                 self.on_assistant_status_changed(status)
             return
         self._assistant_status = status
-        if self.on_assistant_status_changed is not None:
+        if getattr(self, "on_assistant_status_changed", None) is not None:
             self.on_assistant_status_changed(status)
 
     @property
@@ -710,20 +720,26 @@ class AutomotiveAgent:
         # A real action replaces the speculative informational reply.
         await self.cancel_prepared_response(preparation)
         if decision.action is ActionType.DESCRIBE_SURROUNDINGS:
-            # Frame capture and vision analysis can take a while; cover the whole
-            # turn with the standard wait-message mechanism until the reply lands.
-            # The task holds its replies until the acknowledgement has finished so
-            # chat text and speech stay in order even when the clip is cached and
-            # the analysis is fast.
+            # Frame capture runs concurrently, but the vision analysis is the
+            # most expensive LLM call of the turn: hold it back until the wait
+            # message has been generated and delivered, so both calls don't
+            # queue on the GPU and the acknowledgement is heard immediately.
+            # The task holds its replies until the acknowledgement has finished
+            # so chat text and speech stay in order even when the frame is
+            # cached and the analysis is fast.
             self.surroundings_task.speak_gate = asyncio.Event()
+            self.surroundings_task.analysis_gate = asyncio.Event()
             describe_task = asyncio.create_task(
                 self.surroundings_task.describe(event.user_input, self.conversation_history)
             )
-            await self.generate_wait_message(
-                event, pre_classification.response_source, describe_task,
-                wait_message_claimed=asyncio.Event(), action_pending=True,
-            )
-            self.surroundings_task.speak_gate.set()
+            try:
+                await self.generate_wait_message(
+                    event, pre_classification.response_source, describe_task,
+                    wait_message_claimed=asyncio.Event(), action_pending=True,
+                )
+            finally:
+                self.surroundings_task.analysis_gate.set()
+                self.surroundings_task.speak_gate.set()
             await describe_task
             return
         if decision.action in self.action_manager.registered_actions and decision.intervention_type is InterventionType.ACT:
@@ -912,36 +928,48 @@ class AutomotiveAgent:
         self, chunks: asyncio.Queue[str | None]
     ) -> None:
         displayed_message = ""
-        while (chunk := await chunks.get()) is not None:
-            chunk = chunk.strip()
-            if not chunk:
-                continue
-            displayed_message = f"{displayed_message} {chunk}".strip()
-            on_response_update = getattr(self, "on_response_update", None)
-            if on_response_update is not None:
-                on_response_update(displayed_message)
-            tts_manager = getattr(self, "tts_manager", None)
-            if tts_manager is not None:
-                await tts_manager.speak(chunk)
-        if displayed_message:
-            on_response = getattr(self, "on_response", None)
-            if on_response is not None:
-                on_response(displayed_message + "\n")
+        self.set_assistant_status(AssistantStatus.TALKING)
+        try:
+            while (chunk := await chunks.get()) is not None:
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                displayed_message = f"{displayed_message} {chunk}".strip()
+                on_response_update = getattr(self, "on_response_update", None)
+                if on_response_update is not None:
+                    on_response_update(displayed_message)
+                tts_manager = getattr(self, "tts_manager", None)
+                if tts_manager is not None:
+                    await tts_manager.speak(chunk)
+            if displayed_message:
+                on_response = getattr(self, "on_response", None)
+                if on_response is not None:
+                    on_response(displayed_message + "\n")
+        finally:
+            self.set_assistant_status(AssistantStatus.IDLE)
 
     async def speak(
         self, message: str, ui_suffix: str = "", tone: ToneType | None = None
     ) -> None:
-        """Single place that keeps chat history, UI text and TTS in sync for a one-shot message."""
+        """Speak one short message keeping chat text and TTS word-synced."""
         self.conversation_history.append({"role": "assistant", "content": message})
         self.conversation_history = self.conversation_history[-8:]
         self.set_assistant_status(AssistantStatus.TALKING)
         if self.on_speaking_tone_changed is not None:
             self.on_speaking_tone_changed(tone.value if tone is not None else None)
         try:
-            if self.on_response is not None:
-                self.on_response(f"{message}\n{ui_suffix}" if ui_suffix else message + "\n")
+            on_update = getattr(self, "on_response_update", None)
+            on_final = getattr(self, "on_response", None)
+
+            def on_word(prefix: str) -> None:
+                # Chat shows exactly what has been spoken so far.
+                if on_update is not None:
+                    on_update(prefix)
+
             if self.tts_manager is not None:
-                await self.tts_manager.speak(message)
+                await self.tts_manager.speak(message, on_word)
+            if on_final is not None:
+                on_final(message + "\n")
         finally:
             if self.on_speaking_tone_changed is not None:
                 self.on_speaking_tone_changed(None)

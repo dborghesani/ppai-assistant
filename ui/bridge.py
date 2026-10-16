@@ -4,12 +4,12 @@ import math
 import time
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, DefaultDict, Tuple
 
 import structlog
 from data.agents_dataclasses import ActionType
 from agents.automotive_agent import AutomotiveAgent
-from agents.tasks.surroundings import VIDEO_ID_PATTERN
 from config import ConfigAssistant
 from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
 from managers.database_manager import DatabaseManager
@@ -68,7 +68,7 @@ class VehicleBridge:
         self.agent.driver_preferences_provider = self.dumpDriverPreferences
         self.agent.driving_frame_provider = self.capture_driving_frame
 
-        self._driving_video_url = ""
+        self._driving_video_path: Path | None = None
         self._driving_capture_result: dict | None = None
         self._driving_capture_event: asyncio.Event | None = None
         self._last_driving_time: dict | None = None
@@ -271,25 +271,38 @@ class VehicleBridge:
     async def stopFriendMessageSimulation(self) -> bool:
         return await self.stopMessageSimulation()
 
-    def startDrivingSimulation(self, video_url: str | None = None) -> str:
-        """Show the driving-simulation YouTube video in the Web UI."""
-        url = (video_url or "").strip() or self.opt.driving_video_url
-        if not url.startswith(("http://", "https://")):
-            self.logger.warning("Ignoring invalid driving simulation URL", url=url)
-            url = self.opt.driving_video_url
-        self._driving_video_url = url
-        self._emit("drivingSimulationChanged", {"active": True, "video_url": url})
-        return url
+    def startDrivingSimulation(self, requested: str | None = None) -> str:
+        """Show a local driving recording in the Web UI; resolves under recordings/."""
+        path = self._resolve_recording(requested)
+        if path is None:
+            self._emit("drivingSimulationChanged", {"active": False, "video_url": ""})
+            return ""
+        self._driving_video_path = path
+        self._emit("drivingSimulationChanged", {
+            "active": True, "video_url": f"/recordings/{path.name}",
+        })
+        return path.name
+
+    def _resolve_recording(self, requested: str | None) -> Path | None:
+        """Map a bare name, file name or path to an existing recording file."""
+        return self.agent.frame_capture.resolve_recording(requested, self.opt.driving_video)
+
+    @property
+    def recordings_dir(self) -> Path:
+        """Directory of the current recording (for serving it to the UI)."""
+        if self._driving_video_path is not None:
+            return self._driving_video_path.parent
+        return Path(__file__).resolve().parent.parent / "recordings"
 
     def stopDrivingSimulation(self) -> bool:
-        self._driving_video_url = ""
+        self._driving_video_path = None
         self._driving_capture_result = None
         self._emit("drivingSimulationChanged", {"active": False, "video_url": ""})
         return True
 
     async def capture_driving_frame(self) -> dict | None:
-        """Ask the Web UI for the current video id and playback time."""
-        if not self._driving_video_url:
+        """Ask the Web UI for the current recording and playback time."""
+        if not self._driving_video_path:
             return None
         self._driving_capture_result = None
         self._driving_capture_event = asyncio.Event()
@@ -299,19 +312,12 @@ class VehicleBridge:
         except asyncio.TimeoutError:
             self.logger.warning("Driving video capture time not reported by the UI")
         result = self._driving_capture_result or {}
-        if result.get("video_id"):
-            return result
-        # Fall back to whatever time the UI last reported, or the start of the
-        # video; without a precise frame time the assistant still works from
-        # the video id (thumbnail or beginning of the clip).
         fallback = self._last_driving_time or {}
-        video_id = result.get("video_id") or fallback.get("video_id")
-        if not video_id:
-            match = VIDEO_ID_PATTERN.search(self._driving_video_url)
-            video_id = match.group(1) if match else None
-        if not video_id:
-            return None
-        return {"video_id": video_id, "seconds": fallback.get("seconds")}
+        seconds = result.get("seconds")
+        if seconds is None:
+            seconds = fallback.get("seconds")
+        # Without a reported time the recording is read from its start.
+        return {"video_path": str(self._driving_video_path), "seconds": seconds or 0.0}
 
     def reportDrivingVideoTime(self, video_id: str | None, seconds: float | None) -> bool:
         self._last_driving_time = {"video_id": video_id or None, "seconds": seconds}

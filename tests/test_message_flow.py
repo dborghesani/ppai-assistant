@@ -49,6 +49,8 @@ class FakeCompletions:
 def make_agent(context: list[str] | None = None) -> AutomotiveAgent:
     agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
     agent.logger = Mock()
+    agent._assistant_flags = AssistantStatus.IDLE.bit
+    agent.on_assistant_status_changed = None
     agent.opt = SimpleNamespace(
         ollama_model="test-model", context_window_size=4096,
         ollama_host="localhost", ollama_port=11434, ollama_timeout=30,
@@ -378,7 +380,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         agent.messages_task.handle_action(ActionType.READ_PENDING_MESSAGES)
         self.assertIsNone(agent.messages_task.most_urgent_classification())
 
-    async def test_stopping_simulation_leaves_state_untouched(self):
+    async def test_stopping_simulation_clears_pending_messages(self):
         agent = make_agent()
         pending_message = IncomingMessage(sender="Luca", text="Call me soon")
         agent.messages_task.pending_messages.append(PendingMessage(pending_message))
@@ -386,20 +388,32 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
 
         self.assertTrue(await agent.stop_message_simulation())
 
-        self.assertEqual(
-            list(agent.messages_task.pending_messages), [PendingMessage(pending_message)]
-        )
+        self.assertEqual(list(agent.messages_task.pending_messages), [])
+        self.assertEqual(agent.messages_task.read_task, None)
 
-    async def test_repeated_permission_status_is_emitted_to_restart_animation(self):
+    async def test_permission_flag_persists_across_status_changes(self):
         agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
-        agent._assistant_status = AssistantStatus.ASK_PERMISSION_TO_TALK
+        agent._assistant_status = AssistantStatus.IDLE
+        agent._assistant_flags = AssistantStatus.IDLE.bit
         agent.on_assistant_status_changed = Mock()
 
         agent.set_assistant_status(AssistantStatus.ASK_PERMISSION_TO_TALK)
 
-        agent.on_assistant_status_changed.assert_called_once_with(
-            AssistantStatus.ASK_PERMISSION_TO_TALK
+        self.assertEqual(
+            agent.assistant_flags
+            & AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
+            AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
         )
+        self.assertEqual(agent.assistant_status, AssistantStatus.IDLE)
+
+        # The overlay survives any later activity and its end.
+        agent.set_assistant_status(AssistantStatus.TALKING)
+        agent.set_assistant_status(AssistantStatus.IDLE)
+        self.assertTrue(agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit)
+
+        agent.clear_permission_to_talk()
+        self.assertFalse(agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit)
+        self.assertEqual(agent.on_assistant_status_changed.call_count, 4)
 
     async def test_agent_queues_message_with_current_knowledge_context(self):
         for privacy_fact in ("Privacy mode is off.", "Privacy mode is on."):
@@ -424,8 +438,8 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         agent.messages_task.pending_messages.extend((PendingMessage(first), PendingMessage(second)))
 
         agent.action_manager.handle_decision(ActionType.ASK_PERMISSION_TO_TALK)
-        self.assertEqual(
-            agent.assistant_status, AssistantStatus.ASK_PERMISSION_TO_TALK
+        self.assertTrue(
+            agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit
         )
 
         self.assertEqual(
@@ -438,6 +452,7 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         self.assertEqual(agent.messages_task.pending_count, 2)
         await read_task
         self.assertFalse(agent.messages_task.pending_messages)
+        self.assertFalse(agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit)
 
 
     async def test_read_action_interprets_messages_for_named_driver(self):
@@ -470,7 +485,12 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
                 "Luca: Marco is planning a surprise party for Sara."
             ),
         })  # relay payload threads the name and every queued message
-        self.assertIn("first sentence must already be concrete and informative", manager.relay_crew.tasks[0].description)
+        relay_task = manager.relay_crew.tasks[0]
+        relay_task.interpolate_inputs_and_add_conversation_history(run_call.args[1])
+        self.assertIn("Driver: David", relay_task.description)
+        self.assertIn(f"Luca: {first.text}", relay_task.description)
+        self.assertIn(f"Luca: {second.text}", relay_task.description)
+        self.assertIn("first sentence must already be concrete and informative", relay_task.description)
         self.assertEqual(
             [line for line in agent.conversation_history if line["role"] == "assistant"],
             [
@@ -483,6 +503,35 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    async def test_message_decision_does_not_duplicate_relay_with_spoken_message(self):
+        from data.events import EventName
+
+        agent = make_agent()
+        manager = agent.messages_task
+        manager.read_batching_seconds = 0
+        manager.pending_messages.append(PendingMessage(IncomingMessage(
+            sender="Luca", text="Marco's engine has stalled. Can you send an urgent update?",
+        )))
+        relay = "Luca says Marco's engine has stalled and asks for an urgent update."
+        manager.backend.run = AsyncMock(return_value=messages.SpokenRelay(text=relay))
+        decision = NotificationDecision(
+            urgency=UrgencyType.HIGH, tone=ToneType.SERIOUS,
+            intervention_type=InterventionType.ACT,
+            action=ActionType.READ_PENDING_MESSAGES,
+            suggestion_type=SuggestionType.NONE, reason="Delivery is allowed.",
+            spoken_message="There's a message from Luca about Marco's stalled engine.",
+        )
+        event = CarEvent(SkillType.NONE, EventName.KNOWLEDGE_UPDATED,
+                         {"UnreadMessages.count": 1}, [])
+
+        parameters = await manager.handle_decision(event, decision, on_classified=Mock())
+        await manager.read_task
+
+        self.assertIsNone(parameters)
+        self.assertEqual(agent.conversation_history[-1]["content"], relay)
+        self.assertEqual(manager.backend.run.await_count, 1)
+        self.assertEqual(manager.pending_count, 0)
 
     async def test_postponed_delivery_acknowledges_delay_and_leaves_private_message_queued(self):
         agent = make_agent()

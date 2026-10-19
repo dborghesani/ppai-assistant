@@ -14,6 +14,10 @@ class ConfigAssistant:
     web_ui_host: str = "127.0.0.1"
     web_ui_port: int = 8765
     web_ui_open_browser: bool = True
+    # Seconds between the "ask permission to talk" vibration pulses shown in
+    # the dashboard status dot while messages are waiting and the assistant
+    # is idle. Exposed to the UI via the websocket ready payload.
+    ui_permission_reminder_seconds: int = 10
 
     stellantis_llm: str = ""
 

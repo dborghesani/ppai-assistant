@@ -88,31 +88,17 @@ class TTSManager:
             device = "cpu"
 
         try:
-            logger.info(
-                "Loading Kyutai TTS model", hf_repo=hf_repo
-            )
-            checkpoint_started = time.perf_counter()
+            load_started = time.perf_counter()
             checkpoint_info = _checkpoint_info_cache_first(hf_repo)
-            logger.info(
-                "Kyutai TTS checkpoint files ready",
-                elapsed_seconds=round(time.perf_counter() - checkpoint_started, 2),
-            )
-            model_started = time.perf_counter()
             self._model = TTSModel.from_checkpoint_info(
                 checkpoint_info, n_q=n_q, temp=0.6, device=device
             )
-            logger.info(
-                "Kyutai TTS weights loaded",
-                device=device,
-                elapsed_seconds=round(time.perf_counter() - model_started, 2),
-            )
-            voice_started = time.perf_counter()
             self.set_voice(ToneType.CALM)
             logger.info(
-                "Kyutai TTS voice loaded",
-                elapsed_seconds=round(time.perf_counter() - voice_started, 2),
+                "Kyutai TTS model loaded successfully",
+                device=device,
+                elapsed_seconds=round(time.perf_counter() - load_started, 2),
             )
-            logger.info("Kyutai TTS model loaded successfully")
         except Exception as e:
             logger.warning(
                 "Failed to load Kyutai TTS model, TTS disabled", error=str(e)
@@ -219,7 +205,7 @@ class TTSManager:
                     prefixes=prefixes,
                     on_frame=lambda frame: None,
                 )
-            logger.info(f"TTS warmup done in {time.time() - t0:.2f}s")
+            logger.debug(f"TTS warmup done in {time.time() - t0:.2f}s")
         except Exception as e:
             logger.warning("TTS warmup failed", error=str(e))
 

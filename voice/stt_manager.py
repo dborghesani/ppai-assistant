@@ -94,32 +94,16 @@ class STTManager:
             self._device = device
 
         try:
-            logger.info(f"Loading Kyutai STT model", hf_repo=hf_repo)
-            checkpoint_started = time.perf_counter()
+            load_started = time.perf_counter()
             self._info = checkpoint_info_cache_first(hf_repo)
-            logger.info(
-                "Kyutai STT checkpoint files ready",
-                elapsed_seconds=round(time.perf_counter() - checkpoint_started, 2),
-            )
-            mimi_started = time.perf_counter()
             self._mimi = self._info.get_mimi(device=device)
             self._sample_rate = self._mimi.sample_rate
-            logger.info(
-                "Kyutai STT audio model loaded",
-                elapsed_seconds=round(time.perf_counter() - mimi_started, 2),
-            )
-            tokenizer_started = time.perf_counter()
             self._tokenizer = self._info.get_text_tokenizer()
-            logger.info(
-                "Kyutai STT tokenizer loaded",
-                elapsed_seconds=round(time.perf_counter() - tokenizer_started, 2),
-            )
-            language_model_started = time.perf_counter()
             self._lm = self._info.get_moshi(device=device, dtype=torch.bfloat16)
             logger.info(
-                "Kyutai STT language model loaded",
+                "Kyutai STT model loaded successfully",
                 device=device,
-                elapsed_seconds=round(time.perf_counter() - language_model_started, 2),
+                elapsed_seconds=round(time.perf_counter() - load_started, 2),
             )
         except Exception as e:
             logger.warning(
@@ -138,7 +122,7 @@ class STTManager:
         try:
             t0 = time.time()
             self._run_model(np.zeros(self._sample_rate, dtype=np.float32))
-            logger.info(f"STT warmup done in {time.time() - t0:.2f}s")
+            logger.debug(f"STT warmup done in {time.time() - t0:.2f}s")
         except Exception as e:
             logger.warning("STT warmup failed", error=str(e))
 

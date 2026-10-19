@@ -81,37 +81,32 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .status-dot.assistant-talking[data-tone="serious"] { --tone-color: #ff3b30; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
 .status-dot.assistant-talking[data-tone="empathetic"] { --tone-color: #efa2c7; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
 .status-dot.assistant-talking[data-tone="discreet"] { --tone-color: #a9bcff; background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
-.status-dot.incoming-message-classified[data-message-tone="calm"] { --tone-color: #78baff; }
-.status-dot.incoming-message-classified[data-message-tone="enthusiastic"] { --tone-color: #ffd166; }
-.status-dot.incoming-message-classified[data-message-tone="serious"] { --tone-color: #ff3b30; }
-.status-dot.incoming-message-classified[data-message-tone="empathetic"] { --tone-color: #efa2c7; }
-.status-dot.incoming-message-classified[data-message-tone="discreet"] { --tone-color: #a9bcff; }
-.status-dot.incoming-message-classified[data-message-urgency="medium"] { --tone-color: #ffd166; }
-.status-dot.incoming-message-classified[data-message-urgency="high"] { --tone-color: #ff9f0a; }
-.status-dot.incoming-message-classified[data-message-urgency="critical"] { --tone-color: #ff3b30; }
-.status-dot.incoming-message-urgent { animation: voice-wobble .42s ease-in-out 4; }
-.status-dot.incoming-message-urgent { background: var(--tone-color); box-shadow: 0 0 24px var(--tone-color); }
-.status-dot.assistant-ask_permission_to_talk,
-.status-dot.permission-returning {
+.status-dot.incoming-message-classified[data-message-tone="calm"] { --message-color: #78baff; }
+.status-dot.incoming-message-classified[data-message-tone="enthusiastic"] { --message-color: #ffd166; }
+.status-dot.incoming-message-classified[data-message-tone="serious"] { --message-color: #ff3b30; }
+.status-dot.incoming-message-classified[data-message-tone="empathetic"] { --message-color: #efa2c7; }
+.status-dot.incoming-message-classified[data-message-tone="discreet"] { --message-color: #a9bcff; }
+.status-dot.incoming-message-classified[data-message-urgency="medium"] { --message-color: #ffd166; }
+.status-dot.incoming-message-classified[data-message-urgency="high"] { --message-color: #ff9f0a; }
+.status-dot.incoming-message-classified[data-message-urgency="critical"] { --message-color: #ff3b30; }
+.status-dot.incoming-message-urgent,
+.status-dot.assistant-ask_permission_to_talk {
   position: relative;
   background: transparent;
   box-shadow: none;
+  animation: none;
 }
-.status-dot.assistant-ask_permission_to_talk::before,
-.status-dot.permission-returning::before {
+.status-dot.incoming-message-urgent::before,
+.status-dot.assistant-ask_permission_to_talk::before {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: var(--permission-rest-radius, 50%);
-  background: var(--tone-color);
+  background: var(--message-color, #fff);
 }
+.status-dot.incoming-message-urgent::before,
 .status-dot.assistant-ask_permission_to_talk::before {
   animation: permission-impatient .28s ease-in-out 7 forwards;
-}
-.status-dot.permission-returning::before {
-  border-radius: var(--permission-return-radius, 50%);
-  opacity: 0;
-  transition: border-radius .28s ease-out, opacity .28s ease-out;
 }
 .status-dot.assistant-act { animation: action-bloom .76s ease-out both; }
 .status-dot.assistant-background { animation: background-wobble 1.4s ease-in-out infinite; }

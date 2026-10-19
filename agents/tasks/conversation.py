@@ -274,16 +274,25 @@ class ConversationTask:
 		async def deliver_response() -> None:
 			nonlocal delivered_text
 			displayed = ""
+			speaking_started = False
+
+			def publish_text(text: str) -> None:
+				nonlocal speaking_started
+				delivery.on_text(text)
+				if not speaking_started:
+					speaking_started = True
+					delivery.on_tone(tone.value)
+					delivery.on_status(AssistantStatus.TALKING)
+
 			await gate.wait()
 			await tone_ready.wait()
-			delivery.on_tone(tone.value)
 			while True:
 				queue = speech_queues["answer"]
 
 				def on_spoken_word(prefix: str, base: str = displayed) -> None:
 					# Keep the chat text aligned, word for word, with the voice:
 					# fires as each word of the sentence finishes playing.
-					delivery.on_text(f"{base} {prefix}".strip())
+					publish_text(f"{base} {prefix}".strip())
 
 				interrupted = False
 				while not interrupted:
@@ -299,15 +308,15 @@ class ConversationTask:
 					# Sentence finished playing: pin the full spoken text.
 					displayed = f"{displayed} {sentence}".strip()
 					delivered_text = displayed
-					delivery.on_text(displayed)
+					publish_text(displayed)
 				if not interrupted:
 					return
 				# Pause silently until attention recovers, then ask the
 				# generation loop to re-prompt and continue naturally.
+				speaking_started = False
 				delivery.on_status(AssistantStatus.PAUSED_ATTENTION)
 				while self._attention_low(delivery):
 					await asyncio.sleep(poll_seconds)
-				delivery.on_status(AssistantStatus.TALKING)
 				delivered_text = displayed
 				pause_requested.set()
 				await pause_resumed.wait()
@@ -347,11 +356,9 @@ class ConversationTask:
 			stream_done.clear()
 			pause_requested.clear()
 			pause_resumed.set()
-			delivery.on_status(AssistantStatus.TALKING)
 			return True
 
 		delivery_task = asyncio.create_task(deliver_response())
-		delivery.on_status(AssistantStatus.TALKING)
 		try:
 			run_messages = messages
 			while True:

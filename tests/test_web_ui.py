@@ -131,14 +131,20 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         await socket.close()
 
     async def test_websocket_ready_restores_pending_permission_status(self) -> None:
-        self.web_ui.bridge.dumpAssistantStatus = lambda: AssistantStatus.ASK_PERMISSION_TO_TALK.value
+        self.web_ui.bridge.dumpAssistantStatus = lambda: {
+            "status": AssistantStatus.IDLE.value,
+            "flags": AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
+        }
 
         socket = await self.client.ws_connect("/ws")
         ready = await socket.receive_json()
 
         self.assertEqual(
             ready["data"]["assistantStatus"],
-            AssistantStatus.ASK_PERMISSION_TO_TALK.value,
+            {
+                "status": AssistantStatus.IDLE.value,
+                "flags": AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
+            },
         )
         await socket.close()
 
@@ -342,6 +348,7 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
             return FakeStream()
 
         agent = AutomotiveAgent.__new__(AutomotiveAgent)
+        agent._assistant_flags = AssistantStatus.IDLE.bit
         agent._assistant_status = AssistantStatus.IDLE
         agent.on_assistant_status_changed = None
         agent.on_speaking_tone_changed = None
@@ -350,7 +357,12 @@ class AgentResponseTimingTest(unittest.IsolatedAsyncioTestCase):
         agent.voice_llm = SimpleNamespace(
             chat=SimpleNamespace(completions=SimpleNamespace(create=create))
         )
-        agent.opt = SimpleNamespace(ollama_model="test", max_tokens=1024)
+        agent.opt = SimpleNamespace(
+            ollama_model="test",
+            max_tokens=1024,
+            context_window_size=4096,
+            conversation_attention_poll_seconds=0.01,
+        )
         agent.tts_manager = FakeTTS()
         agent.on_response_update = lambda text: order.append(("ui", text))
         agent.on_response = lambda text: order.append(("final", text.strip()))

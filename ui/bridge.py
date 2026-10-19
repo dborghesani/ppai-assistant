@@ -56,8 +56,10 @@ class VehicleBridge:
             "incomingMessageClassified",
             {"tone": tone.value, "urgency": urgency.value},
         )
-        self.agent.on_assistant_status_changed = lambda status: self._emit(
-            "assistantStatusChanged", status.value
+        self.agent.on_assistant_status_changed = lambda flags: self._emit(
+            "assistantStatusChanged", {
+                "status": self.agent.assistant_status.value, "flags": flags,
+            }
         )
         self.agent.action_manager.on_action = self.apply_vehicle_action
         self.agent.action_manager.on_meeting_completed = lambda: self._emit(
@@ -578,8 +580,9 @@ class VehicleBridge:
             }
         return {**self.agent.music_task.current, "autoplay": False}
 
-    def dumpAssistantStatus(self) -> str:
-        return self.agent.assistant_status.value
+    def dumpAssistantStatus(self) -> dict[str, Any]:
+        """Current assistant status plus the raw status bitmask for the UI."""
+        return {"status": self.agent.assistant_status.value, "flags": self.agent.assistant_flags}
 
     def musicControl(self, command: str) -> None:
         if command == "stop":

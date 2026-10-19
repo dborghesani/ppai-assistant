@@ -57,6 +57,7 @@ class MqttThreadClient:
         )
         self._topic = topic
         self._thread.start()
+        self.logger.info("MQTT client starting", host=self.host, port=self.port)
 
     def _new_client(self) -> mqtt.Client:
         # VERSION2 is available in current paho-mqtt.  Keep the fallback for
@@ -83,11 +84,6 @@ class MqttThreadClient:
             with self._lock:
                 self._client = client
             try:
-                self.logger.info(
-                    "Connecting to MQTT broker",
-                    host=self.host,
-                    port=self.port,
-                )
                 client.connect(self.host, self.port, keepalive=60)
                 # Paho performs all socket reads/writes in this worker thread.
                 client.loop_forever(retry_first_connection=False)
@@ -114,11 +110,6 @@ class MqttThreadClient:
         self._connected.set()
         if self._topic:
             client.subscribe(self._topic)
-            self.logger.info(
-                "Connected to MQTT broker and subscribed", topic=self._topic
-            )
-        else:
-            self.logger.info("Connected to MQTT broker")
 
     def _on_disconnect(
         self, client: mqtt.Client, userdata: Any, flags: Any, rc: Any, *args: Any
@@ -145,6 +136,7 @@ class MqttThreadClient:
 
     def stop(self) -> None:
         self._stop.set()
+        self.logger.info("MQTT client stopping")
         with self._lock:
             client = self._client
         if client is not None:

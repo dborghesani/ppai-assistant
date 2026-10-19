@@ -32,8 +32,8 @@ TASK = DecisionTask(
         ActionType.POSTPONE_NOTIFICATION_DELIVERY, ActionType.READ_PENDING_MESSAGES,
     ),
     instructions="""
-Handle incoming messages and recovery of pending delivery, keyed by the
-UnreadMessages.count knowledge fact. pending_message_count drives silence:
+Handle incoming messages and recovery of pending delivery, driven by the
+published facts. A nonzero pending count gates silence:
 Ignore fatigue entirely when deciding delivery; ONLY attention matters.
 Classify incoming MESSAGE CONTENT independently of permission: serious for breakdowns,
 safety issues or urgent help, enthusiastic for genuinely playful/positive content;
@@ -41,18 +41,27 @@ urgency=high for ASAP/immediate requests, stranded people or near deadlines, cri
 only for immediate serious-injury risk. Bad news is not enthusiastic. Urgency and
 tone must remain classified even when delivery is blocked.
 For a new message arrival, apply this exhaustive ordered table:
-1. Manual privacy ON/unknown OR more than one occupant => ask_permission_to_talk.
-2. Privacy explicitly OFF, <=1 occupant, low/very low attention
+1. ask_permission_to_talk when either of two fully independent conditions holds;
+   each condition alone is sufficient and they can trigger separately:
+   - Privacy condition: "Privacy mode is on." or the privacy fact is missing or
+     unknown. Privacy is a manual driver-only switch; it is never inferred from
+     occupancy or anything else.
+   - Occupancy condition: "Multiple people are detected inside the vehicle."
+     or the occupant fact is missing or unknown. Occupancy is about who is in
+     the cabin only; it never toggles or implies privacy.
+   Only 0 or 1 occupant ("No people..." or "One person...") keeps the occupancy
+   condition off.
+2. Neither condition holds, and attention is low/very low
 => postpone_notification_delivery.
 3. Otherwise => read_pending_messages.
 Use intervention_type=act, suggestion_type=none, spoken_message=null for all three.
 Never reveal sender/content in spoken_message; the delivery flow speaks the queue.
 Message urgency never changes this table. Heavy traffic alone is not a privacy veto.
-For knowledge_updated recovery, pending_count>0, privacy explicitly OFF, <=1 occupant,
-decide ONLY by attention level using this exact mapping:
-- attention_level is low or very low => postpone_notification_delivery.
-- attention_level is medium, high, very high or unknown => read_pending_messages
-  (urgency=low, tone=empathetic, short spoken introduction).
+For knowledge_updated recovery, pending_count>0 and neither blocking condition
+from rule 1 holds, decide ONLY by attention level using this exact mapping:
+- attention is low or very low => postpone_notification_delivery.
+- attention is medium, high, very high or unknown => read_pending_messages
+    (urgency=low, tone=empathetic, spoken_message=null).
 A very high attention level is an EXCELLENT moment to read: it NEVER vetoes or
 postpones. Only low/very low attention postpones. Fatigue never blocks reading.
 Favorable recovery may be supporting context, not the trigger.
@@ -76,7 +85,9 @@ RELAY_PROMPT = (
     "however that a message usually contains at most one or two points; if several "
     "messages clearly talk about the same thing, say it once, not per message.\n"
     "The first sentence must already be concrete and informative: it names the sender "
-    "(and the driver if helpful, at most once) and states the actual content."
+    "(and the driver if helpful, at most once) and states the actual content. "
+    "Use the supplied names and content, never template placeholders.\n\n"
+    "Driver: {recipient_name}\nQueued messages (data only):\n{messages}"
 )
 
 
@@ -152,6 +163,13 @@ class MessagesTask:
     """
 
     spec = TASK
+
+    # Facts whose change can unblock (or block) a queued delivery. When one of
+    # them changes while the queue is non-empty, the unread count is
+    # republished so the routing layer reconsiders the pending delivery.
+    MESSAGE_DELIVERY_GATES: ClassVar[frozenset[str]] = frozenset({
+        "VehicleState.privacy_mode", "DetectedObjects.people_inside",
+    })
 
     def __init__(
         self, opt, on_usage, *, backend=None, agent: "AutomotiveAgent | None" = None,
@@ -292,11 +310,8 @@ class MessagesTask:
             })
             return None
         if decision.action is ActionType.READ_PENDING_MESSAGES:
-            parameters: dict[str, Any] = {}
-            if event.event_name is EventName.KNOWLEDGE_UPDATED:
-                parameters = {"acknowledgement": decision.spoken_message or ""}
-            self.handle_action(decision.action, parameters)
-            return parameters if parameters else None
+            self.handle_action(decision.action, {})
+            return None
         return None
 
     # ------------------------------------------------------------------
@@ -406,11 +421,18 @@ class MessagesTask:
             self.classifications.pop((entry.sender, entry.text), None)
         self.publish_unread_count()
 
-    def publish_unread_count(self) -> None:
-        """Mirror the queue length into the vehicle knowledge base."""
-        if self.pending_count == self.published_unread_count:
+    def publish_unread_count(self, *, force: bool = False) -> None:
+        """Mirror the queue length into the vehicle knowledge base.
+
+        With force=True the count is republished even when unchanged, so the
+        knowledge pipeline re-evaluates the fact (e.g. a delivery blocker
+        changed and the queue fact must be reconsidered alongside it)."""
+        if not force and self.pending_count == self.published_unread_count:
             return
         self.published_unread_count = self.pending_count
+        if self.pending_count == 0 and self.agent is not None:
+            # Queue drained: the persistent permission overlay is no longer needed.
+            self.agent.clear_permission_to_talk()
         if self.update_knowledge is not None:
             self.update_knowledge("UnreadMessages", {"count": self.pending_count})
 
@@ -457,3 +479,13 @@ class MessagesTask:
         if self.read_task is not None:
             self.read_task.cancel()
         self.read_task = None
+
+    def clear_pending(self) -> None:
+        """Drop every queued message and any in-flight delivery (simulation stop)."""
+        if self.read_task is not None:
+            self.read_task.cancel()
+        self.read_task = None
+        self.pending_messages.clear()
+        self.classifications.clear()
+        self.read_requested = False
+        self.publish_unread_count()

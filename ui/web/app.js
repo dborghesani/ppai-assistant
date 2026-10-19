@@ -313,12 +313,16 @@ let speakingTone = null;
 let actPulseTimer = null;
 let showActPulse = false;
 let incomingMessageClassification = null;
+let permissionMessageClassification = null;
 let incomingMessageTimer = null;
 let pendingAssistantMessage = null;
 let assistantTurnPaused = false;
 let friendSimulationActive = false;
-let permissionReturnRadius = null;
-let permissionReturnTimer = null;
+const PERMISSION_BIT = 1 << 2; // AssistantStatus.ASK_PERMISSION_TO_TALK index
+let permissionReminderSeconds = 10; // overridden from config via ready payload
+let assistantFlags = 1; // idle
+let permissionReminderTimer = null;
+let permissionPulseTimer = null; // active only for the duration of a pulse
 let toastTimer;
 const musicAudio = document.querySelector("#music-audio");
 let musicQueue = [];
@@ -500,9 +504,7 @@ function setConnection(state) {
     connectionTimer = setTimeout(() => {
       connectionState = "connected";
       renderDriveStatus();
-      if (assistantStatus === "ask_permission_to_talk") {
-        restartPermissionPulse(document.querySelector("#connection-dot"));
-      }
+      maybeVibrateForPermission();
     }, 2500);
     return;
   }
@@ -570,28 +572,25 @@ function renderDriveStatus() {
       : assistantStatus === "background_task_running"
         ? "background"
         : assistantStatus;
+  const messageClassification = visualStatus === "idle"
+    ? incomingMessageClassification || (permissionPulseTimer ? permissionMessageClassification : null)
+    : null;
   const classifiedIncomingMessage =
-    !disconnected && incomingMessageClassification !== null;
+    !disconnected && messageClassification !== null;
   const urgentIncomingMessage = classifiedIncomingMessage &&
-    ["high", "critical"].includes(incomingMessageClassification.urgency);
-  const permissionReturning = permissionReturnRadius !== null;
-  dot.className = `status-dot ${connectionState} assistant-${visualStatus}${permissionReturning ? " permission-returning" : ""}${classifiedIncomingMessage ? " incoming-message-classified" : ""}${urgentIncomingMessage ? " incoming-message-urgent" : ""}`;
+    ["high", "critical"].includes(messageClassification.urgency);
+  dot.className = `status-dot ${connectionState} assistant-${visualStatus}${permissionPulseTimer ? " assistant-ask_permission_to_talk" : ""}${classifiedIncomingMessage ? " incoming-message-classified" : ""}${urgentIncomingMessage && incomingMessageClassification ? " incoming-message-urgent" : ""}`;
   if (classifiedIncomingMessage) {
-    dot.dataset.messageTone = incomingMessageClassification.tone;
-    dot.dataset.messageUrgency = incomingMessageClassification.urgency;
+    dot.dataset.messageTone = messageClassification.tone;
+    dot.dataset.messageUrgency = messageClassification.urgency;
   } else {
     delete dot.dataset.messageTone;
     delete dot.dataset.messageUrgency;
   }
-    if (permissionReturning) {
-      dot.style.setProperty("--permission-return-radius", permissionReturnRadius);
-    } else {
-      dot.style.removeProperty("--permission-return-radius");
-    }
   if (urgentIncomingMessage) {
     dot.setAttribute(
       "aria-label",
-      `Incoming message, ${incomingMessageClassification.urgency} urgency, ${incomingMessageClassification.tone} tone`,
+      `Incoming message, ${messageClassification.urgency} urgency, ${messageClassification.tone} tone`,
     );
   } else if (!disconnected && assistantStatus === "talking" && speakingTone) {
     dot.dataset.tone = speakingTone;
@@ -612,44 +611,74 @@ function setSpeakingTone(tone) {
 function setIncomingMessageClassification(classification) {
   clearTimeout(incomingMessageTimer);
   incomingMessageClassification = classification;
-  renderDriveStatus();
-  if (!classification) return;
+  permissionMessageClassification = classification;
+  if (!classification) {
+    renderDriveStatus();
+    return;
+  }
 
   if (["high", "critical"].includes(classification.urgency)) {
     const dot = document.querySelector("#connection-dot");
+    randomizePermissionShape(dot);
+    dot.classList.remove("incoming-message-urgent");
     void dot.offsetWidth;
-    renderDriveStatus();
   }
+  renderDriveStatus();
   incomingMessageTimer = setTimeout(() => {
     incomingMessageTimer = null;
     incomingMessageClassification = null;
+    if (!(assistantFlags & PERMISSION_BIT)) permissionMessageClassification = null;
     renderDriveStatus();
   }, 1960);
 }
 
 function restartPermissionPulse(dot) {
+  randomizePermissionShape(dot);
   dot.classList.remove("assistant-ask_permission_to_talk");
   void dot.offsetWidth;
   dot.classList.add("assistant-ask_permission_to_talk");
+  // The transparent-blob visual lives only for the pulse itself; afterwards
+  // the regular dot rendering takes over again (permission-impatient runs
+  // .28s x 7 iterations). Arm the pulse window before the render so
+  // renderDriveStatus keeps the class.
+  clearTimeout(permissionPulseTimer);
+  permissionPulseTimer = setTimeout(() => {
+    permissionPulseTimer = null;
+    renderDriveStatus();
+  }, 1960);
+  renderDriveStatus();
 }
 
-function setAssistantStatus(status) {
-  const leavingPermission =
-    assistantStatus === "ask_permission_to_talk" && status !== "ask_permission_to_talk";
-  const dot = document.querySelector("#connection-dot");
+// Episodic reminder: vibration only when the current visual is the idle
+// fallback; any higher-priority active state keeps its own animation and
+// suppresses the vibration until it ends.
+function maybeVibrateForPermission() {
+  if (!(assistantFlags & PERMISSION_BIT)) return;
+  if (assistantStatus !== "idle" || connectionState !== "connected") return;
+  restartPermissionPulse(document.querySelector("#connection-dot"));
+}
 
-  if (status === "ask_permission_to_talk") {
-    clearTimeout(permissionReturnTimer);
-    permissionReturnTimer = null;
-    permissionReturnRadius = null;
-    dot.style.removeProperty("--permission-return-radius");
-    randomizePermissionShape(dot);
-  } else if (leavingPermission) {
-    permissionReturnRadius = getComputedStyle(dot, "::before").borderRadius;
-    clearTimeout(incomingMessageTimer);
-    incomingMessageTimer = null;
+function setAssistantFlags(flags) {
+  const hadPermission = !!(assistantFlags & PERMISSION_BIT);
+  assistantFlags = flags;
+  const hasPermission = !!(flags & PERMISSION_BIT);
+  if (hasPermission && !permissionReminderTimer) {
+    permissionReminderTimer = setInterval(
+      maybeVibrateForPermission, permissionReminderSeconds * 1000,
+    );
+    maybeVibrateForPermission();
+  } else if (!hasPermission && hadPermission) {
+    clearInterval(permissionReminderTimer);
+    permissionReminderTimer = null;
+    permissionMessageClassification = null;
+    clearTimeout(permissionPulseTimer);
+    permissionPulseTimer = null;
+    renderDriveStatus();
   }
+}
 
+function setAssistantStatus(status, flags) {
+  if (flags !== undefined) setAssistantFlags(flags);
   assistantStatus = status;
   // When the assistant pauses for low attention, close the current bubble
   // with an ellipsis; the resumed speech opens a fresh bubble.
@@ -672,34 +701,16 @@ function setAssistantStatus(status) {
   } else if (status !== "idle") {
     showActPulse = false;
     clearTimeout(actPulseTimer);
+    // A higher-priority state takes over the visual: end any permission pulse.
+    clearTimeout(permissionPulseTimer);
+    permissionPulseTimer = null;
   }
   renderDriveStatus();
-  if (status === assistantStatus && status === "ask_permission_to_talk") {
-    restartPermissionPulse(dot);
-  }
-  if (leavingPermission) {
-    requestAnimationFrame(() => {
-      if (permissionReturnRadius !== null) {
-        permissionReturnRadius = permissionRestRadius();
-        renderDriveStatus();
-      }
-    });
-    clearTimeout(permissionReturnTimer);
-    permissionReturnTimer = setTimeout(() => {
-      permissionReturnRadius = null;
-      incomingMessageClassification = null;
-      dot.style.removeProperty("--permission-return-radius");
-      renderDriveStatus();
-    }, 320);
-  }
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (
-    document.visibilityState === "visible"
-    && assistantStatus === "ask_permission_to_talk"
-  ) {
-    restartPermissionPulse(document.querySelector("#connection-dot"));
+  if (document.visibilityState === "visible") {
+    maybeVibrateForPermission();
   }
 });
 
@@ -1142,6 +1153,9 @@ bridge.on("ready", data => {
   rememberControlState("VehicleState", data.vehicleState);
   const ducking = Number(data.musicDuckingFactor);
   musicDuckingFactor = Number.isFinite(ducking) && ducking > 0 && ducking <= 1 ? ducking : 0.25;
+  if (Number.isFinite(Number(data.permissionReminderSeconds)) && Number(data.permissionReminderSeconds) > 0) {
+    permissionReminderSeconds = Number(data.permissionReminderSeconds);
+  }
   updateMusicVolume();
   renderMusic(data.musicState);
   rememberControlState("DetectedObjects", data.detectedObjectsState);
@@ -1160,7 +1174,13 @@ bridge.on("responseReceived", data => updateAssistantMessage(data[0], true));
 bridge.on("conversationCleared", clearConversationView);
 bridge.on("speakingToneChanged", data => { setSpeakingTone(data[0]); updateMusicVolume(); });
 bridge.on("incomingMessageClassified", data => setIncomingMessageClassification(data[0]));
-bridge.on("assistantStatusChanged", data => { setAssistantStatus(data[0]); updateMusicVolume(); });
+bridge.on("assistantStatusChanged", data => {
+  // Broadcast payloads wrap bridge args in a list; the first arg carries
+  // {status, flags} from the bridge.
+  const [payload] = data;
+  setAssistantStatus(payload.status, payload.flags);
+  updateMusicVolume();
+});
 bridge.on("musicUpdated", data => renderMusic(data[0]));
 bridge.on("friendMessageSimulationChanged", data => setFriendSimulation(Boolean(data[0])));
 bridge.on("drivingSimulationChanged", data => {

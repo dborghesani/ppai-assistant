@@ -45,11 +45,82 @@ def test_laya_router_preserves_multiple_task_routes(selected):
     route = asyncio.run(router.execute(RoutingInput(changed, [{"role": "user", "content": "Old conversation"}])))
     assert route.tasks == selected
     state, questions = backend.execute_decision.await_args.args
-    assert state == {"changed_facts": changed}
+    assert state == {"changed_facts": list(changed.values())}
     assert set(questions) == {task_type.value for task_type in TelemetryRouter.TASK_CRITERIA}
     assert all(question["type"] == "choice" for question in questions.values())
     assert all(set(question["criteria"]) == {"route", "skip"} for question in questions.values())
     assert "conversation" not in questions and "vehicle_command" not in questions
+
+
+@pytest.mark.parametrize("message_route", ["route", "skip"])
+@pytest.mark.parametrize("key,fact", [
+    ("UnreadMessages.count", "There are 3 unread messages."),
+    ("UnreadMessages.count", "There are no unread messages."),
+    ("DriverPhysicalState.attention_level", "Attention level is medium."),
+    ("DriverPhysicalState.attention_level", "Attention level is high."),
+    ("DriverPhysicalState.attention_level", "Attention level is very high."),
+])
+def test_decision_router_treats_message_delivery_changes_as_domain_facts(key, fact, message_route):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.decision_backend import KevBackend
+    from agents.tasks.routing import RoutingInput, TelemetryRouter
+    from config import ConfigAssistant
+
+    backend = Mock(spec=KevBackend)
+    answers = {
+        task.value: {"choice": message_route if task is TaskType.MESSAGES else "skip"}
+        for task in TelemetryRouter.TASK_CRITERIA
+    }
+    backend.execute_decision = AsyncMock(return_value={"answers": answers})
+    router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
+
+    route = asyncio.run(router.execute(RoutingInput({key: fact})))
+
+    expected = [TaskType.MESSAGES] if message_route == "route" else []
+    assert route.tasks == expected
+    state, questions = backend.execute_decision.await_args.args
+    assert state == {"changed_facts": [fact]}
+    assert set(questions) == {task.value for task in TelemetryRouter.TASK_CRITERIA}
+    question = questions["messages"]
+    assert "Attention level, unread messages" in question["instructions"]
+    assert "privacy and people inside" in question["instructions"]
+    assert question["criteria"] == {
+        "route": "The facts describe attention, unread messages, privacy or people inside.",
+        "skip": "The facts describe something unrelated to message delivery.",
+    }
+
+
+@pytest.mark.parametrize("choice", ["route", "skip"])
+@pytest.mark.parametrize("fact", [
+    "Anger level is high.", "Disgust level is high.", "Fear level is high.",
+    "Happiness level is high.", "Sadness level is high.", "Surprise level is high.",
+    "The driver seems emotionally neutral.", "No anger detected.",
+])
+def test_decision_router_leaves_emotion_routing_to_model(fact, choice):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.decision_backend import KevBackend
+    from agents.tasks.routing import RoutingInput, TelemetryRouter
+    from config import ConfigAssistant
+
+    backend = Mock(spec=KevBackend)
+    backend.execute_decision = AsyncMock(return_value={"answers": {
+        task.value: {"choice": choice if task is TaskType.MOOD_MUSIC else "skip"}
+        for task in TelemetryRouter.TASK_CRITERIA
+    }})
+    router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
+
+    result = asyncio.run(router.execute(RoutingInput({"emotion": fact})))
+
+    assert result.tasks == ([TaskType.MOOD_MUSIC] if choice == "route" else [])
+    state, questions = backend.execute_decision.await_args.args
+    assert state == {"changed_facts": [fact]}
+    assert set(questions) == {task.value for task in TelemetryRouter.TASK_CRITERIA}
+    assert questions["mood_music"]["criteria"] == {
+        "route": "The changed facts describe the driver's emotions, including their absence.",
+        "skip": "The changed facts describe only non-emotional information such as driving tension, fatigue or attention.",
+    }
 
 
 @pytest.mark.parametrize("result", [None, {}, {"answers": {}}, {"answers": {
@@ -1042,15 +1113,26 @@ def test_kev_backend_loads_during_init_and_reuses_model(cuda_available):
     from unittest.mock import Mock, patch
     from agents.backends.decision_backend import KevBackend
     from config import ConfigAssistant
+    from voice.gpu_lock import GPU_LOCK
 
     tokenizer, model, encodings = Mock(), Mock(), Mock()
-    model.probs.return_value = [[0.9, 0.1]]
+
+    def infer(encoded):
+        assert GPU_LOCK.locked()
+        assert encoded is encodings
+        return [[0.9, 0.1]]
+
+    def encode(*args):
+        assert GPU_LOCK.locked()
+        return encodings
+
+    model.probs.side_effect = infer
     checkpoint = Mock(meta=SimpleNamespace(temperature=2.0))
     checkpoint.load.return_value = (tokenizer, model)
     with (
         patch("torch.cuda.is_available", return_value=cuda_available),
         patch("kev.checkpoint.Checkpoint", return_value=checkpoint) as load_checkpoint,
-        patch("kev.model.admit", return_value=encodings) as admit,
+        patch("kev.model.admit", side_effect=encode) as admit,
     ):
         usage = Mock()
         backend = KevBackend(ConfigAssistant(), usage)
@@ -1074,6 +1156,68 @@ def test_kev_backend_loads_during_init_and_reuses_model(cuda_available):
         assert model.probs.call_count == 2
         assert admit.call_args.args[:2] == (model, tokenizer)
         assert usage.call_count == 2
+        assert not GPU_LOCK.locked()
+
+
+def test_kev_backend_waits_for_voice_gpu_work():
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+    from threading import Event
+    from unittest.mock import Mock, patch
+    from agents.backends.decision_backend import KevBackend
+    from voice.gpu_lock import GPU_LOCK
+
+    backend = KevBackend.__new__(KevBackend)
+    backend._tokenizer = Mock()
+    backend._model = Mock()
+    backend._model.probs.return_value = [[0.9, 0.1]]
+    started = Event()
+
+    def decide():
+        started.set()
+        return backend._decide_sync({}, {
+            "task": {"type": "choice", "criteria": {"route": None, "skip": None}},
+        })
+
+    with patch("kev.model.admit", return_value=Mock()) as admit:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            with GPU_LOCK:
+                result = executor.submit(decide)
+                assert started.wait(timeout=1)
+                with pytest.raises(TimeoutError):
+                    result.result(timeout=0.05)
+                admit.assert_not_called()
+                backend._model.probs.assert_not_called()
+            assert result.result(timeout=2)["answers"]["task"]["choice"] == "route"
+    assert not GPU_LOCK.locked()
+
+
+@pytest.mark.parametrize("failure_stage", ["encode", "infer"])
+def test_kev_backend_releases_shared_gpu_lock_after_failure(failure_stage):
+    from unittest.mock import Mock, patch
+    from agents.backends.decision_backend import KevBackend
+    from voice.gpu_lock import GPU_LOCK
+
+    backend = KevBackend.__new__(KevBackend)
+    backend._tokenizer = Mock()
+    backend._model = Mock()
+
+    def encode(*args):
+        assert GPU_LOCK.locked()
+        if failure_stage == "encode":
+            raise RuntimeError("encoding failed")
+        return Mock()
+
+    def infer(*args):
+        assert GPU_LOCK.locked()
+        raise RuntimeError("inference failed")
+
+    backend._model.probs.side_effect = infer
+    with patch("kev.model.admit", side_effect=encode):
+        with pytest.raises(RuntimeError, match="failed"):
+            backend._decide_sync({}, {
+                "task": {"type": "choice", "criteria": {"route": None, "skip": None}},
+            })
+    assert not GPU_LOCK.locked()
 
 
 @pytest.mark.parametrize("hub_disabled,transformers_enabled", [
@@ -1453,10 +1597,13 @@ def test_late_meeting_scenario_routes_through_router_prompt():
     from data.events import CarEvent, EventName
     from data.agents_dataclasses import SkillType
 
-    # Meeting routing is engine-driven: the prompt encodes the activation rule.
-    assert '"DriverAgenda.late_for_meeting"' in routing.ROUTING_PROMPT
+    # Meeting routing is engine-driven: the prompt encodes the activation rule
+    # in natural language, without internal fact identifiers.
+    assert "late for a meeting" in routing.ROUTING_PROMPT
     assert "meeting:" in routing.ROUTING_PROMPT
-    assert '"UnreadMessages.count"' in routing.ROUTING_PROMPT
+    assert "unread-message" in routing.ROUTING_PROMPT
+    assert '"DriverAgenda.late_for_meeting"' not in routing.ROUTING_PROMPT
+    assert '"UnreadMessages.count"' not in routing.ROUTING_PROMPT
 
     # When the router (the engine's answer) selects meeting, the task runs.
     agent = make_routed_agent([TaskType.MEETING])
@@ -1466,6 +1613,106 @@ def test_late_meeting_scenario_routes_through_router_prompt():
         })
     asyncio.run(agent.process_car_event(event))
     agent.tasks[TaskType.MEETING].execute.assert_awaited_once()
+
+
+def test_conversation_talking_waits_for_first_spoken_word():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from agents.tasks.conversation import ConversationDelivery, ConversationInput, ConversationTask
+    from config import ConfigAssistant
+    from data.agents_dataclasses import AssistantStatus
+
+    events = []
+
+    async def stream(**kwargs):
+        for text in ["[[tone:calm]]", "Hello there."]:
+            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=text))])
+            await asyncio.sleep(0)
+
+    async def speak(sentence, on_word):
+        assert events == []
+        await asyncio.sleep(0)
+        assert events == []
+        on_word("Hello")
+        assert ("text", "Hello") in events
+        assert ("tone", "calm") in events
+        assert ("status", AssistantStatus.TALKING) in events
+        on_word(sentence)
+
+    task = ConversationTask(ConfigAssistant(), Mock(), backend=SimpleNamespace(stream=stream))
+    asyncio.run(task.execute(
+        ConversationInput("Hello", [], []),
+        ConversationDelivery(
+            speak=speak,
+            on_text=lambda text: events.append(("text", text)),
+            on_tone=lambda tone: events.append(("tone", tone)),
+            on_status=lambda status: events.append(("status", status)),
+        ),
+    ))
+    assert events[0] == ("text", "Hello")
+    assert events[-2:] == [("tone", None), ("status", AssistantStatus.IDLE)]
+
+
+def test_wait_message_talking_waits_for_first_chunk():
+    import asyncio
+    from unittest.mock import Mock
+    from data.agents_dataclasses import AssistantStatus
+
+    async def check():
+        events = []
+        agent = make_routed_agent([])
+        agent.set_assistant_status = Mock(side_effect=lambda status: events.append(("status", status)))
+        agent.on_response_update = lambda text: events.append(("text", text))
+        agent.on_response = Mock()
+        agent.tts_manager = None
+        chunks = asyncio.Queue()
+        delivery = asyncio.create_task(agent.speak_wait_message_chunks(chunks))
+        try:
+            await asyncio.sleep(0)
+            assert events == []
+            chunks.put_nowait("Checking...")
+            chunks.put_nowait(None)
+            await delivery
+            assert events == [
+                ("text", "Checking..."),
+                ("status", AssistantStatus.TALKING),
+                ("status", AssistantStatus.IDLE),
+            ]
+        finally:
+            delivery.cancel()
+            await asyncio.gather(delivery, return_exceptions=True)
+
+    asyncio.run(check())
+
+
+def test_short_message_talking_waits_for_first_spoken_word():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from data.agents_dataclasses import AssistantStatus, ToneType
+
+    events = []
+    agent = make_routed_agent([])
+    agent.conversation_history = []
+    agent.set_assistant_status = Mock(side_effect=lambda status: events.append(("status", status)))
+    agent.on_speaking_tone_changed = lambda tone: events.append(("tone", tone))
+    agent.on_response_update = lambda text: events.append(("text", text))
+    agent.on_response = Mock()
+
+    async def speak(message, on_word):
+        assert events == []
+        await asyncio.sleep(0)
+        assert events == []
+        on_word("Hello")
+        assert ("text", "Hello") in events
+        assert ("tone", "calm") in events
+        assert ("status", AssistantStatus.TALKING) in events
+
+    agent.tts_manager = SimpleNamespace(speak=speak)
+    asyncio.run(agent.speak("Hello there.", tone=ToneType.CALM))
+    assert events[0] == ("text", "Hello")
+    assert events[-2:] == [("tone", None), ("status", AssistantStatus.IDLE)]
 
 
 def test_conversation_task_streams_without_agent_and_hides_tone_metadata():

@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 import structlog
 
+from voice.gpu_lock import GPU_LOCK
+
 
 class DecisionBackend(ABC):
     def __init__(self, on_usage: Callable[[str, Any], None]):
@@ -130,8 +132,9 @@ class KevBackend(DecisionBackend):
             "questions": questions,
         })
         record, meta = to_record(request)
-        encodings = admit(self._model, self._tokenizer, record)
-        probabilities = self._model.probs(encodings)
+        with GPU_LOCK:
+            encodings = admit(self._model, self._tokenizer, record)
+            probabilities = self._model.probs(encodings)
         return {"answers": to_answers(probabilities, meta)}
 
 

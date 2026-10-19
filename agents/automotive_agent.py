@@ -165,8 +165,9 @@ class AutomotiveAgent:
         self.on_response_update: Callable[[str], None] | None = None
         self.on_speaking_tone_changed: Callable[[str | None], None] | None = None
         self.on_incoming_message_classified: Callable[[ToneType, UrgencyType], None] | None = None
-        self.on_assistant_status_changed: Callable[[AssistantStatus], None] | None = None
+        self.on_assistant_status_changed: Callable[[int], None] | None = None
         self._assistant_status = AssistantStatus.IDLE
+        self._assistant_flags = AssistantStatus.IDLE.bit
 
     def _notify_music_update(self, value: dict[str, Any]) -> None:
         if self.on_music_update is not None:
@@ -221,23 +222,45 @@ class AutomotiveAgent:
 
     @property
     def assistant_status(self) -> AssistantStatus:
-        return self._assistant_status
+        """Dominant active status (the permission flag is an overlay, not a state)."""
+        flags = self._assistant_flags & ~AssistantStatus.ASK_PERMISSION_TO_TALK.bit
+        for status in AssistantStatus:
+            if flags & status.bit:
+                return status
+        return AssistantStatus.IDLE
+
+    @property
+    def assistant_flags(self) -> int:
+        """Bitmask of all active statuses, including persistent overlays."""
+        return self._assistant_flags
 
     @assistant_status.setter
     def assistant_status(self, status: AssistantStatus) -> None:
         self.set_assistant_status(status)
 
     def set_assistant_status(self, status: AssistantStatus) -> None:
-        if getattr(self, "_assistant_status", None) is status:
-            if (
-                status is AssistantStatus.ASK_PERMISSION_TO_TALK
-                and getattr(self, "on_assistant_status_changed", None) is not None
-            ):
-                self.on_assistant_status_changed(status)
+        permission_bit = AssistantStatus.ASK_PERMISSION_TO_TALK.bit
+        if status is AssistantStatus.ASK_PERMISSION_TO_TALK:
+            # Persistent overlay: survives talking/acting/notify until cleared.
+            new_flags = self._assistant_flags | permission_bit
+        else:
+            # Any other status is the exclusive current activity; IDLE means none.
+            activity = AssistantStatus.IDLE.bit if status is AssistantStatus.IDLE else status.bit
+            new_flags = (self._assistant_flags & permission_bit) | activity
+        if new_flags == self._assistant_flags:
             return
-        self._assistant_status = status
+        self._assistant_flags = new_flags
+        self._notify_assistant_flags()
+
+    def clear_permission_to_talk(self) -> None:
+        if not self._assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit:
+            return
+        self._assistant_flags &= ~AssistantStatus.ASK_PERMISSION_TO_TALK.bit
+        self._notify_assistant_flags()
+
+    def _notify_assistant_flags(self) -> None:
         if getattr(self, "on_assistant_status_changed", None) is not None:
-            self.on_assistant_status_changed(status)
+            self.on_assistant_status_changed(self._assistant_flags)
 
     @property
     def pending_message_count(self) -> int:
@@ -291,6 +314,8 @@ class AutomotiveAgent:
 
     async def stop_message_simulation(self) -> bool:
         stopped = await self.message_simulator.stop()
+        # Stopping the source must also empty what it queued.
+        self.messages_task.clear_pending()
         return stopped
 
     def cancel_message_tasks(self) -> None:
@@ -477,16 +502,26 @@ class AutomotiveAgent:
     async def process_car_event(self, event: CarEvent) -> None:
         facts = dict(event.facts or getattr(self, "knowledge_facts_provider", lambda: {})())
         changes = dict(event.event_value) if isinstance(event.event_value, dict) else {}
-        changed_text = [
-            fact.removeprefix("Changed just now: ") for fact in event.context
-            if fact.startswith("Changed just now:")
-        ]
-        changed_facts = {
-            key: facts.get(key, changed_text[index] if index < len(changed_text) else f"{key}: {value}")
-            for index, (key, value) in enumerate(changes.items())
+        # A fact is relevant when it changed: the current definition of each
+        # changed key IS the fact, taken straight from the fact snapshot.
+        relevant_facts = {
+            key: facts[key] for key in changes
+            if key in facts
         }
-        facts.update(changed_facts)
-        route = await self.telemetry_router.execute(RoutingInput(changed_facts))
+        facts.update(relevant_facts)
+        # A change to a fact that gates message delivery (who is in the cabin,
+        # conversation privacy) is also an update to the unread-messages
+        # situation: republish the queue length so its fact text is re-evaluated
+        # together with the blocker. The gate declaration lives on the messages
+        # task, which owns delivery semantics.
+        if self.pending_message_count and any(
+            key in messages.MessagesTask.MESSAGE_DELIVERY_GATES for key in changes
+        ):
+            self.messages_task.publish_unread_count(force=True)
+            relevant_facts["UnreadMessages.count"] = facts.get(
+                "UnreadMessages.count", f"{self.pending_message_count} unread messages.",
+            )
+        route = await self.telemetry_router.execute(RoutingInput(relevant_facts))
         task_types = route.tasks
         self.logger.info("[LLM] Event dispatched", tasks=[task.value for task in task_types])
         decisions = []
@@ -928,7 +963,6 @@ class AutomotiveAgent:
         self, chunks: asyncio.Queue[str | None]
     ) -> None:
         displayed_message = ""
-        self.set_assistant_status(AssistantStatus.TALKING)
         try:
             while (chunk := await chunks.get()) is not None:
                 chunk = chunk.strip()
@@ -938,6 +972,7 @@ class AutomotiveAgent:
                 on_response_update = getattr(self, "on_response_update", None)
                 if on_response_update is not None:
                     on_response_update(displayed_message)
+                self.set_assistant_status(AssistantStatus.TALKING)
                 tts_manager = getattr(self, "tts_manager", None)
                 if tts_manager is not None:
                     await tts_manager.speak(chunk)
@@ -954,20 +989,26 @@ class AutomotiveAgent:
         """Speak one short message keeping chat text and TTS word-synced."""
         self.conversation_history.append({"role": "assistant", "content": message})
         self.conversation_history = self.conversation_history[-8:]
-        self.set_assistant_status(AssistantStatus.TALKING)
-        if self.on_speaking_tone_changed is not None:
-            self.on_speaking_tone_changed(tone.value if tone is not None else None)
+        speaking_started = False
         try:
             on_update = getattr(self, "on_response_update", None)
             on_final = getattr(self, "on_response", None)
 
             def on_word(prefix: str) -> None:
+                nonlocal speaking_started
                 # Chat shows exactly what has been spoken so far.
                 if on_update is not None:
                     on_update(prefix)
+                if not speaking_started:
+                    speaking_started = True
+                    if self.on_speaking_tone_changed is not None:
+                        self.on_speaking_tone_changed(tone.value if tone is not None else None)
+                    self.set_assistant_status(AssistantStatus.TALKING)
 
             if self.tts_manager is not None:
                 await self.tts_manager.speak(message, on_word)
+            if not speaking_started:
+                on_word(message)
             if on_final is not None:
                 on_final(message + "\n")
         finally:

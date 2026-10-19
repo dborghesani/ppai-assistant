@@ -260,6 +260,11 @@ class AssistantStatus(str, Enum):
     PAUSED_ATTENTION = "paused_attention"  # UI: stationary white ball; speech halted on low driver attention
 
     @property
+    def bit(self) -> int:
+        """Bitmask bit for this status so several can be active at once."""
+        return 1 << tuple(type(self)).index(self)
+
+    @property
     def description(self) -> str:
         return {
             AssistantStatus.IDLE: "The assistant is idle.",

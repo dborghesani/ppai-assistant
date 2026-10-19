@@ -141,6 +141,10 @@ class WebUIServer:
                     "musicState": getattr(self.bridge, "dumpMusicState", lambda: {"status": "disabled"})(),
                     "assistantStatus": getattr(self.bridge, "dumpAssistantStatus", lambda: "idle")(),
                     "musicDuckingFactor": getattr(getattr(self.bridge, "opt", None), "music_ducking_factor", 0.25),
+                    "permissionReminderSeconds": getattr(
+                        getattr(self.bridge, "opt", None),
+                        "ui_permission_reminder_seconds", 10,
+                    ),
                     "sttEnabled": bool(
                         self.bridge.stt_manager is not None
                         and self.bridge.stt_manager.enabled

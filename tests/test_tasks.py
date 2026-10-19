@@ -22,6 +22,413 @@ def test_telemetry_route_accepts_direct_scenarios(task):
     assert TaskRoute(tasks=[task]).tasks == [task]
 
 
+@pytest.mark.parametrize("status,expected", [
+    ("none", "No meeting phase is active."),
+    ("prepare", "The meeting is being prepared and has not started yet."),
+    ("started", "The meeting has started and is in progress."),
+    ("finished", "The meeting has finished."),
+])
+def test_meeting_phase_produces_distinct_knowledge_fact(status, expected):
+    from dataclasses import fields
+    from data.assistant_dataclasses import DriverAgenda
+    from managers.knowledge_manager import KnowledgeManager
+
+    assert DriverAgenda().meeting_status == "none"
+    phase = next(item for item in fields(DriverAgenda) if item.name == "meeting_status")
+    assert phase.metadata["knowledge"]
+    assert phase.metadata["value_kind"] == "category"
+    assert KnowledgeManager._CATEGORY_KNOWLEDGE_FORMATTERS[("DriverAgenda", "meeting_status")](status) == expected
+
+
+@pytest.mark.parametrize("timing,expected", [
+    ("none", "No meeting is scheduled."),
+    ("on_time", "The driver is on time for the meeting."),
+    ("late", "The driver is late for the meeting."),
+    ("arrived", "The driver has arrived at the meeting."),
+])
+def test_meeting_timing_produces_three_distinct_facts(timing, expected):
+    from data.assistant_dataclasses import DriverAgenda
+    from managers.knowledge_manager import KnowledgeManager
+
+    assert DriverAgenda().meeting_timing == "none"
+    formatter = KnowledgeManager._CATEGORY_KNOWLEDGE_FORMATTERS[("DriverAgenda", "meeting_timing")]
+    assert formatter(timing) == expected
+
+
+def test_meeting_preparation_and_simulation_share_planned_agenda():
+    from unittest.mock import Mock
+    from agents.backends.crewai_backend import CrewAIBackend
+    from config import ConfigAssistant
+    from sim.meeting_sim import DEFAULT_TOPIC, PLANNED_AGENDA, build_crew, build_preparation_crew, planned_agenda
+
+    backend = CrewAIBackend(ConfigAssistant(), Mock())
+    preparation, briefing = build_preparation_crew(backend.llm, DEFAULT_TOPIC, False)
+    meeting, summary = build_crew(backend.llm, DEFAULT_TOPIC, False)
+    agenda = planned_agenda(DEFAULT_TOPIC)
+
+    assert agenda in briefing.description
+    assert agenda in meeting.tasks[0].description
+    assert preparation.tasks == [briefing]
+    assert len(preparation.agents) == 1
+    assert summary is meeting.tasks[-1]
+    assert "35 minutes" in agenda
+    for owner, minutes, subject in PLANNED_AGENDA:
+        assert f"{owner}, {minutes} minutes" in agenda
+        assert subject in agenda
+    assert "meeting has not started" in briefing.description
+    assert "not decisions already made" in agenda
+    assert "Driver's Meeting Briefing Assistant" == preparation.agents[0].role
+    assert "Address the driver directly as 'you' and 'your meeting'" in briefing.description
+    assert "Do not offer to " in briefing.description
+    assert "assume they are late" in briefing.description
+
+
+def test_meeting_permission_prompt_uses_lateness_without_prepare_prerequisite():
+    from agents.tasks.meeting import TASK
+
+    assert TASK.context_fields == ("DriverAgenda.meeting_status", "DriverAgenda.meeting_timing")
+    assert "Prepare is ONLY an optional briefing" in TASK.instructions
+    assert "timing is absent/unknown" in TASK.instructions
+    assert 'Prepared meeting + "The driver is on time for the meeting." => silent.' in TASK.instructions
+    assert '"No meeting phase is active." => ask_attend_meeting.' in TASK.instructions
+    assert "timing-only decision table" in TASK.instructions
+
+
+@pytest.mark.parametrize("request_briefing", [False, True])
+def test_meeting_late_authorization_is_independent_of_optional_prepare(request_briefing):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from managers.action_manager import ActionManager
+
+    async def check():
+        manager = ActionManager(SimpleNamespace(set_assistant_status=Mock()))
+        manager.attend_meeting = AsyncMock()
+        manager.prepare_meeting = AsyncMock()
+        manager.set_meeting_timing("late")
+        manager.confirm_attend_meeting()
+        assert manager._meeting_authorized
+        manager.attend_meeting.assert_not_called()
+        if request_briefing:
+            manager.set_meeting_status("prepare")
+            await manager._meeting_preparation_task
+            assert manager._meeting_authorized
+        manager.set_meeting_status("started")
+        await manager._meeting_task
+        manager.attend_meeting.assert_awaited_once()
+        assert manager.prepare_meeting.await_count == (1 if request_briefing else 0)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("confirmed,state", [(True, "accepted"), (False, "declined"), (None, "pending")])
+def test_meeting_preserves_permission_state_for_started_decision(confirmed, state):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    from agents.tasks.meeting import MeetingTask
+    from agents.tasks.decision import DecisionInput, NotificationDecision
+    from config import ConfigAssistant
+    from data.agents_dataclasses import ActionType, InterventionType, SuggestionType, ToneType, UrgencyType
+
+    async def check():
+        task = MeetingTask(ConfigAssistant(), Mock())
+        task.interpret_reply = AsyncMock(return_value=confirmed)
+        task._deliver_reply = AsyncMock()
+        assert await task.on_asked()
+        await task.handle_user_input("Yes" if confirmed else "No", [])
+        assert task.permission_state == state
+        assert task.awaiting_reply == (confirmed is None)
+        assert not await task.on_asked()
+        task.backend.run = AsyncMock(return_value=NotificationDecision(
+            action=ActionType.NONE, urgency=UrgencyType.NONE, tone=ToneType.CALM,
+            intervention_type=InterventionType.NONE, suggestion_type=SuggestionType.NONE,
+            reason="Only the meeting phase changed.",
+        ))
+        await task.execute(DecisionInput(
+            event_name="knowledge_updated", driver_name="David", pending_message_count=0,
+            event_details="No additional event-specific details.",
+            changed_facts="The meeting has started and is in progress.",
+            context="The driver is late for the meeting.",
+        ))
+        inputs = task.backend.run.await_args.args[1]
+        assert inputs == {
+            "driver_name": "David",
+            "changed_facts": "The meeting has started and is in progress.",
+            "context": "The driver is late for the meeting.",
+            "meeting_permission_state": state,
+        }
+        prompt = task.crew.tasks[0]
+        prompt.interpolate_inputs_and_add_conversation_history(inputs)
+        assert "Current meeting_permission_state: " + state in prompt.description
+        assert "only in supporting context" in prompt.description
+        assert "<SUPPORTING_MEETING_FACTS>\nThe driver is late" in prompt.description
+        task.reset()
+        assert task.permission_state == "not_asked"
+        assert await task.on_asked()
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("choice", ["route", "skip"])
+@pytest.mark.parametrize("fact", [
+    "The driver has arrived at the meeting.",
+    "The driver is late for the meeting.",
+    "The driver is on time for the meeting.",
+    "No meeting is scheduled.",
+    "The meeting is being prepared and has not started yet.",
+    "The meeting has started and is in progress.",
+    "The meeting has finished.",
+])
+def test_meeting_router_classifies_domain_without_forcing_action(fact, choice):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.decision_backend import KevBackend
+    from agents.tasks.routing import RoutingInput, TelemetryRouter
+    from config import ConfigAssistant
+
+    backend = Mock(spec=KevBackend)
+    backend.execute_decision = AsyncMock(return_value={"answers": {
+        task.value: {"choice": choice if task is TaskType.MEETING else "skip"}
+        for task in TelemetryRouter.TASK_CRITERIA
+    }})
+    router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
+    route = asyncio.run(router.execute(RoutingInput({"agenda_fact": fact})))
+
+    assert route.tasks == ([TaskType.MEETING] if choice == "route" else [])
+    state, questions = backend.execute_decision.await_args.args
+    assert state == {"changed_facts": [fact]}
+    assert set(questions) == {task.value for task in TelemetryRouter.TASK_CRITERIA}
+    assert "no meeting is scheduled" in questions["meeting"]["instructions"]
+    assert "preparation and arrival" in questions["meeting"]["criteria"]["route"]
+
+
+def test_meeting_arrival_snapshot_excludes_later_contributions():
+    from types import SimpleNamespace
+    from sim.meeting_sim import MeetingInterrupted, MeetingProgress
+
+    progress = MeetingProgress()
+    progress.record(SimpleNamespace(
+        agent="Priya", description="Product discussion", raw="Only parallel parking was proposed.",
+    ))
+    transcript = progress.stop()
+    with pytest.raises(MeetingInterrupted):
+        progress.record(SimpleNamespace(
+            agent="Marco", description="Architecture discussion", raw="Later sensor proposal.",
+        ))
+    assert transcript == [{
+        "speaker": "Priya", "task": "Product discussion", "text": "Only parallel parking was proposed.",
+    }]
+    assert progress.stop() == transcript
+
+
+def test_meeting_arrival_callback_stops_actual_crewai_sequence():
+    from unittest.mock import Mock, patch
+    from agents.backends.crewai_backend import CrewAIBackend
+    from config import ConfigAssistant
+    from sim.meeting_sim import DEFAULT_TOPIC, MeetingInterrupted, MeetingProgress, build_crew
+
+    backend = CrewAIBackend(ConfigAssistant(), Mock())
+    crew, _ = build_crew(backend.llm, DEFAULT_TOPIC, False)
+    progress = MeetingProgress()
+    crew.task_callback = progress.record
+    calls = []
+
+    def execute(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            return "The chair introduced the planned agenda. No decisions were made."
+        progress.stop()
+        return "A contribution completed after the driver arrived."
+
+    with patch("crewai.Agent.execute_task", side_effect=execute):
+        with pytest.raises(MeetingInterrupted):
+            crew.kickoff()
+    assert len(calls) == 2
+    assert [entry["text"] for entry in progress.stop()] == [
+        "The chair introduced the planned agenda. No decisions were made.",
+    ]
+
+
+@pytest.mark.parametrize("driver_name", [None, "David", "Alex"])
+def test_meeting_arrival_summary_has_no_planned_or_future_discussion(driver_name):
+    import json
+    from unittest.mock import Mock
+    from agents.backends.crewai_backend import CrewAIBackend
+    from config import ConfigAssistant
+    from sim.meeting_sim import build_arrival_summary_crew
+
+    backend = CrewAIBackend(ConfigAssistant(), Mock())
+    crew, summary = build_arrival_summary_crew(backend.llm, [], False, driver_name=driver_name)
+    assert crew.tasks == [summary]
+    assert "Completed contributions at the moment of arrival:\n[]" in summary.description
+    assert "no completed discussion" in summary.description
+    assert "An opening agenda is only a plan" in summary.description
+    assert "Do not say the whole meeting concluded" in summary.description
+    assert crew.agents[0].role == "Driver's Meeting Handover Assistant"
+    assert json.dumps({"driver_name": driver_name}) in summary.description
+    assert "Speak directly to the driver as 'you'" in summary.description
+    assert "Never infer the driver's name from the transcript" in summary.description
+    assert "Speaking plan (planned turns, not completed discussion)" in summary.description
+    assert "name who has already spoken" in summary.description
+    assert "does not mean his closing review has happened" in summary.description
+    assert "Do not assert who is currently speaking" in summary.description
+
+
+def test_meeting_arrival_summary_includes_shared_speaking_order_separate_from_transcript():
+    import json
+    from unittest.mock import Mock
+    from agents.backends.crewai_backend import CrewAIBackend
+    from config import ConfigAssistant
+    from sim.meeting_sim import PLANNED_AGENDA, build_arrival_summary_crew
+
+    backend = CrewAIBackend(ConfigAssistant(), Mock())
+    transcript = [
+        {"speaker": "Jordan Reyes, Engineering Meeting Manager", "task": "Open meeting", "text": "Here is the planned agenda."},
+        {"speaker": "Priya Shah, Product Manager", "task": "Product scope", "text": "Parallel parking is proposed for the MVP."},
+    ]
+    _, summary = build_arrival_summary_crew(backend.llm, transcript, False, driver_name="David")
+
+    plan_text = summary.description.split("Speaking plan (planned turns, not completed discussion):\n", 1)[1]
+    plan_text, transcript_text = plan_text.split("\n\nCompleted contributions at the moment of arrival:\n", 1)
+    plan = json.loads(plan_text)
+    assert plan["opening_chair"] == "Jordan"
+    assert plan["agenda"] == [{"speaker": owner, "topic": subject} for owner, _, subject in PLANNED_AGENDA]
+    assert json.loads(transcript_text) == transcript
+    assert "who still has an agenda contribution" in summary.description
+
+
+@pytest.mark.parametrize("completed_first", [True, False])
+@pytest.mark.parametrize("arrival_timing", ["none", "on_time", "arrived"])
+def test_meeting_arrival_stops_following_turns_and_speaks_only_partial_summary(arrival_timing, completed_first):
+    import asyncio
+    from threading import Event
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock, patch
+    from managers.action_manager import ActionManager
+
+    async def check():
+        agent = SimpleNamespace(
+            set_assistant_status=Mock(), speak=AsyncMock(), llm=Mock(),
+            driver_name="Alex",
+            opt=SimpleNamespace(crewai_verbose=False),
+        )
+        manager = ActionManager(agent)
+        manager.on_meeting_completed = Mock()
+        manager.set_meeting_timing("late")
+        first_done = asyncio.Event()
+        continue_turn = Event()
+        loop = asyncio.get_running_loop()
+        meeting_crew = Mock()
+        final_summary = SimpleNamespace(output=SimpleNamespace(raw="Full meeting summary must not be spoken."))
+        handover_crew = Mock()
+        handover = SimpleNamespace(output=SimpleNamespace(raw=(
+            "Priya proposed parallel parking. No decisions were taken yet." if completed_first
+            else "You have arrived before any discussion was completed."
+        )))
+        later_turn = Mock()
+
+        def discuss():
+            if completed_first:
+                meeting_crew.task_callback(SimpleNamespace(
+                    agent="Priya", description="Product discussion", raw="Parallel parking was proposed.",
+                ))
+            loop.call_soon_threadsafe(first_done.set)
+            assert continue_turn.wait(timeout=2)
+            meeting_crew.task_callback(SimpleNamespace(
+                agent="Marco", description="Architecture discussion", raw="Later sensor proposal.",
+            ))
+            later_turn()
+
+        meeting_crew.kickoff.side_effect = discuss
+        with (
+            patch("managers.action_manager.build_crew", return_value=(meeting_crew, final_summary)),
+            patch("managers.action_manager.build_arrival_summary_crew", return_value=(handover_crew, handover)) as summarize,
+        ):
+            manager.set_meeting_status("started")
+            manager.confirm_attend_meeting()
+            running = manager._meeting_task
+            try:
+                await asyncio.wait_for(first_done.wait(), timeout=2)
+                manager.set_meeting_timing(arrival_timing)
+            finally:
+                continue_turn.set()
+            await asyncio.wait_for(running, timeout=2)
+            later_turn.assert_not_called()
+            expected = [{
+                "speaker": "Priya", "task": "Product discussion", "text": "Parallel parking was proposed.",
+            }] if completed_first else []
+            assert summarize.call_args.args[1] == expected
+            assert summarize.call_args.kwargs["driver_name"] == "Alex"
+            handover_crew.kickoff.assert_called_once()
+            agent.speak.assert_awaited_once_with(handover.output.raw)
+            manager.on_meeting_completed.assert_called_once()
+            assert not manager._meeting_authorized
+
+    asyncio.run(check())
+
+
+def test_meeting_started_launches_simulation_only_after_permission():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from managers.action_manager import ActionManager
+
+    async def check():
+        manager = ActionManager(SimpleNamespace(set_assistant_status=Mock()))
+        manager.attend_meeting = AsyncMock()
+        manager.prepare_meeting = AsyncMock()
+        manager.set_meeting_status("prepare")
+        manager.confirm_attend_meeting()
+        manager.attend_meeting.assert_not_called()
+        manager.set_meeting_status("started")
+        await manager._meeting_task
+        manager.attend_meeting.assert_awaited_once()
+        manager.set_meeting_status("started")
+        manager.attend_meeting.assert_awaited_once()
+        manager.set_meeting_status("finished")
+        assert not manager._meeting_authorized
+        manager.set_meeting_status("prepare")
+        manager.set_meeting_status("started")
+        assert manager.attend_meeting.await_count == 1
+        manager.confirm_attend_meeting()
+        await manager._meeting_task
+        assert manager.attend_meeting.await_count == 2
+
+    asyncio.run(check())
+
+
+def test_meeting_prepare_delivers_planned_agenda_without_starting_simulation():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock, patch
+    from managers.action_manager import ActionManager
+
+    async def check():
+        briefing = "The meeting will cover parking scope, sensors, safety and driver feedback."
+        agent = SimpleNamespace(
+            set_assistant_status=Mock(), speak=AsyncMock(), llm=Mock(),
+            opt=SimpleNamespace(crewai_verbose=False),
+        )
+        manager = ActionManager(agent)
+        preparation = Mock()
+        briefing_task = SimpleNamespace(output=SimpleNamespace(raw=briefing))
+        manager.on_meeting_completed = Mock()
+        with (
+            patch("managers.action_manager.build_preparation_crew", return_value=(preparation, briefing_task)),
+            patch("managers.action_manager.build_crew") as simulate,
+        ):
+            manager.set_meeting_status("prepare")
+            await manager._meeting_preparation_task
+            preparation.kickoff.assert_called_once()
+            agent.speak.assert_awaited_once_with(briefing)
+            simulate.assert_not_called()
+            manager.on_meeting_completed.assert_not_called()
+            manager.set_meeting_status("prepare")
+            assert preparation.kickoff.call_count == 1
+
+    asyncio.run(check())
+
+
 def test_telemetry_route_can_be_empty():
     assert TaskRoute(tasks=[]).tasks == []
 
@@ -1374,13 +1781,17 @@ def test_specialist_task_executes_without_backend_and_validates_capabilities(mod
     inputs = DecisionInput("knowledge_updated", "David", 2, "event data", "changed data", "supporting data")
     assert asyncio.run(task.execute(inputs)) is decision
     crew_inputs = task.crew.kickoff_async.await_args.kwargs["inputs"]
-    assert crew_inputs["event_name"] == "knowledge_updated"
     assert crew_inputs["driver_name"] == "David"
-    assert crew_inputs["pending_message_count"] == 2
-    assert crew_inputs["event_details"] == "event data"
     assert crew_inputs["changed_facts"] == "changed data"
     assert crew_inputs["context"] == "supporting data"
-    assert crew_inputs["task_instructions"] == task.spec.instructions
+    if module_name == "meeting":
+        assert set(crew_inputs) == {"driver_name", "changed_facts", "context", "meeting_permission_state"}
+        assert crew_inputs["meeting_permission_state"] == "not_asked"
+    else:
+        assert crew_inputs["event_name"] == "knowledge_updated"
+        assert crew_inputs["pending_message_count"] == 2
+        assert crew_inputs["event_details"] == "event data"
+        assert crew_inputs["task_instructions"] == task.spec.instructions
     assert not hasattr(task, "run_decision")
     decision.action = ActionType.OPEN_WINDOWS
     with pytest.raises(ValueError, match="outside its contract"):
@@ -1599,7 +2010,8 @@ def test_late_meeting_scenario_routes_through_router_prompt():
 
     # Meeting routing is engine-driven: the prompt encodes the activation rule
     # in natural language, without internal fact identifiers.
-    assert "late for a meeting" in routing.ROUTING_PROMPT
+    assert "late, on time, arrived" in routing.ROUTING_PROMPT
+    assert "Driver arrival" in routing.ROUTING_PROMPT
     assert "meeting:" in routing.ROUTING_PROMPT
     assert "unread-message" in routing.ROUTING_PROMPT
     assert '"DriverAgenda.late_for_meeting"' not in routing.ROUTING_PROMPT
@@ -1608,11 +2020,15 @@ def test_late_meeting_scenario_routes_through_router_prompt():
     # When the router (the engine's answer) selects meeting, the task runs.
     agent = make_routed_agent([TaskType.MEETING])
     event = CarEvent(SkillType.NONE, EventName.KNOWLEDGE_UPDATED,
-        {"DriverAgenda.late_for_meeting": True}, [], facts={
-            "DriverAgenda.late_for_meeting": "The driver is late for an upcoming meeting.",
+        {"DriverAgenda.meeting_timing": "late"}, [], facts={
+            "DriverAgenda.meeting_timing": "The driver is late for the meeting.",
+            "DriverAgenda.meeting_status": "The meeting is being prepared and has not started yet.",
         })
     asyncio.run(agent.process_car_event(event))
     agent.tasks[TaskType.MEETING].execute.assert_awaited_once()
+    inputs = agent.tasks[TaskType.MEETING].execute.await_args.args[0]
+    assert "late for the meeting" in inputs.changed_facts
+    assert "being prepared" in inputs.context
 
 
 def test_conversation_talking_waits_for_first_spoken_word():

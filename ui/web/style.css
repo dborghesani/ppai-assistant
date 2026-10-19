@@ -182,8 +182,9 @@ h2 { font-size: 23px; }
 .segmented { display: flex; flex-wrap: wrap; gap: 7px; }
 .segmented label { min-width: 64px; flex: 1 1 auto; }
 .segmented input { position: absolute; opacity: 0; }
-.segmented span { min-height: 38px; display: grid; place-items: center; padding: 7px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--surface-2); font-size: 12px; text-align: center; }
-.segmented input:checked + span { border-color: var(--accent); background: var(--accent-deep); color: #d8e1ff; }
+.segmented span, .segmented button { min-height: 38px; display: grid; place-items: center; padding: 7px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted); background: var(--surface-2); font-size: 12px; text-align: center; }
+.segmented button { flex: 1 1 auto; min-width: 64px; }
+.segmented input:checked + span, .segmented button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-deep); color: #d8e1ff; }
 .range-row { display: grid; grid-template-columns: minmax(92px, .9fr) minmax(80px, 1.2fr) 58px; align-items: center; gap: 10px; min-height: 39px; }
 .range-row label { color: #c9d0d3; font-size: 12px; }
 .range-row output { min-width: 58px; padding: 4px 6px; border: 1px solid rgba(139,165,242,.28); border-radius: 4px; background: rgba(41,63,133,.24); color: #c7d4ff; font: 600 12px var(--font-body); text-align: center; }
@@ -268,6 +269,8 @@ button:disabled { cursor: not-allowed; opacity: .4; }
 .scenario-item:last-child { border-bottom: 0; }
 .scenario-copy h4 { margin: 0 0 5px; color: var(--text); font-size: 13px; }
 .scenario-copy p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.scenario-controls { display: grid; gap: 14px; }
+.scenario-controls .control-section { padding: 0; border: 0; }
 .scenario-button { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-2); color: #c8d0d4; font-weight: 700; }
 .scenario-button:hover { border-color: var(--accent); color: var(--text); }
 .scenario-button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-deep); color: #d8e1ff; }

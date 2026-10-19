@@ -94,7 +94,16 @@ const CONTROL_GROUPS = {
   ],
   scenario: [
     { title: "Demo scenarios", type: "scenarios", hint: "Choose a scenario to add context or start a message simulation.", controls: [
-      { label: "Driver late for a meeting", id: "late_for_meeting", description: "The driver is running late and may ask the assistant to attend the upcoming meeting." },
+      { label: "Meeting", id: "meeting", description: "A work meeting about an autonomous parking system, covering product scope, architecture, safety and driver experience.", groups: [
+        { title: "Meeting phase", cls: "DriverAgenda", key: "meeting_status", value: "none", clearable: true, options: [
+          { label: "Prepare", value: "prepare" },
+          { label: "Started", value: "started" }
+        ]},
+        { title: "Driver timing", cls: "DriverAgenda", key: "meeting_timing", value: "none", clearable: true, options: [
+          { label: "In time", value: "on_time" },
+          { label: "Late", value: "late" }
+        ]}
+      ]},
       { label: "Messages from Luca", id: "friend_messages", description: "Luca sends occasional messages about mutual friends. Privacy mode queues them until you allow the assistant to read them.", simulation: "friend-messages" },
       { label: "Driving simulation video", id: "driving_video", description: "Play a YouTube driving video in the assistant panel; you can keep chatting while it runs.", simulation: "driving-video" }
     ]}
@@ -752,6 +761,12 @@ function formatValue(value, format) {
   return number.toFixed(2);
 }
 
+function renderScenarioChoices(group) {
+  const current = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
+  const options = group.options.map(option => `<button type="button" data-choice="${escapeHtml(String(option.value))}" aria-pressed="${option.value === current}">${escapeHtml(option.label)}</button>`).join("");
+  return `<section class="control-section" data-type="choices" data-class="${group.cls}" data-key="${group.key}" data-value-kind="${typeof group.value}" data-default="${group.value}" data-clearable="${Boolean(group.clearable)}"><h3>${group.title}</h3><div class="segmented" role="group" aria-label="${group.title}">${options}</div></section>`;
+}
+
 function renderControls(tabName) {
   controlContent.innerHTML = CONTROL_GROUPS[tabName].map((group, groupIndex) => {
     if (group.type === "text") {
@@ -778,6 +793,9 @@ function renderControls(tabName) {
     if (group.type === "scenarios") {
       const hint = group.hint ? `<p class="scenario-hint">${escapeHtml(group.hint)}</p>` : "";
       const scenarios = group.controls.map(scenario => {
+        if (scenario.groups) {
+          return `<div class="scenario-item" data-scenario="${scenario.id}"><div class="scenario-copy"><h4>${escapeHtml(scenario.label)}</h4><p>${escapeHtml(scenario.description)}</p></div><div class="scenario-controls">${scenario.groups.map(renderScenarioChoices).join("")}</div></div>`;
+        }
         const isSimulation = Boolean(scenario.simulation);
         const active = scenario.simulation === "driving-video" ? drivingSimulationActive
           : isSimulation ? friendSimulationActive : activeScenario === scenario.id;
@@ -811,7 +829,11 @@ function updateControlsInPlace(className, values) {
 
   Object.entries(values || {}).forEach(([key, value]) => {
     sections.forEach(section => {
-      if (section.dataset.type === "ranges") {
+      if (section.dataset.type === "choices" && section.dataset.key === key) {
+        section.querySelectorAll("button[data-choice]").forEach(button => {
+          button.setAttribute("aria-pressed", String(button.dataset.choice === String(value)));
+        });
+      } else if (section.dataset.type === "ranges") {
         const inputElement = [...section.querySelectorAll('input[type="range"]')]
           .find(input => input.dataset.key === key);
         if (!inputElement) return;
@@ -909,6 +931,25 @@ controlContent.addEventListener("pointercancel", event => {
 });
 
 controlContent.addEventListener("click", event => {
+  const choice = event.target.closest("button[data-choice]");
+  if (choice) {
+    const section = choice.closest(".control-section");
+    const booleanValue = section.dataset.valueKind === "boolean";
+    const value = booleanValue ? choice.dataset.choice === "true"
+      : section.dataset.clearable === "true" && choice.getAttribute("aria-pressed") === "true"
+        ? "none" : choice.dataset.choice;
+    const buttons = section.querySelectorAll("button[data-choice]");
+    buttons.forEach(button => { button.disabled = true; });
+    bridge.call(booleanValue ? "boolChanged" : "stringChanged", section.dataset.class, section.dataset.key, value)
+      .then(appliedValue => {
+        const values = { [section.dataset.key]: appliedValue ?? value };
+        rememberControlState(section.dataset.class, values);
+        updateControlsInPlace(section.dataset.class, values);
+      })
+      .catch(() => showToast("Could not update meeting context"))
+      .finally(() => buttons.forEach(button => { button.disabled = false; }));
+    return;
+  }
   if (event.target.closest("#driving-video-toggle")) { sendDrivingVideoCommand("togglePlay"); return; }
   if (event.target.closest("#driving-video-restart")) { sendDrivingVideoCommand("seekTo", 0); return; }
   if (event.target.closest("#driving-video-load")) {
@@ -973,6 +1014,11 @@ document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", (
 document.querySelector("#reset-controls").addEventListener("click", () => {
   controlState = {};
   renderControls(activeTab);
+  controlContent.querySelectorAll('.control-section[data-type="choices"]').forEach(section => {
+    const booleanValue = section.dataset.valueKind === "boolean";
+    const value = booleanValue ? section.dataset.default === "true" : section.dataset.default;
+    bridge.call(booleanValue ? "boolChanged" : "stringChanged", section.dataset.class, section.dataset.key, value).catch(() => {});
+  });
   controlContent.querySelectorAll('input[type="radio"]:checked').forEach(target => {
     const section = target.closest(".control-section");
     bridge.call("stringChanged", section.dataset.class, section.dataset.key, target.value).catch(() => {});
@@ -1150,6 +1196,7 @@ bridge.on("ready", data => {
   if (data.assistantStatus) setAssistantStatus(data.assistantStatus);
   renderKnowledge(data.knowledge);
   rememberControlState("DriverPreferences", data.driverPreferences);
+  rememberControlState("DriverAgenda", data.driverAgendaState);
   rememberControlState("VehicleState", data.vehicleState);
   const ducking = Number(data.musicDuckingFactor);
   musicDuckingFactor = Number.isFinite(ducking) && ducking > 0 && ducking <= 1 ? ducking : 0.25;
@@ -1161,7 +1208,7 @@ bridge.on("ready", data => {
   rememberControlState("DetectedObjects", data.detectedObjectsState);
   setFriendSimulation(Boolean(data.friendMessageSimulationActive));
   duplicateSuppressionToggle.checked = Boolean(data.duplicateSuppressionEnabled);
-  if (activeTab === "driver" || activeTab === "vehicle") renderControls(activeTab);
+  if (["driver", "vehicle", "scenario"].includes(activeTab)) renderControls(activeTab);
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
   bridge.call("minimumUrgencyChanged", document.querySelector("#urgency-select").value).catch(() => {});
@@ -1207,6 +1254,10 @@ bridge.on("detectedObjectsStateChanged", data => {
 bridge.on("driverPreferencesChanged", data => {
   const changed = rememberControlState("DriverPreferences", data[0]);
   if (changed) updateControlsInPlace("DriverPreferences", data[0]);
+});
+bridge.on("driverAgendaChanged", data => {
+  const changed = rememberControlState("DriverAgenda", data[0]);
+  if (changed) updateControlsInPlace("DriverAgenda", data[0]);
 });
 bridge.on("conversationModeChanged", data => {
   setConversation(Boolean(data[0]));

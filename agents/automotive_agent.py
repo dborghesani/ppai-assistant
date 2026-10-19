@@ -834,14 +834,18 @@ class AutomotiveAgent:
         if decision.action is ActionType.ASK_PERMISSION_TO_TALK:
             self.action_manager.handle_decision(decision.action, {})
             return
-        if decision.action in ActionType.ASK_ATTEND_MEETING:
+        if decision.action is ActionType.ASK_ATTEND_MEETING:
             meeting_task = self.tasks[TaskType.MEETING]
-            if meeting_task.awaiting_reply:
+            if not decision.spoken_message:
+                return
+            if not await meeting_task.on_asked():
                 self.logger.info("[LLM] Meeting permission already pending; skipping repeated ask")
                 return
-            if decision.spoken_message:
+            try:
                 await self.speak(decision.spoken_message, tone=decision.tone)
-            await meeting_task.on_asked()
+            except (Exception, asyncio.CancelledError):
+                meeting_task.reset()
+                raise
             return
         if decision.action in ActionType.PROPOSE_MUSIC:
             if not self.music_task.should_offer(

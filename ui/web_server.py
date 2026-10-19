@@ -72,6 +72,7 @@ class WebUIServer:
             "vehicleStateChanged",
             "detectedObjectsStateChanged",
             "driverPreferencesChanged",
+            "driverAgendaChanged",
             "userSpeechReceived",
             "conversationModeChanged",
             "conversationCleared",
@@ -138,6 +139,9 @@ class WebUIServer:
                     "vehicleState": self.bridge.dumpVehicleState(),
                     "detectedObjectsState": self.bridge.dumpDetectedObjectsState(),
                     "driverPreferences": self.bridge.dumpDriverPreferences(),
+                    "driverAgendaState": getattr(self.bridge, "dumpDriverAgendaState", lambda: {
+                        "meeting_status": "none", "meeting_timing": "none",
+                    })(),
                     "musicState": getattr(self.bridge, "dumpMusicState", lambda: {"status": "disabled"})(),
                     "assistantStatus": getattr(self.bridge, "dumpAssistantStatus", lambda: "idle")(),
                     "musicDuckingFactor": getattr(getattr(self.bridge, "opt", None), "music_ducking_factor", 0.25),

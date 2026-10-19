@@ -302,6 +302,69 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("qasync", sys.modules)
 
 
+class VehicleBridgeMeetingTest(unittest.TestCase):
+    def test_no_phase_does_not_clear_pending_meeting_permission_when_late(self) -> None:
+        from agents.tasks.routing import TaskType
+        from data.assistant_dataclasses import DriverAgenda
+
+        bridge = cast(Any, VehicleBridge.__new__(VehicleBridge))
+        bridge.database_manager = SimpleNamespace(current_state={
+            "DriverAgenda": DriverAgenda(meeting_status="none", meeting_timing="late"),
+        })
+        meeting = Mock()
+        bridge.agent = SimpleNamespace(action_manager=Mock(), tasks={TaskType.MEETING: meeting})
+        bridge._listeners = defaultdict(list)
+
+        bridge._sync_driver_agenda()
+
+        meeting.reset.assert_not_called()
+        bridge.agent.action_manager.set_meeting_timing.assert_called_once_with("late")
+
+    def test_clearing_late_during_started_publishes_driver_arrival(self) -> None:
+        from data.assistant_dataclasses import DriverAgenda
+
+        bridge = cast(Any, VehicleBridge.__new__(VehicleBridge))
+        bridge.database_manager = SimpleNamespace(current_state={
+            "DriverAgenda": DriverAgenda(meeting_status="started", meeting_timing="late"),
+        })
+        bridge.send_event = Mock()
+
+        result = bridge.stringChanged("DriverAgenda", "meeting_timing", "none")
+
+        self.assertEqual(result, "arrived")
+        bridge.send_event.assert_called_once_with("DriverAgenda.meeting_timing", "arrived")
+
+    def test_clearing_late_before_started_still_means_no_scheduled_meeting(self) -> None:
+        from data.assistant_dataclasses import DriverAgenda
+
+        bridge = cast(Any, VehicleBridge.__new__(VehicleBridge))
+        bridge.database_manager = SimpleNamespace(current_state={
+            "DriverAgenda": DriverAgenda(meeting_status="prepare", meeting_timing="late"),
+        })
+        bridge.send_event = Mock()
+
+        result = bridge.stringChanged("DriverAgenda", "meeting_timing", "none")
+
+        self.assertEqual(result, "none")
+        bridge.send_event.assert_called_once_with("DriverAgenda.meeting_timing", "none")
+
+    def test_agenda_sync_passes_arrival_to_simulation(self) -> None:
+        from agents.tasks.routing import TaskType
+        from data.assistant_dataclasses import DriverAgenda
+
+        bridge = cast(Any, VehicleBridge.__new__(VehicleBridge))
+        bridge.database_manager = SimpleNamespace(current_state={
+            "DriverAgenda": DriverAgenda(meeting_status="started", meeting_timing="arrived"),
+        })
+        bridge.agent = SimpleNamespace(action_manager=Mock(), tasks={TaskType.MEETING: Mock()})
+        bridge._listeners = defaultdict(list)
+
+        bridge._sync_driver_agenda()
+
+        bridge.agent.action_manager.set_meeting_status.assert_called_once_with("started")
+        bridge.agent.action_manager.set_meeting_timing.assert_called_once_with("arrived")
+
+
 class VehicleBridgeTranscriptionTest(unittest.TestCase):
     def test_transcription_is_displayed_and_submitted_once(self) -> None:
         bridge = VehicleBridge.__new__(VehicleBridge)

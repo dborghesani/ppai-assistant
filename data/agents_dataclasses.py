@@ -163,8 +163,10 @@ class ActionType(str, Enum):
                 "look at what the driver can currently see and describe it, offering more information about notable sights"
             ),
             ActionType.ASK_ATTEND_MEETING: (
-                "Ask the driver whether the assistant should attend their upcoming "
-                "meeting on their behalf because they are running late."
+                "Ask the driver whether the assistant should attend their meeting on their "
+                "behalf because they are explicitly late. Agenda preparation and meeting phase "
+                "are not prerequisites; never offer for an on-time or arrived driver, "
+                "no scheduled meeting, or unknown timing."
             ),
             ActionType.PROPOSE_MUSIC: (
                 "Ask the driver's permission to play a mood-matching playlist only "

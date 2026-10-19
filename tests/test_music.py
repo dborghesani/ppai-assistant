@@ -20,7 +20,7 @@ from data.agents_dataclasses import (
 from data.events import EventName
 from agents.automotive_agent import AutomotiveAgent
 from agents.tasks.decision import NotificationDecision
-from agents.tasks.mood_music import music_proposal_reply_context
+from agents.tasks.mood_music import MusicSplit, music_proposal_reply_context
 from agents.tasks.routing import TaskType
 from agents.tasks.mood_music import MoodMusicTask, MusicSearchPlan, jamendo_url
 
@@ -189,7 +189,7 @@ def _music_task(*, selection=None, prompt=None, stage="selection", awaiting=True
 
 
 def _stub_interpret(task, confirmed):
-    task.interpret_reply = AsyncMock(return_value=confirmed)
+    task.interpret_reply = AsyncMock(return_value=MusicSplit(confirmed=confirmed))
 
 
 def test_agent_rejects_music_confirmation_after_a_newer_assistant_question():
@@ -228,7 +228,7 @@ def test_music_proposal_with_no_selection_does_not_claim_a_playlist_was_found():
     async def check():
         task = _music_task(stage="offered", awaiting=True)
         task.request_music = AsyncMock(return_value=None)
-        task.interpret_reply = AsyncMock(return_value=True)
+        task.interpret_reply = AsyncMock(return_value=MusicSplit(confirmed=True))
         task.speak = AsyncMock()
         task.respond = AsyncMock()
 
@@ -253,7 +253,7 @@ def test_unclassified_music_confirmation_is_treated_as_decline_in_both_stages():
             replies.append(reply_context)
             return "reply"
 
-        task.interpret_reply = AsyncMock(return_value=None)
+        task.interpret_reply = AsyncMock(return_value=MusicSplit(confirmed=None))
         task._deliver_reply = deliver
 
         await task.handle_user_input("Maybe.", [])
@@ -273,6 +273,76 @@ def test_unclassified_music_confirmation_is_treated_as_decline_in_both_stages():
         task.start_playback.assert_not_called()
         assert "removed from the" in replies[-1][0]
         assert '"confirmed": false' in replies[-1][1]
+
+    asyncio.run(check())
+
+
+def test_music_selection_can_be_changed_and_requires_a_new_confirmation():
+    async def check():
+        task = _music_task(selection={"title": "Mellow Nights", "tracks": [{"id": "1"}]},
+                           prompt="Should I start Mellow Nights?")
+        task.interpret_reply = AsyncMock(return_value=MusicSplit(confirmed=False, change_requested=True))
+        alternate = {"title": "Upbeat Jazz", "tracks": [{"id": "2"}]}
+        task.request_music = AsyncMock(return_value=alternate)
+        task._deliver_reply = AsyncMock(return_value="Would you like me to start Upbeat Jazz?")
+
+        await task.handle_user_input("Could you find something more upbeat, maybe jazz?", [
+            {"role": "assistant", "content": "Should I start Mellow Nights?"},
+        ])
+
+        task.request_music.assert_awaited_once_with(
+            "rock", emotion={}, request="Could you find something more upbeat, maybe jazz?",
+            autoplay=False, history=[{"role": "assistant", "content": "Should I start Mellow Nights?"}],
+        )
+        assert task.pending_selection is alternate
+        assert task.stage == "selection"
+        assert task.awaiting_reply is True
+        assert task.pending_prompt == "Would you like me to start Upbeat Jazz?"
+        task.start_playback = Mock()
+        task.interpret_reply = AsyncMock(return_value=MusicSplit(confirmed=True))
+        await task.handle_user_input("Yes", [{"role": "assistant", "content": task.pending_prompt}])
+        task.start_playback.assert_called_once_with(alternate)
+
+    asyncio.run(check())
+
+
+def test_accepted_music_selection_uses_conversation_reply_with_title_constraints():
+    async def check():
+        task = _music_task(selection={"title": "Jazz at Dawn", "tracks": [{"id": "2"}]},
+                           prompt="Would you like me to start Jazz at Dawn?")
+        task.interpret_reply = AsyncMock(return_value=MusicSplit(confirmed=True))
+        task.start_playback = Mock(return_value=True)
+        task.respond = AsyncMock()
+        history = [{"role": "assistant", "content": task.pending_prompt}]
+
+        await task.handle_user_input("yes please", history)
+
+        task.start_playback.assert_called_once()
+        task.respond.assert_awaited_once()
+        user_input, reply_context = task.respond.await_args.args
+        assert user_input == "yes please"
+        instructions, reference = reply_context
+        assert "using that exact title" in instructions
+        assert "Do not mention or infer emotions" in instructions
+        assert '"queued_playlist_title": "Jazz at Dawn"' in reference
+        assert task.stage is None
+        assert task.awaiting_reply is False
+
+    asyncio.run(check())
+
+
+def test_music_offer_can_be_refined_before_search():
+    async def check():
+        task = _music_task(stage="offered", selection=None)
+        task.interpret_reply = AsyncMock(return_value=MusicSplit(confirmed=False, change_requested=True))
+        task.request_music = AsyncMock(return_value={"title": "Jazz", "tracks": [{"id": "2"}]})
+        task._deliver_reply = AsyncMock(return_value="Would you like me to start Jazz?")
+
+        await task.handle_user_input("Yes, but make it jazz.", [])
+
+        assert task.request_music.call_args.kwargs["request"] == "Yes, but make it jazz."
+        assert task.stage == "selection"
+        assert task.awaiting_reply is True
 
     asyncio.run(check())
 

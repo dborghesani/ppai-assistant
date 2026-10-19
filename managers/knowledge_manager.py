@@ -108,11 +108,6 @@ class KnowledgeManager:
         ("VehicleState", "privacy_mode"): lambda value: (
             "Privacy mode is on." if value else "Privacy mode is off."
         ),
-        ("DriverAgenda", "late_for_meeting"): lambda value: (
-            "The driver is running late for an upcoming meeting."
-            if value
-            else "The driver is not late for any meeting."
-        ),
         ("DetectedObjects", "animal_inside"): lambda value: (
             "An animal (dog or cat) is detected inside the vehicle."
             if value
@@ -172,6 +167,18 @@ class KnowledgeManager:
         ),
     }
     _CATEGORY_KNOWLEDGE_FORMATTERS: dict[tuple[str, str], Callable[[str], str]] = {
+        ("DriverAgenda", "meeting_status"): lambda value: {
+            "none": "No meeting phase is active.",
+            "prepare": "The meeting is being prepared and has not started yet.",
+            "started": "The meeting has started and is in progress.",
+            "finished": "The meeting has finished.",
+        }.get(value, "The meeting status is unknown."),
+        ("DriverAgenda", "meeting_timing"): lambda value: {
+            "none": "No meeting is scheduled.",
+            "on_time": "The driver is on time for the meeting.",
+            "late": "The driver is late for the meeting.",
+            "arrived": "The driver has arrived at the meeting.",
+        }.get(value, "The driver's meeting timing is unknown."),
         ("LaneTracing", "highway_exit"): lambda value: {
             "No exit": "The vehicle is not approaching a highway exit.",
             "Right": "The vehicle is approaching a highway exit on the right.",

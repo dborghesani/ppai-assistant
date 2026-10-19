@@ -11,12 +11,13 @@ import structlog
 from data.agents_dataclasses import ActionType
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
-from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
+from data.assistant_dataclasses import DetectedObjects, DriverAgenda, DriverPreferences, VehicleState
 from managers.database_manager import DatabaseManager
 from managers.mqtt_thread import MqttThreadClient
 from data.events import CarEvent, EventName
 from managers.knowledge_manager import KnowledgeManager
 from data.agents_dataclasses import SkillType
+from agents.tasks.routing import TaskType
 
 if TYPE_CHECKING:
     from voice.stt_manager import STTManager
@@ -62,9 +63,7 @@ class VehicleBridge:
             }
         )
         self.agent.action_manager.on_action = self.apply_vehicle_action
-        self.agent.action_manager.on_meeting_completed = lambda: self._emit(
-            "scenarioCompleted", "late_for_meeting"
-        )
+        self.agent.action_manager.on_meeting_completed = self._on_meeting_completed
         self.agent.on_music_update = lambda value: self._emit("musicUpdated", value)
         self.agent.music_preferences_provider = lambda: self.dumpDriverPreferences().get("preferred_music") or ""
         self.agent.driver_preferences_provider = self.dumpDriverPreferences
@@ -431,7 +430,7 @@ class VehicleBridge:
 
     # Registry of demo scenarios: scenario_id -> (knowledge class, field, active value, inactive value).
     _SCENARIOS: dict[str, tuple[str, str, Any, Any]] = {
-        "late_for_meeting": ("DriverAgenda", "late_for_meeting", True, False),
+        "late_for_meeting": ("DriverAgenda", "meeting_timing", "late", "none"),
     }
 
     def setScenario(self, scenario_id: str, active: bool) -> None:
@@ -562,7 +561,20 @@ class VehicleBridge:
         self.send_event(f"{classname}.{varname}", value)
 
     def stringChanged(self, classname, varname, value):
+        if classname == "DriverAgenda":
+            allowed = {
+                "meeting_status": {"none", "prepare", "started", "finished"},
+                "meeting_timing": {"none", "on_time", "late", "arrived"},
+            }
+            if varname not in allowed or value not in allowed[varname]:
+                raise ValueError("Invalid meeting context")
+            if varname == "meeting_timing" and value == "none":
+                agenda = self.dumpDriverAgendaState()
+                if agenda["meeting_status"] == "started" and agenda["meeting_timing"] == "late":
+                    value = "arrived"
         self.send_event(f"{classname}.{varname}", value)
+        if classname == "DriverAgenda":
+            return value
 
     def boolChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)
@@ -571,6 +583,20 @@ class VehicleBridge:
         """Called synchronously by KnowledgeManager right after its context changes."""
         self._emit("knowledgeUpdated", self.dumpKnowledgeData())
         self._emit("detectedObjectsStateChanged", self.dumpDetectedObjectsState())
+        self.loop.call_soon_threadsafe(self._sync_driver_agenda)
+
+    def _sync_driver_agenda(self) -> None:
+        values = self.dumpDriverAgendaState()
+        status = values["meeting_status"]
+        self.agent.action_manager.set_meeting_status(status)
+        self.agent.action_manager.set_meeting_timing(values["meeting_timing"])
+        if values["meeting_timing"] != "late":
+            self.agent.tasks[TaskType.MEETING].reset()
+        self._emit("driverAgendaChanged", values)
+
+    def _on_meeting_completed(self) -> None:
+        self.database_manager.write_measure("DriverAgenda", "meeting_status", "finished")
+        self._sync_driver_agenda()
 
     def dumpMusicState(self) -> dict[str, Any]:
         if self.agent.pending_music_selection is not None:
@@ -614,6 +640,13 @@ class VehicleBridge:
                     if value is not None
                 }
             )
+        return values
+
+    def dumpDriverAgendaState(self) -> dict[str, Any]:
+        state = self.database_manager.current_state.get("DriverAgenda")
+        values = asdict(DriverAgenda())
+        if isinstance(state, DriverAgenda):
+            values.update({key: value for key, value in asdict(state).items() if value is not None})
         return values
 
     def dumpDetectedObjectsState(self) -> dict[str, Any]:

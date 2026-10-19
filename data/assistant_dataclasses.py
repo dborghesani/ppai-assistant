@@ -105,7 +105,8 @@ class VehicleMotion:
 
 @dataclass
 class DriverAgenda:
-    late_for_meeting: bool | None = knowledge_field(default=False)
+    meeting_status: str | None = knowledge_field(default="none", value_kind="category")
+    meeting_timing: str | None = knowledge_field(default="none", value_kind="category")
 
 @dataclass
 class VehicleState:

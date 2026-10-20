@@ -3,6 +3,8 @@ import math
 import queue
 import threading
 import time
+from collections import deque
+from contextlib import ExitStack
 from typing import Callable
 
 import numpy as np
@@ -25,7 +27,7 @@ except ImportError:
 
 logger = structlog.get_logger()
 
-DEFAULT_STT_REPO = "kyutai/stt-1b-en_fr"
+DEFAULT_STT_REPO = "kyutai/stt-1b-en_fr-candle"
 
 
 def _max_normalized_correlation(mic: np.ndarray, reference: np.ndarray) -> float:
@@ -111,8 +113,6 @@ class STTManager:
             )
             self.enabled = False
             return
-
-        logger.info("Kyutai STT model loaded successfully")
 
         self._warmup()
 
@@ -228,6 +228,7 @@ class STTManager:
         barge_in_min_frames: int = 4,
         get_tts_reference: Callable[[int], "np.ndarray"] | None = None,
         echo_correlation_threshold: float = 0.6,
+        barge_in_vad_threshold: float = 0.4,
     ) -> bool:
         """Start a continuous, always-listening session with turn-taking.
 
@@ -235,19 +236,17 @@ class STTManager:
         successfully, False otherwise (callers should not assume success just
         because no exception was raised).
 
-        Uses the model's semantic-VAD extra heads when the checkpoint provides them;
-        otherwise falls back to counting consecutive silence tokens emitted by the
-        model itself (most public STT checkpoints, e.g. stt-1b-en_fr, have no VAD heads).
+        With semantic-VAD heads, keep STT running during TTS: recognized words or
+        sustained low pause probability interrupt playback. With echo protection
+        enabled, a playback reference is required; correlated microphone frames
+        are replaced by silence. This rejects obvious echo, not full acoustic
+        echo cancellation. Headphones can disable echo protection.
 
-        Without acoustic echo cancellation, leaving the mic active while the
-        assistant speaks can make it transcribe its own voice as new user input,
-        causing a runaway feedback loop. When `mute_mic_during_tts` is True and
-        `is_tts_speaking()` returns True, incoming audio is not transcribed. A
-        raw-energy check (`barge_in_energy_threshold`/`barge_in_min_frames`) stays
-        active during that window so the user can still interrupt the assistant.
-        If `get_tts_reference` is provided, loud audio is additionally compared
-        (via cross-correlation) against the audio actually being played; a strong
-        match is treated as TTS echo and ignored instead of triggering barge-in.
+        Turn delivery also requires at least `pause_seconds` without new text,
+        in addition to the checkpoint's transcription delay and VAD confirmation.
+        Checkpoints without VAD heads (or without a required playback reference)
+        retain the muted, energy-based interruption path. Their turn boundaries
+        use consecutive silence tokens when VAD heads are absent.
 
         Callbacks are invoked from a background thread; callers must marshal them
         back onto their own event loop/thread as needed.
@@ -306,6 +305,7 @@ class STTManager:
                 barge_in_min_frames,
                 get_tts_reference,
                 echo_correlation_threshold,
+                barge_in_vad_threshold,
             ),
             daemon=True,
         )
@@ -353,9 +353,13 @@ class STTManager:
         barge_in_min_frames: int,
         get_tts_reference: Callable[[int], "np.ndarray"] | None,
         echo_correlation_threshold: float,
+        barge_in_vad_threshold: float = 0.4,
     ) -> None:
+        if self._mimi is None or self._lm is None or self._info is None or self._tokenizer is None:
+            logger.warning("Cannot run conversation without loaded STT models")
+            return
         frame_size = self._mimi.frame_size
-        idle_frame_threshold = max(1, round(pause_seconds * self._mimi.frame_rate))
+        idle_frame_threshold = max(1, math.ceil(pause_seconds * self._mimi.frame_rate))
         pieces: list[str] = []
         speaking = False
         idle_frames = 0
@@ -366,23 +370,50 @@ class STTManager:
         # false transcription/feedback loop.
         barge_in_energy_frames = 0
         barge_in_triggered = False
-        mic_echo_window = np.zeros(0, dtype=np.float32)
+        barge_in_vad_frames = 0
+        tts_was_speaking = False
+        echo_tail_frames = 0
+        processed_frames = 0
+        turn_end_frames = 0
+        delay_frames = math.ceil(
+            self._info.stt_config.get("audio_delay_seconds", 0.5) * self._mimi.frame_rate
+        )
+        text_audio_allowed = deque([False] * delay_frames)
+        mic_echo_window: np.ndarray = np.zeros(0, dtype=np.float32)
         mic_echo_window_max = int(0.24 * self._sample_rate)
         echo_reference_len = mic_echo_window_max + int(0.5 * self._sample_rate)
         # Buffer incoming audio and slice it ourselves: the input device is not
         # guaranteed to deliver callbacks of exactly `frame_size` samples.
-        pending = np.zeros((0,), dtype=np.float32)
+        pending: np.ndarray = np.zeros((0,), dtype=np.float32)
+        frame: np.ndarray
 
         logger.info("Conversation loop started")
         try:
-            lm_gen = moshi.models.LMGen(self._lm, temp=0, temp_text=0.0)
+            with GPU_LOCK:
+                lm_gen = moshi.models.LMGen(self._lm, temp=0, temp_text=0.0)
             has_vad_heads = len(self._lm.extra_heads) > 0
+            model_barge_in = has_vad_heads and (
+                not mute_mic_during_tts or get_tts_reference is not None
+            )
+            logger.info(
+                "Conversation interruption mode",
+                mode="stt-vad" if model_barge_in else "energy",
+            )
             if not has_vad_heads:
                 logger.warning(
                     "Checkpoint has no semantic-VAD heads, using silence-token fallback",
                     pause_seconds=pause_seconds,
                 )
-            with torch.no_grad(), self._mimi.streaming(1), lm_gen.streaming(1):
+            streaming = ExitStack()
+            with torch.no_grad(), ExitStack() as cleanup:
+                def close_streaming() -> None:
+                    with GPU_LOCK:
+                        streaming.close()
+
+                cleanup.callback(close_streaming)
+                with GPU_LOCK:
+                    streaming.enter_context(self._mimi.streaming(1))
+                    streaming.enter_context(lm_gen.streaming(1))
                 while not self._conversation_stop.is_set():
                     try:
                         chunk = audio_queue.get(timeout=0.5)
@@ -394,14 +425,21 @@ class STTManager:
                         continue
 
                     pending = np.concatenate([pending, chunk[:, 0]])
+                    tts_speaking = bool(is_tts_speaking and is_tts_speaking())
+                    if tts_speaking and not tts_was_speaking:
+                        barge_in_triggered = False
+                        barge_in_vad_frames = 0
+                    if tts_was_speaking and not tts_speaking:
+                        echo_tail_frames = math.ceil(0.5 * self._mimi.frame_rate)
+                    tts_was_speaking = tts_speaking
 
                     # Without echo cancellation, the mic can pick up the assistant's
                     # own speaker output while it talks. Discard audio in that window
                     # instead of feeding it to the model, to avoid a self-feedback loop.
                     if (
-                        mute_mic_during_tts
-                        and is_tts_speaking is not None
-                        and is_tts_speaking()
+                        not model_barge_in
+                        and mute_mic_during_tts
+                        and tts_speaking
                     ):
                         mic_echo_window = np.concatenate(
                             [mic_echo_window, chunk[:, 0]]
@@ -458,29 +496,81 @@ class STTManager:
                         continue
 
                     # No longer muted: reset the barge-in gate for the next mute window.
-                    barge_in_energy_frames = 0
-                    barge_in_triggered = False
-                    mic_echo_window = np.zeros(0, dtype=np.float32)
+                    if not tts_speaking:
+                        barge_in_energy_frames = 0
+                        barge_in_vad_frames = 0
+                        if not echo_tail_frames:
+                            mic_echo_window = np.zeros(0, dtype=np.float32)
 
                     while pending.shape[0] >= frame_size:
                         frame, pending = pending[:frame_size], pending[frame_size:]
 
-                        chunk_t = torch.from_numpy(frame).to(self._device)[None, None]
+                        audio_allowed = True
+                        if (
+                            model_barge_in and mute_mic_during_tts
+                            and get_tts_reference is not None
+                            and (tts_speaking or echo_tail_frames > 0)
+                        ):
+                            mic_echo_window = np.concatenate(
+                                [mic_echo_window, frame]
+                            )[-mic_echo_window_max:]
+                            reference = get_tts_reference(echo_reference_len)
+                            correlation = _max_normalized_correlation(mic_echo_window, reference)
+                            audio_allowed = correlation <= echo_correlation_threshold
+                            if not audio_allowed:
+                                frame = np.zeros_like(frame)
+                        if not tts_speaking and echo_tail_frames > 0:
+                            echo_tail_frames -= 1
+                        text_audio_allowed.append(audio_allowed)
+                        token_allowed = text_audio_allowed.popleft()
                         with GPU_LOCK:
+                            chunk_t = torch.from_numpy(frame).to(self._device)[None, None]
                             audio_tokens = self._mimi.encode(chunk_t)
                             step_out = lm_gen.step_with_extra_heads(audio_tokens)
+                            if step_out is not None:
+                                text_tokens, vad_heads = step_out
+                                token = text_tokens[0, 0, 0].cpu().item()
+                                pause_probability = (
+                                    vad_heads[vad_head_index][0, 0, 0].cpu().item()
+                                    if vad_heads else None
+                                )
+                        processed_frames += 1
                         if step_out is None:
                             continue
-                        text_tokens, vad_heads = step_out
 
-                        token = text_tokens[0, 0, 0].cpu().item()
+                        if not token_allowed:
+                            token = 3
+                        if model_barge_in and tts_speaking and not barge_in_triggered:
+                            if (
+                                audio_allowed
+                                and processed_frames > 12
+                                and pause_probability is not None
+                                and pause_probability < barge_in_vad_threshold
+                            ):
+                                barge_in_vad_frames += 1
+                            else:
+                                barge_in_vad_frames = 0
+                            if barge_in_vad_frames >= barge_in_min_frames:
+                                barge_in_triggered = True
+                                speaking = True
+                                utterance_start_time = time.time()
+                                last_activity = time.time()
+                                logger.info("Barge-in confirmed by semantic VAD")
+                                if on_speech_start is not None:
+                                    on_speech_start()
                         if token not in (0, 3):
                             piece = self._tokenizer.id_to_piece(token).replace("▁", " ")
+                            if not pieces and not any(character.isalnum() for character in piece):
+                                continue
                             pieces.append(piece)
                             idle_frames = 0
+                            turn_end_frames = 0
                             last_activity = time.time()
                             if not speaking:
-                                utterance_start_time = time.time()
+                                utterance_start_time = last_activity
+                                if tts_speaking:
+                                    barge_in_triggered = True
+                                    logger.info("Barge-in confirmed by STT text")
                                 if on_speech_start is not None:
                                     on_speech_start()
                             speaking = True
@@ -488,11 +578,15 @@ class STTManager:
                             idle_frames += 1
 
                         end_of_turn = False
-                        if vad_heads:
-                            pause_probability = (
-                                vad_heads[vad_head_index][0, 0, 0].cpu().item()
+                        if pause_probability is not None:
+                            if speaking and pause_probability > vad_threshold:
+                                turn_end_frames += 1
+                            else:
+                                turn_end_frames = 0
+                            end_of_turn = (
+                                turn_end_frames > delay_frames
+                                and idle_frames >= max(idle_frame_threshold, delay_frames)
                             )
-                            end_of_turn = pause_probability > vad_threshold
                         elif speaking and idle_frames >= idle_frame_threshold:
                             end_of_turn = True
 
@@ -507,6 +601,7 @@ class STTManager:
                             pieces = []
                             speaking = False
                             idle_frames = 0
+                            turn_end_frames = 0
                             utterance_start_time = None
                             last_activity = time.time()
                             if utterance:

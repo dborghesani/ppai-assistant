@@ -217,22 +217,28 @@ class TTSManager:
         if not self.enabled or not text:
             return
         async with self._speech_lock:
-            await asyncio.to_thread(self._speak_blocking, text, on_word)
+            worker = asyncio.create_task(asyncio.to_thread(self._speak_blocking, text, on_word))
+            cancelled = False
+            while not worker.done():
+                try:
+                    await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    cancelled = True
+                    self.stop()
+            if cancelled:
+                worker.exception()
+                raise asyncio.CancelledError
+            worker.result()
 
     def stop(self, finish_word: bool = False) -> None:
         """Halt any ongoing playback. With `finish_word=True` the word currently
         being spoken is allowed to complete before playback stops (a natural
         interruption instead of a mid-word cutoff)."""
-        self._stop_flag.set()
         if finish_word:
             self._finish_word.set()
-            return
-        self._finish_word.clear()
-        if self._playback_stream is not None:
-            try:
-                self._playback_stream.abort()
-            except Exception:
-                pass
+        else:
+            self._finish_word.clear()
+        self._stop_flag.set()
 
     @staticmethod
     def _word_boundaries(text: str) -> tuple[list[str], list[int], list[int]]:
@@ -312,12 +318,7 @@ class TTSManager:
             if self._stop_flag.is_set() or not pcms:
                 return
             pcm = pcms[0] if len(pcms) == 1 else np.concatenate(pcms)
-            # Keep the GPU lock through playback: releasing it lets other CUDA
-            # work interleave with mimi's compiled (cudagraph) state and kills
-            # subsequent generations with "Offset increment outside graph
-            # capture encountered unexpectedly".
-            with GPU_LOCK:
-                self._play_audio(pcm, text, on_word)
+            self._play_audio(pcm, text, on_word)
         except Exception as e:
             logger.warning("TTS playback failed", error=str(e))
         finally:
@@ -341,6 +342,7 @@ class TTSManager:
             for start in range(0, total, block):
                 if self._stop_flag.is_set():
                     if not self._finish_word.is_set():
+                        stream.abort()
                         return
                     if finish_at < 0:
                         # Finish the word currently being spoken: cut at the
@@ -353,9 +355,22 @@ class TTSManager:
                         return
                 samples = np.clip(pcm[start:start + block], -1, 1)
                 try:
-                    stream.write(samples.reshape(-1, 1))
+                    underflowed = stream.write(samples.reshape(-1, 1))
                 except Exception:
+                    if self._stop_flag.is_set():
+                        stream.abort()
+                        return
+                    raise
+                if self._stop_flag.is_set() and not self._finish_word.is_set():
+                    stream.abort()
                     return
+                if underflowed:
+                    logger.warning(
+                        "TTS audio output underflow",
+                        device=stream.device,
+                        sample_rate=sample_rate,
+                        played_samples=played,
+                    )
                 played = min(start + block, total)
                 self._push_playback_reference(samples)
                 while next_word < len(word_end_samples) and played >= word_end_samples[next_word]:

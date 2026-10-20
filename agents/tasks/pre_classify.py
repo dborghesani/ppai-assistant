@@ -293,6 +293,7 @@ class RequestPreClassifier(LLMTask[PreClassificationInput, PreClassification, Pr
                     "schema": schema,
                 }},
                 temperature=0.1,
+                reasoning_effort="none",
                 max_tokens=128,
             )
             async for chunk in stream:

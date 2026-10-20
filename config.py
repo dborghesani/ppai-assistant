@@ -98,9 +98,7 @@ class ConfigAssistant:
     )
     conversation_vad_threshold: float = 0.5
     conversation_session_silence_timeout: float = 10.0
-    conversation_pause_seconds: float = (
-        1.0  # fallback turn-taking when checkpoint has no VAD heads
-    )
+    conversation_pause_seconds: float = 1.0
     # Without acoustic echo cancellation, the mic can pick up the assistant's own
     # speaker output and re-transcribe it as a new user request, causing a runaway
     # feedback loop. Muting transcription while TTS is speaking prevents that;
@@ -112,6 +110,7 @@ class ConfigAssistant:
     # playback with no real interruption. Tune per your noise environment.
     conversation_barge_in_energy_threshold: float = 0.035
     conversation_barge_in_min_frames: int = 4
+    conversation_barge_in_vad_threshold: float = 0.4
     # Attention-based speech pause/resume (ported from the ppai-emotional-
     # conversational-ai demo): when the knowledge-base attention fact reads
     # "Attention level is low/very low" (or no attention is detected) the

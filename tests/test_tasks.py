@@ -4,6 +4,40 @@ from pydantic import ValidationError
 from agents.tasks.routing import TaskRoute, TaskType
 
 
+def test_llm_preclassification_disables_reasoning_for_short_json_budget():
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from agents.tasks.pre_classify import PreClassificationInput, RequestPreClassifier, ResponseSource
+    from config import ConfigAssistant
+
+    requests = []
+
+    async def stream(**request):
+        requests.append(request)
+        content = json.dumps({
+            "requires_action_classification": False,
+            "response_source": "general",
+            "wait_message": "",
+        }) if request.get("reasoning_effort") == "none" else ""
+        yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=content))])
+
+    classifier = RequestPreClassifier(
+        ConfigAssistant(pre_classify_backend="llm"), Mock(),
+        backend=SimpleNamespace(stream=stream),
+    )
+    result = asyncio.run(classifier.execute(PreClassificationInput(
+        user_input="Hello", history=[], pending_message_count=0,
+    )))
+
+    assert not result.requires_action_classification
+    assert result.response_source is ResponseSource.GENERAL
+    assert requests[0]["reasoning_effort"] == "none"
+    assert requests[0]["max_tokens"] == 128
+
+
 def test_telemetry_route_deduplicates_tasks_in_priority_order():
     route = TaskRoute(tasks=[TaskType.WELLBEING, TaskType.DRIVING, TaskType.WELLBEING])
     assert route.tasks == [TaskType.WELLBEING, TaskType.DRIVING]
@@ -2031,6 +2065,71 @@ def test_late_meeting_scenario_routes_through_router_prompt():
     assert "being prepared" in inputs.context
 
 
+@pytest.mark.parametrize("outcome", ["complete", "cancel_generation", "cancel_sentence", "cancel_playback", "error"])
+def test_conversation_cleans_up_child_tasks(outcome):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from agents.tasks.conversation import ConversationDelivery, ConversationInput, ConversationTask
+    from config import ConfigAssistant
+
+    async def check():
+        baseline = set(asyncio.all_tasks())
+        generation_waiting = asyncio.Event()
+        release_generation = asyncio.Event()
+        speech_started = asyncio.Event()
+        release_speech = asyncio.Event()
+        stream_closed = asyncio.Event()
+        if outcome not in {"cancel_generation", "cancel_sentence"}:
+            release_generation.set()
+        if outcome == "complete":
+            release_speech.set()
+
+        async def stream(**kwargs):
+            try:
+                if outcome == "error":
+                    raise RuntimeError("generation failed")
+                yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(
+                    content="[[tone:calm]]" if outcome == "cancel_sentence" else "[[tone:calm]]Hello there."
+                ))])
+                generation_waiting.set()
+                await release_generation.wait()
+            finally:
+                stream_closed.set()
+
+        async def speak(sentence, on_word):
+            speech_started.set()
+            await release_speech.wait()
+
+        task = ConversationTask(ConfigAssistant(), Mock(), backend=SimpleNamespace(stream=stream))
+        response = asyncio.create_task(task.execute(
+            ConversationInput("Hello", [], []), ConversationDelivery(speak=speak),
+        ))
+        try:
+            if outcome.startswith("cancel"):
+                ready = generation_waiting if outcome in {"cancel_generation", "cancel_sentence"} else speech_started
+                await asyncio.wait_for(ready.wait(), 1)
+                response.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await response
+            elif outcome == "error":
+                with pytest.raises(RuntimeError, match="generation failed"):
+                    await response
+            else:
+                await response
+            pending = [task for task in asyncio.all_tasks() if task not in baseline and not task.done()]
+            assert pending == []
+            assert stream_closed.is_set()
+        finally:
+            pending = [task for task in asyncio.all_tasks() if task not in baseline and not task.done()]
+            for child in pending:
+                child.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(check())
+
+
 def test_conversation_talking_waits_for_first_spoken_word():
     import asyncio
     from types import SimpleNamespace
@@ -2068,6 +2167,43 @@ def test_conversation_talking_waits_for_first_spoken_word():
     ))
     assert events[0] == ("text", "Hello")
     assert events[-2:] == [("tone", None), ("status", AssistantStatus.IDLE)]
+
+
+def test_conversation_spoken_words_keep_previous_sentences_visible():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from agents.tasks.conversation import ConversationDelivery, ConversationInput, ConversationTask
+    from config import ConfigAssistant
+
+    updates = []
+
+    async def stream(**kwargs):
+        yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(
+            content="[[tone:calm]]Hello there. Enjoy your drive. Stay safe."
+        ))])
+
+    async def speak(sentence, on_word):
+        words = sentence.split()
+        for count in range(1, len(words) + 1):
+            on_word(" ".join(words[:count]))
+            await asyncio.sleep(0)
+
+    task = ConversationTask(ConfigAssistant(), Mock(), backend=SimpleNamespace(stream=stream))
+    result = asyncio.run(task.execute(
+        ConversationInput("Hello", [], []),
+        ConversationDelivery(speak=speak, on_text=updates.append),
+    ))
+
+    assert updates == [
+        "Hello", "Hello there.", "Hello there.",
+        "Hello there. Enjoy", "Hello there. Enjoy your",
+        "Hello there. Enjoy your drive.", "Hello there. Enjoy your drive.",
+        "Hello there. Enjoy your drive. Stay",
+        "Hello there. Enjoy your drive. Stay safe.",
+        "Hello there. Enjoy your drive. Stay safe.",
+    ]
+    assert result.spoken == "Hello there. Enjoy your drive. Stay safe."
 
 
 def test_wait_message_talking_waits_for_first_chunk():
@@ -2168,6 +2304,13 @@ def test_conversation_task_streams_without_agent_and_hides_tone_metadata():
     assert "[[tone:" not in str(speak.await_args_list)
     assert stream.closed
     create.assert_awaited_once()
+    system_prompt = create.await_args.kwargs["messages"][0]["content"]
+    assert "Do not ask questions unless strictly necessary" in system_prompt
+    assert "or obtain required consent" in system_prompt
+    assert "Respond to greetings with one brief, friendly statement and no question." in system_prompt
+    assert '"How is your journey going so far?"' in system_prompt
+    assert "Before responding, silently remove every question that is not indispensable." in system_prompt
+    assert "Once the request is answered, stop." in system_prompt
     ttft_calls = [call for call in logger.debug.call_args_list if call.args[0] == "[LLM] Time to first token"]
     assert len(ttft_calls) == 1
     assert ttft_calls[0].kwargs["llm_call"] == "conversation response"

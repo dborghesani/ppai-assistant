@@ -82,7 +82,7 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
 
 4. **(Optional) Enable voice**: TTS/STT require an NVIDIA GPU (CUDA). The default models are:
    - TTS: `kyutai/tts-1.6b-en_fr` (or the smaller, English-only `kyutai/tts-0.75b-en-public`)
-   - STT: `kyutai/stt-1b-en_fr`
+   - STT: `kyutai/stt-1b-en_fr-candle` (semantic VAD, loaded with PyTorch)
 
    Weights are downloaded automatically from Hugging Face on first use. Both models are warmed up
    (a dummy inference) at startup so the first real request isn't slowed down by CUDA kernel
@@ -185,19 +185,20 @@ The application supports command-line configuration via **OmegaConf**. You can o
 | `tts_n_q` | Number of audio codebooks used by the TTS model | `16` |
 | `tts_cfg_coef` | Classifier-free guidance coefficient (ignored if the checkpoint has no CFG distillation support) | `3.0` |
 | `stt_enabled` | Enable continuous conversation (Kyutai STT, requires GPU) | `False` |
-| `stt_hf_repo` | Hugging Face repo of the STT checkpoint | `kyutai/stt-1b-en_fr` |
+| `stt_hf_repo` | Hugging Face repo of the STT checkpoint | `kyutai/stt-1b-en_fr-candle` |
 | `stt_device` | Device for STT inference | `cuda` |
 | `conversation_vad_head_index` | Semantic-VAD pause-duration head to use, if the checkpoint provides one (0=0.5s, 1=1.0s, 2=2.0s, 3=3.0s) | `2` |
 | `conversation_vad_threshold` | Pause probability above which a turn is considered finished | `0.5` |
-| `conversation_pause_seconds` | Silence-token fallback turn-taking duration (used when the checkpoint has no VAD heads) | `1.0` |
+| `conversation_pause_seconds` | Minimum time without new text before delivering a turn, also required with semantic VAD; without VAD this is the silence-token turn boundary | `1.0` |
 | `conversation_session_silence_timeout` | Seconds of total silence before a conversation session auto-ends | `10.0` |
-| `conversation_mute_mic_during_tts` | Don't transcribe mic audio while the assistant is speaking (avoids self-transcription feedback loops); set `False` only with headphones | `True` |
-| `conversation_barge_in_energy_threshold` | Raw audio RMS above which muted audio is considered for barge-in | `0.035` |
-| `conversation_barge_in_min_frames` | Consecutive loud audio callbacks required before barge-in triggers | `4` |
+| `conversation_mute_mic_during_tts` | Reject correlated TTS echo before STT/VAD inference; mute during TTS only when model-based interruption is unavailable. Set `False` only with headphones | `True` |
+| `conversation_barge_in_energy_threshold` | Raw audio RMS threshold for the legacy interruption fallback | `0.035` |
+| `conversation_barge_in_min_frames` | Consecutive low-pause model frames (or loud callbacks in the legacy fallback) required to interrupt | `4` |
+| `conversation_barge_in_vad_threshold` | Pause probability below which the semantic VAD considers interruption; initial 12 model frames are ignored, and recognized words can interrupt earlier | `0.4` |
 | `conversation_attention_pause_enabled` | Interrupt speech and wait while the `DriverPhysicalState.attention_level` knowledge fact reads low/very low (or no attention); on recovery, re-prompt the LLM with the original request and the already-spoken text as context so it continues naturally without repeating | `True` |
 | `conversation_attention_poll_seconds` | How often attention is sampled while speaking | `0.5` |
 | `conversation_attention_max_resumes` | Max LLM resume re-prompts per response before giving up | `4` |
-| `conversation_echo_correlation_threshold` | Cross-correlation against the TTS's own recent output above which loud audio is classified as echo (ignored) rather than barge-in | `0.6` |
+| `conversation_echo_correlation_threshold` | Cross-correlation against recent TTS output above which microphone frames are classified as echo, including 0.5 seconds after playback stops | `0.6` |
 | `influxdb_url` | InfluxDB server URL | `http://localhost:8086` |
 | `influxdb_token` | InfluxDB auth token | `my-super-secret-token` |
 | `influxdb_org` | InfluxDB organization | `stellantis` |
@@ -463,7 +464,8 @@ instructions are not interpreted by this text-only pipeline.
    - Applies deduplication and urgency-based cooldowns to prevent alert fatigue, while direct user requests always get a real response.
 5. **Voice Input/Output** (optional):
    - The microphone button toggles continuous conversation mode without needing to be held down.
-   - Continuous conversation keeps the mic open, detects end-of-turn (semantic VAD or a silence-token fallback), and supports barge-in: loud audio while the assistant is speaking is checked against a raw-energy gate and, if a recent-playback reference is available, cross-correlated against what was just played to tell apart a genuine interruption from the assistant's own voice leaking into the mic.
+   - Continuous conversation keeps STT/VAD running during TTS playback. Sustained low pause probability or recognized text interrupts the assistant, preserving the user's words. Turn delivery waits for the STT delay to avoid losing trailing words. Correlated echo frames are replaced by silence; this is echo rejection, not full acoustic echo cancellation, so overlapping speech in a reverberant speaker setup still needs live tuning. Without VAD heads or a required playback reference, the muted energy-based fallback is retained.
+   - GPU inference remains serialized, but audio playback does not hold the GPU lock, allowing STT/VAD to process microphone frames during playback. TTS still generates one whole sentence before playback, so STT can briefly wait during sentence generation.
    - `voice/gpu_lock.py` serializes GPU access between STT and TTS, since Kyutai's CUDA-graph-based inference isn't safe to run concurrently from multiple threads.
 6. **UI & Speech Output**:
    - Responses and live knowledge are published through `VehicleBridge` and streamed to the browser over WebSocket.

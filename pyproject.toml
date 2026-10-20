@@ -29,13 +29,6 @@ dependencies = [
     "laya>=0.3.5",
     "pytest",
     "kev; python_version >= '3.12' and python_version < '3.14'",
-]
-
-[project.optional-dependencies]
-# Kernels accelerati di transformers per i layer GatedDeltaNet di Qwen3.5 (backend kev).
-# Senza questa extra transformers usa il fallback PyTorch di riferimento: corretto ma più lento.
-# flash-linear-attention è pinnata alla FLA_VERSION richiesta da agents/backends/kev/kev/fused_qwen35.py.
-gpu = [
     "flash-linear-attention==0.5.2",
     "causal-conv1d>=1.5; python_version >= '3.12' and platform_machine == 'x86_64'",
 ]
@@ -49,6 +42,9 @@ explicit = true
 torch = [{ index = "pytorch-cu128" }]
 kev = { path = "agents/backends/kev" }
 moshi = { path = "voice/moshi" }
+
+[tool.uv.extra-build-dependencies]
+causal-conv1d = [{ requirement = "torch", match-runtime = true }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

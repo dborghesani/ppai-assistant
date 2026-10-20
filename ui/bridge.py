@@ -507,6 +507,7 @@ class VehicleBridge:
                     else None
                 ),
                 echo_correlation_threshold=self.opt.conversation_echo_correlation_threshold,
+                barge_in_vad_threshold=self.opt.conversation_barge_in_vad_threshold,
             )
         except Exception as e:
             self.logger.error(

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, DefaultDict, Tuple
 
 import structlog
-from data.agents_dataclasses import ActionType
+from data.agents_dataclasses import ActionType, ActivityType
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
 from data.assistant_dataclasses import DetectedObjects, DriverAgenda, DriverPreferences, VehicleState
@@ -73,6 +73,7 @@ class VehicleBridge:
         self._driving_capture_result: dict | None = None
         self._driving_capture_event: asyncio.Event | None = None
         self._last_driving_time: dict | None = None
+        self._activity_detection_task: asyncio.Task | None = None
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:
@@ -562,6 +563,14 @@ class VehicleBridge:
         self.send_event(f"{classname}.{varname}", value)
 
     def stringChanged(self, classname, varname, value):
+        if (classname, varname) == ("DriverPhysicalState", "activity"):
+            activity = ActivityType.NONE if value == "Idle" else ActivityType(value)
+            if activity is ActivityType.UNKNOWN:
+                raise ValueError("Unknown is not a manual activity")
+            self.send_event("DriverPhysicalState.activity", activity.value)
+            if self.agent.is_listening:
+                self._emit("driverPhysicalStateChanged", {"activity": activity.value})
+            return
         if classname == "DriverAgenda":
             allowed = {
                 "meeting_status": {"none", "prepare", "started", "finished"},
@@ -576,6 +585,36 @@ class VehicleBridge:
         self.send_event(f"{classname}.{varname}", value)
         if classname == "DriverAgenda":
             return value
+
+    def detectActivity(self, frames: list[dict]) -> bool:
+        if self._activity_detection_task is not None and not self._activity_detection_task.done():
+            raise ValueError("Activity detection is already running")
+        if not isinstance(frames, list) or not 2 <= len(frames) <= 8:
+            raise ValueError("Provide 2 to 8 camera frames")
+        self._activity_detection_task = asyncio.create_task(self._detect_activity(frames))
+        return True
+
+    async def _detect_activity(self, frames: list[dict]) -> None:
+        self._emit("activityDetectionChanged", {"busy": True})
+        try:
+            result = await asyncio.wait_for(
+                self.agent.activity_recognition_task.detect(frames), timeout=90,
+            )
+            if result.activity is not ActivityType.UNKNOWN:
+                self.database_manager.write_measure("DriverPhysicalState", "activity", result.activity.value)
+                self._emit("driverPhysicalStateChanged", {"activity": result.activity.value})
+            self.logger.info("Cabin activity detected", **result.model_dump(mode="json"))
+            self._emit("activityDetectionChanged", {"busy": False, **result.model_dump(mode="json")})
+        except asyncio.CancelledError:
+            self._emit("activityDetectionChanged", {"busy": False})
+            raise
+        except Exception as error:
+            self.logger.warning("Cabin activity detection failed", error=str(error))
+            self._emit("activityDetectionChanged", {"busy": False, "error": "Activity detection failed"})
+
+    def dumpDriverPhysicalState(self) -> dict[str, Any]:
+        state = self.database_manager.current_state.get("DriverPhysicalState")
+        return {"activity": getattr(state, "activity", None)}
 
     def boolChanged(self, classname, varname, value):
         self.send_event(f"{classname}.{varname}", value)

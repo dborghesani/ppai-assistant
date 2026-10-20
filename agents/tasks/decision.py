@@ -36,12 +36,11 @@ class NotificationDecision(BaseModel):
 
 @dataclass(frozen=True)
 class DecisionInput:
-    event_name: str
-    driver_name: str
-    pending_message_count: int
-    event_details: str
     changed_facts: str
     context: str
+    driver_name: str = ""
+    pending_message_count: int = 0
+    event_details: str = ""
 
 
 @dataclass(frozen=True)
@@ -80,8 +79,4 @@ Tones: {tone_options}
 Interventions: {intervention_options}
 Changed facts: {changed_facts}
 Supporting facts: {context}
-Event: {event_name}
-Event details: {event_details}
-Pending messages: {pending_message_count}
-Driver: {driver_name}
 """

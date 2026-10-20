@@ -310,7 +310,7 @@ class UnreadMessages:
 
 @dataclass
 class DriverPhysicalState:
-    activity: str | None = knowledge_field(default="Idle")  # Includes "Children out of place".
+    activity: str | None = knowledge_field(default=None)
     attention_level: float | None = knowledge_field(
         default=1.0,
         value_kind="intensity",
@@ -385,7 +385,11 @@ class DriverEmotionState:
 
 @dataclass
 class DriverDrivingStyle:
-    driving_tension: float | None = knowledge_field(default=0.0, value_kind="intensity")  # [0.0, 1.0] [safe, aggressive]
+    driving_tension: float | None = knowledge_field(
+        default=0.0,
+        value_kind="intensity",
+        persistence_levels=("high", "very high"),
+    )  # [0.0, 1.0] [safe, aggressive]
     
 @dataclass
 class EnvironmentState:

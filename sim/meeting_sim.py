@@ -22,16 +22,27 @@ from crewai import LLM, Agent, Crew, Process, Task
 
 logger = structlog.get_logger()
 
+DEFAULT_TURN_PAUSE_SECONDS = 0.0
+
 
 class MeetingInterrupted(RuntimeError):
     pass
 
 
 class MeetingProgress:
-    def __init__(self) -> None:
+    def __init__(self, pause_seconds: float = 0.0, expected_contributions: int | None = None) -> None:
+        if pause_seconds < 0:
+            raise ValueError("Meeting turn pause must be non-negative")
         self._lock = threading.Lock()
         self._stopped = False
         self._transcript: list[dict[str, str]] = []
+        self._pause_seconds = pause_seconds
+        self._expected_contributions = expected_contributions
+        self._resume = threading.Event()
+        self._resume.set()
+
+    def _wait_between_turns(self) -> None:
+        self._resume.wait(self._pause_seconds)
 
     def record(self, output: Any) -> None:
         with self._lock:
@@ -42,10 +53,23 @@ class MeetingProgress:
                 "task": str(output.description),
                 "text": str(output.raw),
             })
+            should_pause = (
+                self._pause_seconds > 0
+                and self._expected_contributions is not None
+                and len(self._transcript) < self._expected_contributions
+            )
+            if should_pause:
+                self._resume.clear()
+        if should_pause:
+            self._wait_between_turns()
+            with self._lock:
+                if self._stopped:
+                    raise MeetingInterrupted("The driver arrived at the meeting")
 
     def stop(self) -> list[dict[str, str]]:
         with self._lock:
             self._stopped = True
+            self._resume.set()
             return list(self._transcript)
 
 DEFAULT_TOPIC = (
@@ -59,6 +83,8 @@ PLANNED_AGENDA = (
     ("Marco", 10, "System architecture, sensors, actuators and integration constraints"),
     ("Elena", 10, "Safety hazards, operating limits, fallback behavior and validation"),
     ("Sam", 5, "Driver interaction, status feedback and handover experience"),
+    ("Elena", 5, "Safety review of the proposed architecture and fallback behavior"),
+    ("Marco", 5, "Architecture response to the safety review and remaining tradeoffs"),
     ("Jordan", 5, "Review proposed decisions, unresolved questions and follow-up owners"),
 )
 
@@ -279,6 +305,28 @@ def build_crew(llm: LLM, topic: str, verbose: bool) -> tuple[Crew, Task]:
         expected_output="A short description of the intended driver-facing behavior.",
         agent=ux_designer,
     )
+    safety_review = Task(
+        description=(
+            "Review Priya's product scope and Marco's proposed architecture. Identify one concrete "
+            "safety concern tied to a stated use case, ask one focused design question, and propose "
+            "a practical safeguard. Clearly label unresolved points as open questions; do not claim "
+            "that a proposal has been accepted. Keep the contribution to two concise sentences."
+        ),
+        expected_output="A focused safety challenge and proposed safeguard, in two concise sentences.",
+        context=[pm_input, systems_input],
+        agent=safety_engineer,
+    )
+    architecture_response = Task(
+        description=(
+            "Respond directly to Elena's safety concern using the architecture already proposed. "
+            "State a concrete design change or safeguard and explain its tradeoff; if the concern "
+            "cannot be resolved from the discussion, leave it explicitly open. Do not turn proposals "
+            "into agreed decisions. Keep the response to two concise sentences."
+        ),
+        expected_output="A direct response to the safety review with a mitigation and any open tradeoff.",
+        context=[systems_input, safety_review],
+        agent=systems_engineer,
+    )
     close_meeting = Task(
         description=(
             "Summarize the discussion into the decisions taken and any open action items. "
@@ -287,6 +335,10 @@ def build_crew(llm: LLM, topic: str, verbose: bool) -> tuple[Crew, Task]:
             "the actual participants; do not invent external commitments or deadlines."
         ),
         expected_output="A short list of decisions and open action items.",
+        context=[
+            open_meeting, pm_input, systems_input, safety_input, ux_input,
+            safety_review, architecture_response,
+        ],
         agent=manager,
     )
     driver_summary = Task(
@@ -313,7 +365,10 @@ def build_crew(llm: LLM, topic: str, verbose: bool) -> tuple[Crew, Task]:
 
     crew = Crew(
         agents=[manager, product_manager, systems_engineer, safety_engineer, ux_designer, driver_delegate],
-        tasks=[open_meeting, pm_input, systems_input, safety_input, ux_input, close_meeting, driver_summary],
+        tasks=[
+            open_meeting, pm_input, systems_input, safety_input, ux_input,
+            safety_review, architecture_response, close_meeting, driver_summary,
+        ],
         process=Process.sequential,
         verbose=verbose,
     )

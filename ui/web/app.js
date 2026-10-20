@@ -1,7 +1,7 @@
 const CONTROL_GROUPS = {
   driver: [
     { title: "Driver name", type: "text", cls: "DriverPreferences", key: "driver_name", value: "David", maxLength: 80 },
-    { title: "Activity", type: "options", cls: "DriverPhysicalState", key: "activity", value: "Idle", options: ["Idle", "Talking", "Driving", "Eating", "On the phone", "Sleeping", "About to exit", "Children out of place"] },
+    { title: "Activity", type: "activities", cls: "DriverPhysicalState", key: "activity", value: "", options: ["Talking", "Driving", "Eating", "On the phone", "Sleeping", "About to exit", "Children out of place"] },
     { title: "Emotion", type: "ranges", cls: "DriverEmotionState", controls: [
       ["Angry", "angry", 0, 1, 0, .01, "decimal"], ["Disgust", "disgust", 0, 1, 0, .01, "decimal"],
       ["Fear", "fear", 0, 1, 0, .01, "decimal"], ["Happy", "happy", 0, 1, 0, .01, "decimal"],
@@ -95,13 +95,10 @@ const CONTROL_GROUPS = {
   scenario: [
     { title: "Demo scenarios", type: "scenarios", hint: "Choose a scenario to add context or start a message simulation.", controls: [
       { label: "Meeting", id: "meeting", description: "A work meeting about an autonomous parking system, covering product scope, architecture, safety and driver experience.", groups: [
-        { title: "Meeting phase", cls: "DriverAgenda", key: "meeting_status", value: "none", clearable: true, options: [
-          { label: "Prepare", value: "prepare" },
-          { label: "Started", value: "started" }
-        ]},
-        { title: "Driver timing", cls: "DriverAgenda", key: "meeting_timing", value: "none", clearable: true, options: [
-          { label: "In time", value: "on_time" },
-          { label: "Late", value: "late" }
+        { title: "Meeting phase", type: "meeting", cls: "DriverAgenda", keys: ["meeting_status", "meeting_timing"], controls: [
+          { label: "Prepare", status: "prepare" },
+          { label: "Late", timing: "late" },
+          { label: "Started", status: "started" }
         ]}
       ]},
       { label: "Messages from Luca", id: "friend_messages", description: "Luca sends occasional messages about mutual friends. Privacy mode queues them until you allow the assistant to read them.", simulation: "friend-messages" },
@@ -175,6 +172,67 @@ let drivingSimulationActive = false;
 let drivingVideoReady = false;
 const DEFAULT_DRIVING_VIDEO_URL = "/recordings/rome.mp4";
 let drivingVideoUrl = DEFAULT_DRIVING_VIDEO_URL;
+let activityDetectionBusy = false;
+
+function setActivityDetectionBusy(busy) {
+  activityDetectionBusy = busy;
+  const button = document.querySelector("#detect-activity");
+  if (button) {
+    button.disabled = busy;
+    button.setAttribute("aria-pressed", String(busy));
+    button.textContent = busy ? "Detecting..." : "Detect...";
+  }
+}
+
+async function detectCabinActivity() {
+  if (activityDetectionBusy) return;
+  setActivityDetectionBusy(true);
+  let stream;
+  let video;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({video: {width: 640, height: 480}, audio: false});
+    video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    video.className = "cabin-camera-preview";
+    video.setAttribute("aria-label", "Cabin camera");
+    document.querySelector('[data-class="DriverPhysicalState"][data-key="activity"]')?.append(video);
+    await video.play();
+    if (!video.videoWidth || !video.videoHeight) throw new Error("Camera is not ready");
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.min(640, video.videoWidth);
+    canvas.height = Math.round(canvas.width * video.videoHeight / video.videoWidth);
+    const context = canvas.getContext("2d");
+    const frames = [];
+    const started = performance.now();
+    for (let index = 0; index < 6; index++) {
+      if (index) await new Promise(resolve => setTimeout(resolve, 500));
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      frames.push({image: canvas.toDataURL("image/jpeg", 0.65), seconds: (performance.now() - started) / 1000});
+    }
+    stream.getTracks().forEach(track => track.stop());
+    await bridge.call("detectActivity", frames);
+  } catch (error) {
+    showToast(error.message || "Camera unavailable");
+    setActivityDetectionBusy(false);
+  } finally {
+    stream?.getTracks().forEach(track => track.stop());
+    if (video) video.srcObject = null;
+    video?.remove();
+  }
+}
+
+bridge.on("activityDetectionChanged", data => {
+  const state = data[0];
+  setActivityDetectionBusy(state.busy);
+  if (state.error) showToast(state.error);
+  else if (state.activity === "Unknown") showToast("Activity could not be determined");
+});
+bridge.on("driverPhysicalStateChanged", data => {
+  rememberControlState("DriverPhysicalState", data[0]);
+  updateControlsInPlace("DriverPhysicalState", data[0]);
+});
 
 function loadDrivingVideo(rawUrl, autoplay = true) {
   const holder = document.querySelector("#driving-video-frame-holder");
@@ -767,11 +825,27 @@ function renderScenarioChoices(group) {
   return `<section class="control-section" data-type="choices" data-class="${group.cls}" data-key="${group.key}" data-value-kind="${typeof group.value}" data-default="${group.value}" data-clearable="${Boolean(group.clearable)}"><h3>${group.title}</h3><div class="segmented" role="group" aria-label="${group.title}">${options}</div></section>`;
 }
 
+function renderMeetingChoices(group) {
+  const status = controlState[controlStateKey(group.cls, "meeting_status")];
+  const timing = controlState[controlStateKey(group.cls, "meeting_timing")];
+  const options = group.controls.map(control => {
+    const current = control.timing ? timing === control.timing : status === control.status;
+    const payload = control.timing ? { timing: control.timing } : { status: control.status };
+    return `<button type="button" data-meeting='${escapeHtml(JSON.stringify(payload))}' aria-pressed="${current}">${escapeHtml(control.label)}</button>`;
+  }).join("");
+  return `<section class="control-section" data-type="meeting" data-class="${group.cls}"><h3>${group.title}</h3><div class="segmented" role="group" aria-label="${group.title}">${options}</div></section>`;
+}
+
 function renderControls(tabName) {
   controlContent.innerHTML = CONTROL_GROUPS[tabName].map((group, groupIndex) => {
     if (group.type === "text") {
       const current = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
       return `<section class="control-section" data-type="text" data-class="${group.cls}"><label class="preference-field" for="${tabName}-${group.key}"><span>${group.title}</span><input id="${tabName}-${group.key}" type="text" data-key="${group.key}" maxlength="${group.maxLength}" value="${escapeHtml(current)}" autocomplete="given-name"></label></section>`;
+    }
+    if (group.type === "activities") {
+      const value = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
+      const options = group.options.map(option => `<label><input type="checkbox" value="${escapeHtml(option)}" ${value === option ? "checked" : ""}><span>${escapeHtml(option)}</span></label>`).join("");
+      return `<section class="control-section" data-type="activities" data-class="${group.cls}" data-key="${group.key}"><h3>${group.title}</h3><div class="segmented">${options}<button id="detect-activity" class="scenario-button" type="button" aria-pressed="${activityDetectionBusy}" ${activityDetectionBusy ? "disabled" : ""}>${activityDetectionBusy ? "Detecting..." : "Detect..."}</button></div></section>`;
     }
     if (group.type === "options") {
       const name = `${tabName}-${groupIndex}-${group.key}`;
@@ -793,8 +867,11 @@ function renderControls(tabName) {
     if (group.type === "scenarios") {
       const hint = group.hint ? `<p class="scenario-hint">${escapeHtml(group.hint)}</p>` : "";
       const scenarios = group.controls.map(scenario => {
-        if (scenario.groups) {
-          return `<div class="scenario-item" data-scenario="${scenario.id}"><div class="scenario-copy"><h4>${escapeHtml(scenario.label)}</h4><p>${escapeHtml(scenario.description)}</p></div><div class="scenario-controls">${scenario.groups.map(renderScenarioChoices).join("")}</div></div>`;
+        if (Array.isArray(scenario.groups)) {
+          const rendered = scenario.groups.map(subGroup => subGroup.type === "meeting"
+            ? renderMeetingChoices(subGroup)
+            : renderScenarioChoices(subGroup)).join("");
+          return `<div class="scenario-item" data-scenario="${scenario.id}"><div class="scenario-copy"><h4>${escapeHtml(scenario.label)}</h4><p>${escapeHtml(scenario.description)}</p></div><div class="scenario-controls">${rendered}</div></div>`;
         }
         const isSimulation = Boolean(scenario.simulation);
         const active = scenario.simulation === "driving-video" ? drivingSimulationActive
@@ -829,7 +906,15 @@ function updateControlsInPlace(className, values) {
 
   Object.entries(values || {}).forEach(([key, value]) => {
     sections.forEach(section => {
-      if (section.dataset.type === "choices" && section.dataset.key === key) {
+      if (section.dataset.type === "meeting" && ["meeting_status", "meeting_timing"].includes(key)) {
+        const status = controlState[controlStateKey(className, "meeting_status")];
+        const timing = controlState[controlStateKey(className, "meeting_timing")];
+        section.querySelectorAll("button[data-meeting]").forEach(button => {
+          const payload = JSON.parse(button.dataset.meeting);
+          const pressed = payload.timing ? timing === payload.timing : status === payload.status;
+          button.setAttribute("aria-pressed", String(pressed));
+        });
+      } else if (section.dataset.type === "choices" && section.dataset.key === key) {
         section.querySelectorAll("button[data-choice]").forEach(button => {
           button.setAttribute("aria-pressed", String(button.dataset.choice === String(value)));
         });
@@ -852,6 +937,10 @@ function updateControlsInPlace(className, values) {
           inputElement.closest(".switch-control").querySelector("[data-state]").textContent =
             value ? control[3] : control[4];
         }
+      } else if (section.dataset.type === "activities" && section.dataset.key === key) {
+        section.querySelectorAll('input[type="checkbox"]').forEach(input => {
+          input.checked = value === input.value;
+        });
       } else if (section.dataset.type === "options" && section.dataset.key === key) {
         section.querySelectorAll('input[type="radio"]').forEach(input => {
           input.checked = input.value === value;
@@ -887,6 +976,9 @@ function sendProgressive(inputElement, fromValue, toValue) {
 controlContent.addEventListener("pointerdown", event => {
   if (event.target.matches('input[type="range"]')) event.target.dataset.start = event.target.value;
 });
+controlContent.addEventListener("click", event => {
+  if (event.target.closest("#detect-activity")) detectCabinActivity();
+});
 controlContent.addEventListener("input", event => {
   if (event.target.matches('input[type="range"]')) {
     const value = Number(event.target.value);
@@ -904,6 +996,15 @@ controlContent.addEventListener("change", event => {
     bridge.call("stringChanged", section.dataset.class, section.dataset.key, target.value).catch(() => {});
   } else if (target.matches('input[type="checkbox"]')) {
     const section = target.closest(".control-section");
+    if (section.dataset.type === "activities") {
+      const activity = target.checked ? target.value : "No activity detected";
+      section.querySelectorAll('input[type="checkbox"]').forEach(input => {
+        input.checked = input.value === activity;
+      });
+      controlState[controlStateKey(section.dataset.class, section.dataset.key)] = activity;
+      bridge.call("stringChanged", section.dataset.class, section.dataset.key, activity).catch(() => {});
+      return;
+    }
     const control = CONTROL_GROUPS.vehicle
       .filter(item => item.type === "toggles" && item.cls === section.dataset.class)
       .flatMap(item => item.controls)
@@ -931,6 +1032,26 @@ controlContent.addEventListener("pointercancel", event => {
 });
 
 controlContent.addEventListener("click", event => {
+  const meetingButton = event.target.closest("button[data-meeting]");
+  if (meetingButton) {
+    const section = meetingButton.closest(".control-section");
+    const wasPressed = meetingButton.getAttribute("aria-pressed") === "true";
+    const payload = JSON.parse(meetingButton.dataset.meeting);
+    const key = payload.timing ? "meeting_timing" : "meeting_status";
+    const requestedValue = wasPressed ? "none" : payload.timing || payload.status;
+    const request = payload.timing && !wasPressed
+      ? bridge.call("setScenario", "late_for_meeting", true)
+      : bridge.call("stringChanged", section.dataset.class, key, requestedValue);
+    meetingButton.disabled = true;
+    request.then(appliedValue => {
+      const state = { [key]: appliedValue ?? requestedValue };
+      rememberControlState(section.dataset.class, state);
+      updateControlsInPlace(section.dataset.class, state);
+    })
+      .catch(() => showToast("Could not update meeting context"))
+      .finally(() => { meetingButton.disabled = false; });
+    return;
+  }
   const choice = event.target.closest("button[data-choice]");
   if (choice) {
     const section = choice.closest(".control-section");
@@ -1025,7 +1146,11 @@ document.querySelector("#reset-controls").addEventListener("click", () => {
   });
   controlContent.querySelectorAll('input[type="checkbox"]').forEach(target => {
     const section = target.closest(".control-section");
+    if (section.dataset.type === "activities") return;
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
+  });
+  controlContent.querySelectorAll('[data-type="activities"]').forEach(() => {
+    bridge.call("stringChanged", "DriverPhysicalState", "activity", "No activity detected").catch(() => {});
   });
   controlContent.querySelectorAll('input[type="range"]').forEach(target => {
     const value = Number(target.value);
@@ -1198,6 +1323,8 @@ bridge.on("ready", data => {
   rememberControlState("DriverPreferences", data.driverPreferences);
   rememberControlState("DriverAgenda", data.driverAgendaState);
   rememberControlState("VehicleState", data.vehicleState);
+  rememberControlState("DriverPhysicalState", data.driverPhysicalState);
+  setActivityDetectionBusy(Boolean(data.activityDetectionBusy));
   const ducking = Number(data.musicDuckingFactor);
   musicDuckingFactor = Number.isFinite(ducking) && ducking > 0 && ducking <= 1 ? ducking : 0.25;
   if (Number.isFinite(Number(data.permissionReminderSeconds)) && Number(data.permissionReminderSeconds) > 0) {

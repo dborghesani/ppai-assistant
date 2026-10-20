@@ -21,6 +21,11 @@ TASK = DecisionTask(
     actions=(
         ActionType.NONE, ActionType.LOCK_DOORS,
         ActionType.ENABLE_FOG_LIGHTS, ActionType.ENABLE_LOW_BEAM_HEADLIGHTS,
+        ActionType.INCREASE_FOLLOWING_DISTANCE,
+        ActionType.ENABLE_ADAPTIVE_CRUISE_CONTROL,
+        ActionType.ENABLE_LANE_KEEP_ASSIST,
+        ActionType.ENABLE_BLIND_SPOT_MONITOR,
+        ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE,
     ),
     suggestions=(
         SuggestionType.NONE, SuggestionType.CALM_DRIVING, SuggestionType.REDUCE_SPEED,
@@ -31,7 +36,13 @@ TASK = DecisionTask(
     instructions="""
 Provide driving coaching, not wellbeing or music. Treat reported driving tension
 as a driving-style signal; excessively aggressive/high tension warrants calm-driving
-guidance, never an inferred emotion or playlist.
+guidance, never an inferred emotion or playlist. Only the state explicitly says
+"This condition has persisted for a while" to mark sustained aggression: in that
+case, tighten safety by enabling ADAS aids (increase following distance, enable
+adaptive cruise control, lane keep assist or blind spot monitor, or apply the
+restrictive ADAS profile) alongside a calm-driving suggestion. Without that
+persistence statement, aggressive tension alone gets moderate advice (calm-driving
+or reduce-speed suggestion) and never a naming or shaming tone.
 Warn about a lane change with turn signal Off. An active signal with no manoeuvre
 requires explicit sustained duration before warning; a newly active signal is routine.
 Never replace the actual Left/Right/Both value with an example.
@@ -65,10 +76,6 @@ class DrivingTask:
 
     async def execute(self, task_input: DecisionInput) -> NotificationDecision:
         inputs = {
-            "event_name": task_input.event_name,
-            "driver_name": task_input.driver_name,
-            "pending_message_count": task_input.pending_message_count,
-            "event_details": task_input.event_details,
             "changed_facts": task_input.changed_facts,
             "context": task_input.context,
             "task_instructions": self.spec.instructions,

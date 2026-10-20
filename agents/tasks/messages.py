@@ -127,6 +127,12 @@ _REASON_KEYS = (
     ("privacy", "privacy"),
 )
 
+MESSAGES_DECISION_PROMPT = (
+    DECISION_PROMPT
+    + "\nMessage details: {event_details}\n"
+    + "Pending messages: {pending_message_count}\n"
+)
+
 
 def postpone_reason(facts: list[Any] | dict[str, Any] | None) -> str:
     """Derive a short postponement reason from the supplied knowledge facts."""
@@ -192,7 +198,7 @@ class MessagesTask:
         crew_agent = Agent(role="Message Delivery Specialist", goal="Classify content and respect delivery policy.",
                            backstory="Urgency never overrides privacy or driver readiness.",
                            llm=self.backend.llm, tools=[], verbose=False, allow_delegation=False)
-        task = Task(description=DECISION_PROMPT, expected_output="One message delivery decision.",
+        task = Task(description=MESSAGES_DECISION_PROMPT, expected_output="One message delivery decision.",
                     output_pydantic=NotificationDecision, agent=crew_agent)
         self.crew = Crew(agents=[crew_agent], tasks=[task], verbose=False, tracing=False,
                          process=Process.sequential, memory=None)
@@ -206,8 +212,6 @@ class MessagesTask:
 
     async def execute(self, task_input: DecisionInput) -> NotificationDecision:
         inputs = {
-            "event_name": task_input.event_name,
-            "driver_name": task_input.driver_name,
             "pending_message_count": task_input.pending_message_count,
             "event_details": task_input.event_details,
             "changed_facts": task_input.changed_facts,

@@ -64,10 +64,6 @@ class ComfortTask:
 
     async def execute(self, task_input: DecisionInput) -> NotificationDecision:
         inputs = {
-            "event_name": task_input.event_name,
-            "driver_name": task_input.driver_name,
-            "pending_message_count": task_input.pending_message_count,
-            "event_details": task_input.event_details,
             "changed_facts": task_input.changed_facts,
             "context": task_input.context,
             "task_instructions": self.spec.instructions,

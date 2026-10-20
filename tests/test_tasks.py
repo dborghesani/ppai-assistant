@@ -105,7 +105,14 @@ def test_meeting_preparation_and_simulation_share_planned_agenda():
     assert preparation.tasks == [briefing]
     assert len(preparation.agents) == 1
     assert summary is meeting.tasks[-1]
-    assert "35 minutes" in agenda
+    assert "45 minutes" in agenda
+    assert len(meeting.tasks) == 9
+    safety_review, architecture_response, close_meeting = meeting.tasks[5:8]
+    assert safety_review.agent.role.startswith("Elena Novak")
+    assert safety_review.context == meeting.tasks[1:3]
+    assert architecture_response.agent.role.startswith("Marco Bellini")
+    assert architecture_response.context == [meeting.tasks[2], safety_review]
+    assert close_meeting.context == meeting.tasks[:7]
     for owner, minutes, subject in PLANNED_AGENDA:
         assert f"{owner}, {minutes} minutes" in agenda
         assert subject in agenda
@@ -179,8 +186,7 @@ def test_meeting_preserves_permission_state_for_started_decision(confirmed, stat
             reason="Only the meeting phase changed.",
         ))
         await task.execute(DecisionInput(
-            event_name="knowledge_updated", driver_name="David", pending_message_count=0,
-            event_details="No additional event-specific details.",
+            driver_name="David",
             changed_facts="The meeting has started and is in progress.",
             context="The driver is late for the meeting.",
         ))
@@ -253,6 +259,41 @@ def test_meeting_arrival_snapshot_excludes_later_contributions():
         "speaker": "Priya", "task": "Product discussion", "text": "Only parallel parking was proposed.",
     }]
     assert progress.stop() == transcript
+
+
+def test_meeting_arrival_interrupts_pause_between_contributions():
+    from threading import Event, Thread
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from sim.meeting_sim import MeetingInterrupted, MeetingProgress
+
+    progress = MeetingProgress(pause_seconds=60, expected_contributions=2)
+    pause_started = Event()
+    callback_finished = Event()
+    errors = []
+    wait_between_turns = progress._wait_between_turns
+
+    def wait_for_meeting_pace():
+        pause_started.set()
+        wait_between_turns()
+
+    def record_contribution():
+        try:
+            progress.record(SimpleNamespace(agent="Priya", description="Product", raw="Proposal."))
+        except MeetingInterrupted as error:
+            errors.append(error)
+        finally:
+            callback_finished.set()
+
+    with patch.object(progress, "_wait_between_turns", side_effect=wait_for_meeting_pace):
+        thread = Thread(target=record_contribution)
+        thread.start()
+        assert pause_started.wait(1)
+        assert len(progress.stop()) == 1
+        assert callback_finished.wait(1)
+        thread.join()
+
+    assert len(errors) == 1
 
 
 def test_meeting_arrival_callback_stops_actual_crewai_sequence():
@@ -483,7 +524,7 @@ def test_laya_router_preserves_multiple_task_routes(selected):
     router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
     changed = {"DriverPhysicalState.fatigue_level": "Fatigue level is high.",
                "DriverEmotionState.angry": "Anger level is high."}
-    route = asyncio.run(router.execute(RoutingInput(changed, [{"role": "user", "content": "Old conversation"}])))
+    route = asyncio.run(router.execute(RoutingInput(changed)))
     assert route.tasks == selected
     state, questions = backend.execute_decision.await_args.args
     assert state == {"changed_facts": list(changed.values())}
@@ -595,6 +636,50 @@ def test_laya_router_skips_inference_for_empty_changes():
     router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
     assert asyncio.run(router.execute(RoutingInput({}))).tasks == []
     backend.execute_decision.assert_not_awaited()
+
+
+def test_ollama_router_recovers_route_from_reasoning_field():
+    """Reasoning models can reply with an empty content field: the route must be
+    recovered from the reasoning text instead of failing JSON validation."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.ollama_backend import OllamaBackend
+    from agents.tasks.routing import TelemetryRouter, RoutingInput
+    from config import ConfigAssistant
+
+    backend = Mock(spec=OllamaBackend)
+    backend.complete = AsyncMock(return_value=SimpleNamespace(choices=[
+        SimpleNamespace(message=SimpleNamespace(
+            content=None,
+            reasoning_content='The facts mention fatigue and attention. {"tasks": ["wellbeing"]}',
+        )),
+    ]))
+    router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
+
+    route = asyncio.run(router.execute(RoutingInput({"DriverPhysicalState.fatigue_level": "Fatigue level is high."})))
+
+    assert route.tasks == [TaskType.WELLBEING]
+    assert backend.complete.await_count == 1
+
+
+def test_ollama_router_retries_on_empty_response_then_degrades():
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from agents.backends.ollama_backend import OllamaBackend
+    from agents.tasks.routing import TelemetryRouter, RoutingInput
+    from config import ConfigAssistant
+
+    backend = Mock(spec=OllamaBackend)
+    empty = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None))])
+    backend.complete = AsyncMock(return_value=empty)
+    router = TelemetryRouter(ConfigAssistant(), Mock(), backend=backend)
+
+    route = asyncio.run(router.execute(RoutingInput({"VehicleMotion.speed": "Speed is high."})))
+
+    assert route.tasks == []
+    assert backend.complete.await_count == 2
 
 
 @pytest.mark.parametrize("confirmed", [True, False, None])
@@ -1812,19 +1897,31 @@ def test_specialist_task_executes_without_backend_and_validates_capabilities(mod
         suggestion_type=SuggestionType.NONE, reason="Routine.",
     )
     task.crew = SimpleNamespace(kickoff_async=AsyncMock(return_value=SimpleNamespace(pydantic=decision)))
-    inputs = DecisionInput("knowledge_updated", "David", 2, "event data", "changed data", "supporting data")
+    inputs = DecisionInput(
+        changed_facts="changed data", context="supporting data", driver_name="David",
+        pending_message_count=2, event_details="event data",
+    )
     assert asyncio.run(task.execute(inputs)) is decision
     crew_inputs = task.crew.kickoff_async.await_args.kwargs["inputs"]
-    assert crew_inputs["driver_name"] == "David"
     assert crew_inputs["changed_facts"] == "changed data"
     assert crew_inputs["context"] == "supporting data"
     if module_name == "meeting":
         assert set(crew_inputs) == {"driver_name", "changed_facts", "context", "meeting_permission_state"}
+        assert crew_inputs["driver_name"] == "David"
         assert crew_inputs["meeting_permission_state"] == "not_asked"
-    else:
-        assert crew_inputs["event_name"] == "knowledge_updated"
+    elif module_name == "messages":
+        assert set(crew_inputs) == {
+            "pending_message_count", "event_details", "changed_facts", "context",
+            "task_instructions", "action_options", "suggestion_options", "urgency_options",
+            "tone_options", "intervention_options",
+        }
         assert crew_inputs["pending_message_count"] == 2
         assert crew_inputs["event_details"] == "event data"
+    else:
+        assert set(crew_inputs) == {
+            "changed_facts", "context", "task_instructions", "action_options",
+            "suggestion_options", "urgency_options", "tone_options", "intervention_options",
+        }
         assert crew_inputs["task_instructions"] == task.spec.instructions
     assert not hasattr(task, "run_decision")
     decision.action = ActionType.OPEN_WINDOWS

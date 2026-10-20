@@ -1,6 +1,18 @@
 from enum import Enum
 
 
+class ActivityType(str, Enum):
+    NONE = "No activity detected"
+    TALKING = "Talking"
+    DRIVING = "Driving"
+    EATING = "Eating"
+    ON_THE_PHONE = "On the phone"
+    SLEEPING = "Sleeping"
+    ABOUT_TO_EXIT = "About to exit"
+    CHILDREN_OUT_OF_PLACE = "Children out of place"
+    UNKNOWN = "Unknown"
+
+
 class UrgencyType(str, Enum):
     NONE = "none"
     LOW = "low"

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import structlog
 from agents.tasks.decision import DecisionInput, NotificationDecision
+from agents.tasks.activity_recognition import ActivityRecognitionTask
 from agents.tasks import comfort, driving, meeting, messages, mood_music, vehicle_command, wellbeing, surroundings
 from agents.backends.crewai_backend import CrewAIBackend
 from agents.backends.decision_backend import DecisionBackend, KevBackend, LayaBackend
@@ -86,6 +87,7 @@ class AutomotiveAgent:
             ResponseSource.VEHICLE_MANUAL: self.manual_response_context,
         }
         self.ollama_backend = OllamaBackend(opt, self.log_llm_usage)
+        self.activity_recognition_task = ActivityRecognitionTask(opt, self.ollama_backend)
         self.voice_llm = self.ollama_backend.client
         self.knowledge_facts_provider: Callable[[], dict[str, str]] = lambda: {}
 
@@ -531,18 +533,20 @@ class AutomotiveAgent:
             supporting = [value for key, value in selected_facts.items() if key not in changes]
             if not event.facts and not getattr(self, "knowledge_facts_provider", lambda: {})():
                 supporting = [fact for fact in event.context if not fact.startswith("Changed just now:")]
-            decision = await self.tasks[task_type].execute(DecisionInput(**{
-                "event_name": event.event_name, "driver_name": self.driver_name,
-                "pending_message_count": self.pending_message_count,
-                "event_details": (json.dumps(
-                    {"changes": changes, "newest_message": self.messages_task.newest_message},
-                    default=str) if task_type is TaskType.MESSAGES
-                    else "No additional event-specific details."),
+            decision_input = {
                 "changed_facts": "\n".join(f"- {fact}" for fact in selected_changes.values())
                     or "No specific vehicle fact changed.",
                 "context": "\n".join(f"- {fact}" for fact in supporting)
                     or "No additional vehicle context is available.",
-            }))
+            }
+            if task_type is TaskType.MEETING:
+                decision_input["driver_name"] = self.driver_name
+            elif task_type is TaskType.MESSAGES:
+                decision_input.update({
+                    "pending_message_count": self.pending_message_count,
+                    "event_details": json.dumps(self.messages_task.newest_message, default=str),
+                })
+            decision = await self.tasks[task_type].execute(DecisionInput(**decision_input))
             decisions.append((task_type, decision))
             break   # Only process the first task decision for now
         # Determine if there is an acute hazard based on the urgency of the decisions

@@ -14,6 +14,7 @@ class WebUIServer:
         "boolChanged",
         "clearConversation",
         "dumpKnowledge",
+        "detectActivity",
         "duplicateSuppressionChanged",
         "eventProcessingChanged",
         "floatChanged",
@@ -83,6 +84,8 @@ class WebUIServer:
             "musicUpdated",
             "drivingSimulationChanged",
             "drivingVideoCaptureRequested",
+            "activityDetectionChanged",
+            "driverPhysicalStateChanged",
         ):
             bridge.on(
                 event_name,
@@ -102,6 +105,10 @@ class WebUIServer:
         self.logger.info("Web UI ready", url=self.url)
 
     async def close(self) -> None:
+        detection = getattr(self.bridge, "_activity_detection_task", None)
+        if detection is not None and not detection.done():
+            detection.cancel()
+            await asyncio.gather(detection, return_exceptions=True)
         clients = tuple(self._clients)
         for client in clients:
             await client.close(code=1001, message=b"Server shutting down")
@@ -137,6 +144,11 @@ class WebUIServer:
                 "data": {
                     "knowledge": self.bridge.dumpKnowledgeData(),
                     "vehicleState": self.bridge.dumpVehicleState(),
+                    "driverPhysicalState": getattr(self.bridge, "dumpDriverPhysicalState", lambda: {})(),
+                    "activityDetectionBusy": bool(
+                        getattr(self.bridge, "_activity_detection_task", None) is not None
+                        and not self.bridge._activity_detection_task.done()
+                    ),
                     "detectedObjectsState": self.bridge.dumpDetectedObjectsState(),
                     "driverPreferences": self.bridge.dumpDriverPreferences(),
                     "driverAgendaState": getattr(self.bridge, "dumpDriverAgendaState", lambda: {

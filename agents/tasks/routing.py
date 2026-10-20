@@ -1,6 +1,6 @@
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Literal, cast
 
@@ -9,7 +9,7 @@ from crewai import Agent, Crew, Process, Task
 from agents.backends.ollama_backend import OllamaBackend
 from agents.backends.decision_backend import DecisionBackend
 from agents.backends.crewai_backend import CrewAIBackend
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from config import ConfigAssistant
 
@@ -49,7 +49,6 @@ class TaskRoute(BaseModel):
 @dataclass(frozen=True)
 class RoutingInput:
     relevant_facts: dict[str, str]
-    history: list[dict[str, str]] = field(default_factory=list)
 
 
 ROUTING_PROMPT = """
@@ -87,6 +86,34 @@ vehicle_command: these have direct entry points.
 """
 
 CREW_ROUTING_DESCRIPTION = ROUTING_PROMPT + "\nChanged facts:\n{changed_facts}\n"
+
+
+def _extract_json_object(text: str) -> str:
+    """Extract the first balanced JSON object from free-form model output."""
+    start = text.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escape = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return ""
 
 
 class TelemetryRouter:
@@ -159,23 +186,47 @@ class TelemetryRouter:
     async def _execute_with_ollama(self, task_input: RoutingInput) -> TaskRoute:
         started = time.perf_counter()
         try:
-            response = await cast(OllamaBackend, self.backend).complete(
-                call_name="telemetry routing",
-                model=self.model,
-                temperature=0,
-                max_tokens=128,
-                messages=[
-                    {"role": "system", "content": ROUTING_PROMPT},
-                    {"role": "user", "content": json.dumps({
-                        "changed_facts": list(task_input.relevant_facts.values()),
-                    }, ensure_ascii=True)},
-                ],
-                response_format={"type": "json_schema", "json_schema": {
-                    "name": "task_route", "strict": True,
-                    "schema": TaskRoute.model_json_schema(),
-                }},
-            )
-            return TaskRoute.model_validate_json(response.choices[0].message.content or "")
+            messages = [
+                {"role": "system", "content": ROUTING_PROMPT},
+                {"role": "user", "content": json.dumps({
+                    "changed_facts": list(task_input.relevant_facts.values()),
+                }, ensure_ascii=True)},
+            ]
+            # Reasoning models can spend all tokens thinking and return an empty
+            # content field; retry once before degrading to an empty route.
+            for attempt in (1, 2):
+                response = await cast(OllamaBackend, self.backend).complete(
+                    call_name="telemetry routing",
+                    model=self.model,
+                    temperature=0,
+                    max_tokens=128,
+                    reasoning_effort="none",
+                    messages=messages,
+                    response_format={"type": "json_schema", "json_schema": {
+                        "name": "task_route", "strict": True,
+                        "schema": TaskRoute.model_json_schema(),
+                    }},
+                )
+                message = response.choices[0].message
+                raw = message.content or ""
+                if not raw:
+                    reasoning = getattr(message, "reasoning_content", None) \
+                        or getattr(message, "reasoning", None) or ""
+                    raw = _extract_json_object(reasoning)
+                    if raw:
+                        self.logger.warning(
+                            "[Routing] Recovered task route from reasoning field",
+                            model=self.model, attempt=attempt,
+                        )
+                try:
+                    return TaskRoute.model_validate_json(raw)
+                except ValidationError as error:
+                    self.logger.warning(
+                        "[Routing] Empty or invalid task route response",
+                        model=self.model, attempt=attempt,
+                        raw_text=raw or "<empty>", errors=str(error),
+                    )
+            return TaskRoute(tasks=[])
         finally:
             self.logger.debug(
                 "[LLM] Task routing time", model=self.model,

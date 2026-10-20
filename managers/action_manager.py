@@ -7,8 +7,8 @@ import structlog
 from data.agents_dataclasses import ActionType, AssistantStatus
 from agents.tasks.mood_music import MUSIC_ACTIONS, MUSIC_ACTION_GUIDANCE
 from sim.meeting_sim import (
-    DEFAULT_TOPIC, MeetingInterrupted, MeetingProgress, build_arrival_summary_crew,
-    build_crew, build_preparation_crew,
+    DEFAULT_TOPIC, DEFAULT_TURN_PAUSE_SECONDS, MeetingInterrupted, MeetingProgress,
+    build_arrival_summary_crew, build_crew, build_preparation_crew,
 )
 
 if TYPE_CHECKING:
@@ -202,7 +202,13 @@ class ActionManager:
                 crew, driver_summary_task = build_crew(
                     self.agent.llm, DEFAULT_TOPIC, verbose=self.agent.opt.crewai_verbose
                 )
-                self._meeting_progress = MeetingProgress()
+                crew_tasks = getattr(crew, "tasks", None)
+                self._meeting_progress = MeetingProgress(
+                    pause_seconds=DEFAULT_TURN_PAUSE_SECONDS,
+                    expected_contributions=(
+                        len(crew_tasks) if isinstance(crew_tasks, (list, tuple)) else None
+                    ),
+                )
                 crew.task_callback = self._meeting_progress.record
                 try:
                     await asyncio.to_thread(crew.kickoff)

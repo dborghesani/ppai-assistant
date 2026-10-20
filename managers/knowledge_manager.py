@@ -201,13 +201,14 @@ class KnowledgeManager:
         ("DriverPreferences", "driver_name"): lambda value: f"The driver's name is {value}.",
         ("DriverPhysicalState", "activity"): lambda value: {
             "Idle": "No distracting driver activity is detected.",
+            "No activity detected": "No monitored activity is currently detected inside the vehicle.",
             "About to exit": "The driver is about to exit the vehicle.",
             "Driving": "Normal driving activity is detected.",
             "Talking": "The driver is talking, which may distract from driving.",
             "Eating": "The driver is eating, which distracts from driving.",
             "On the phone": "The driver is using a phone, which seriously distracts from driving.",
             "Sleeping": "The driver appears to be asleep and unable to drive safely.",
-            "Children out of place": "Children are out of place near the vehicle.",
+            "Children out of place": "Children are outside their seating positions inside the vehicle.",
         }.get(value, f"The driver's current activity is {value}."),
         ("EnvironmentState", "forecast_weather"): lambda value: {
             "Sunny": "The weather forecast predicts sunny conditions.",
@@ -530,7 +531,7 @@ class KnowledgeManager:
         # observed for a field introduced after startup can already matter
         # (e.g. weather set to "Foggy" from the UI), unlike the very first
         # startup batch, which is just the baseline and must stay quiet.
-        if isinstance(value, bool) or isinstance(value, str):
+        if isinstance(value, (bool, str, list)):
             if previous is None:
                 return not self._is_first_batch
             return value != previous.value

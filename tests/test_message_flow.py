@@ -15,7 +15,7 @@ from data.agents_dataclasses import (
 )
 from agents.automotive_agent import AutomotiveAgent
 from agents.tasks.decision import NotificationDecision
-from data.events import CarEvent, IncomingMessage
+from data.events import CarEvent, EventName, IncomingMessage
 from managers.action_manager import ActionManager
 from agents.tasks.messages import PendingMessage
 from agents.tasks import messages
@@ -377,7 +377,15 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
             agent.messages_task.most_urgent_classification(),
             (ToneType.SERIOUS, UrgencyType.HIGH),
         )
+        agent.messages_task.read_batching_seconds = 0
         agent.messages_task.handle_action(ActionType.READ_PENDING_MESSAGES)
+        read_task = agent.messages_task.read_task
+        self.assertIsNotNone(read_task)
+        self.assertEqual(
+            agent.messages_task.most_urgent_classification(),
+            (ToneType.SERIOUS, UrgencyType.HIGH),
+        )
+        await read_task
         self.assertIsNone(agent.messages_task.most_urgent_classification())
 
     async def test_stopping_simulation_clears_pending_messages(self):
@@ -391,28 +399,28 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         self.assertEqual(list(agent.messages_task.pending_messages), [])
         self.assertEqual(agent.messages_task.read_task, None)
 
-    async def test_permission_flag_persists_across_status_changes(self):
+    async def test_blocked_messages_flag_persists_across_status_changes(self):
         agent = cast(Any, AutomotiveAgent.__new__(AutomotiveAgent))
         agent._assistant_status = AssistantStatus.IDLE
         agent._assistant_flags = AssistantStatus.IDLE.bit
         agent.on_assistant_status_changed = Mock()
 
-        agent.set_assistant_status(AssistantStatus.ASK_PERMISSION_TO_TALK)
+        agent.set_assistant_status(AssistantStatus.PENDING_MESSAGES_BLOCKED)
 
         self.assertEqual(
             agent.assistant_flags
-            & AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
-            AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
+            & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit,
+            AssistantStatus.PENDING_MESSAGES_BLOCKED.bit,
         )
         self.assertEqual(agent.assistant_status, AssistantStatus.IDLE)
 
         # The overlay survives any later activity and its end.
         agent.set_assistant_status(AssistantStatus.TALKING)
         agent.set_assistant_status(AssistantStatus.IDLE)
-        self.assertTrue(agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit)
+        self.assertTrue(agent.assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit)
 
-        agent.clear_permission_to_talk()
-        self.assertFalse(agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit)
+        agent.clear_blocked_messages_status()
+        self.assertFalse(agent.assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit)
         self.assertEqual(agent.on_assistant_status_changed.call_count, 4)
 
     async def test_agent_queues_message_with_current_knowledge_context(self):
@@ -431,15 +439,15 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
             agent.cancel_message_tasks()
             await asyncio.sleep(0)
 
-    async def test_permission_keeps_pending_messages_until_read_action(self):
+    async def test_blocked_messages_stay_queued_until_read_action(self):
         agent = make_agent()
         first = IncomingMessage(sender="Luca", text="First private message")
         second = IncomingMessage(sender="Luca", text="Second private message")
         agent.messages_task.pending_messages.extend((PendingMessage(first), PendingMessage(second)))
 
-        agent.action_manager.handle_decision(ActionType.ASK_PERMISSION_TO_TALK)
+        agent.action_manager.handle_decision(ActionType.BLOCK_PENDING_MESSAGES)
         self.assertTrue(
-            agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit
+            agent.assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit
         )
 
         self.assertEqual(
@@ -452,7 +460,18 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         self.assertEqual(agent.messages_task.pending_count, 2)
         await read_task
         self.assertFalse(agent.messages_task.pending_messages)
-        self.assertFalse(agent.assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit)
+        self.assertFalse(agent.assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit)
+
+    async def test_empty_queue_cannot_keep_or_restore_blocked_status(self):
+        agent = make_agent()
+        agent.set_assistant_status(AssistantStatus.PENDING_MESSAGES_BLOCKED)
+        agent.messages_task.published_unread_count = 0
+
+        agent.messages_task.publish_unread_count()
+
+        self.assertFalse(agent.assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit)
+        agent.action_manager.handle_decision(ActionType.BLOCK_PENDING_MESSAGES)
+        self.assertFalse(agent.assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit)
 
 
     async def test_read_action_interprets_messages_for_named_driver(self):
@@ -540,8 +559,8 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         manager = agent.messages_task
         manager.pending_messages.extend((PendingMessage(private_message), PendingMessage(postponed_message)))
 
-        agent.action_manager.handle_decision(
-            ActionType.POSTPONE_NOTIFICATION_DELIVERY,
+        manager.handle_action(
+            ActionType.BLOCK_PENDING_MESSAGES,
             {
                 "event_value": {"sender": postponed_message.sender, "text": postponed_message.text},
                 "context": ["Fatigue level is high."],
@@ -567,6 +586,34 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         self.assertEqual(agent.conversation_history[-1]["content"].count(acknowledgement), 1)
         self.assertIn("Giulia left dinner early", agent.conversation_history[-1]["content"])
 
+    async def test_block_decision_applies_privacy_reason_to_entire_queue(self):
+        agent = make_agent(["Privacy mode is on."])
+        manager = agent.messages_task
+        manager.pending_messages.extend((
+            PendingMessage(IncomingMessage(sender="Luca", text="First message")),
+            PendingMessage(IncomingMessage(sender="Mara", text="Second message")),
+        ))
+        decision = NotificationDecision(
+            urgency=UrgencyType.LOW,
+            tone=ToneType.CALM,
+            intervention_type=InterventionType.ACT,
+            action=ActionType.BLOCK_PENDING_MESSAGES,
+            suggestion_type=SuggestionType.NONE,
+            reason="Privacy blocks delivery.",
+        )
+        event = CarEvent(
+            SkillType.NONE, EventName.KNOWLEDGE_UPDATED, {"UnreadMessages.count": 2}, [],
+        )
+
+        await manager.handle_decision(event, decision, on_classified=Mock())
+
+        self.assertEqual(manager.postponed_count, 2)
+        self.assertEqual(manager.postponed_reason_summary, "privacy")
+        self.assertEqual(
+            [entry.postponed_reason for entry in manager.pending_messages],
+            ["privacy", "privacy"],
+        )
+
     async def test_fatigued_pending_reminder_postpones_all_waiting_messages(self):
         agent = make_agent()
         messages = [
@@ -576,8 +623,8 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         manager = agent.messages_task
         manager.pending_messages.extend(PendingMessage(message) for message in messages)
 
-        agent.action_manager.handle_decision(
-            ActionType.POSTPONE_NOTIFICATION_DELIVERY,
+        manager.handle_action(
+            ActionType.BLOCK_PENDING_MESSAGES,
             {
                 "postpone_pending": True,
                 "context": ["Privacy mode is off.", "Fatigue level is high."],
@@ -587,6 +634,28 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         self.assertEqual(manager.postponed_count, 2)
         self.assertEqual(manager.permission_pending_count, 0)
         self.assertEqual(manager.postponed_reason_summary, "fatigue")
+
+    async def test_explicit_read_delivers_and_clears_postponed_messages(self):
+        agent = make_agent()
+        manager = agent.messages_task
+        manager.read_batching_seconds = 0
+        manager.pending_messages.extend((
+            PendingMessage(IncomingMessage(sender="Luca", text="First message"), "attention"),
+            PendingMessage(IncomingMessage(sender="Mara", text="Second message"), "fatigue"),
+        ))
+        manager.backend.run = AsyncMock(return_value=messages.SpokenRelay(
+            text="Luca sent the first message, and Mara sent the second.",
+        ))
+
+        agent.action_manager.handle_decision(ActionType.READ_PENDING_MESSAGES)
+        await manager.read_task
+
+        self.assertEqual(manager.pending_count, 0)
+        self.assertEqual(manager.postponed_count, 0)
+        self.assertEqual(
+            agent.conversation_history[-1]["content"],
+            "Luca sent the first message, and Mara sent the second.",
+        )
 
     async def test_pending_message_prompt_uses_custom_driver_name(self):
         agent = make_agent()
@@ -621,9 +690,17 @@ class AutomotiveAgentMessageFlowTest(IsolatedAsyncioTestCase):
         message = IncomingMessage(sender="Luca", text="A message to deliver")
         manager = agent.messages_task
         manager.pending_messages.append(PendingMessage(message))
+        manager.classifications[(message.sender, message.text)] = (
+            ToneType.SERIOUS, UrgencyType.CRITICAL,
+        )
         agent.speak = AsyncMock(side_effect=RuntimeError("speech unavailable"))
 
         agent.action_manager.handle_decision(ActionType.READ_PENDING_MESSAGES)
         await manager.read_task
 
         self.assertEqual(list(manager.pending_messages), [PendingMessage(message)])
+        self.assertTrue(agent.assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit)
+        self.assertEqual(
+            manager.most_urgent_classification(),
+            (ToneType.SERIOUS, UrgencyType.CRITICAL),
+        )

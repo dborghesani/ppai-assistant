@@ -89,24 +89,28 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .status-dot.incoming-message-classified[data-message-urgency="medium"] { --message-color: #ffd166; }
 .status-dot.incoming-message-classified[data-message-urgency="high"] { --message-color: #ff9f0a; }
 .status-dot.incoming-message-classified[data-message-urgency="critical"] { --message-color: #ff3b30; }
-.status-dot.incoming-message-urgent,
-.status-dot.assistant-ask_permission_to_talk {
+.status-dot.incoming-message-urgent {
+  position: relative;
+  background: transparent;
+}
+.status-dot.assistant-pending_messages_blocked {
   position: relative;
   background: transparent;
   box-shadow: none;
   animation: none;
+  transition: none;
 }
 .status-dot.incoming-message-urgent::before,
-.status-dot.assistant-ask_permission_to_talk::before {
+.status-dot.assistant-pending_messages_blocked::before {
   content: "";
   position: absolute;
   inset: 0;
-  border-radius: var(--permission-rest-radius, 50%);
+  border-radius: var(--blocked-messages-rest-radius, 50%);
   background: var(--message-color, #fff);
 }
 .status-dot.incoming-message-urgent::before,
-.status-dot.assistant-ask_permission_to_talk::before {
-  animation: permission-impatient .28s ease-in-out 7 forwards;
+.status-dot.assistant-pending_messages_blocked::before {
+  animation: blocked-message-pulse .28s ease-in-out 7 forwards;
 }
 .status-dot.assistant-act { animation: action-bloom .76s ease-out both; }
 .status-dot.assistant-background { animation: background-wobble 1.4s ease-in-out infinite; }
@@ -129,27 +133,29 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   50% { transform: scale(1.04, .88); border-radius: 55% 45% 58% 42%; }
   75% { transform: scale(.96, 1.16); border-radius: 41% 59% 52% 48%; }
 }
-@keyframes permission-impatient {
-  0% { border-radius: var(--permission-frame-0, 50%); }
-  8.333% { border-radius: var(--permission-frame-1, 50%); }
-  16.667% { border-radius: var(--permission-frame-2, 50%); }
-  25% { border-radius: var(--permission-frame-3, 50%); }
-  33.333% { border-radius: var(--permission-frame-4, 50%); }
-  41.667% { border-radius: var(--permission-frame-5, 50%); }
-  50% { border-radius: var(--permission-frame-6, 50%); }
-  58.333% { border-radius: var(--permission-frame-7, 50%); }
-  66.667% { border-radius: var(--permission-frame-8, 50%); }
-  75% { border-radius: var(--permission-frame-9, 50%); }
-  83.333% { border-radius: var(--permission-frame-10, 50%); }
-  91.667% { border-radius: var(--permission-frame-11, 50%); }
-  100% { border-radius: var(--permission-rest-radius, 50%); }
+@keyframes blocked-message-pulse {
+  0% { border-radius: var(--blocked-messages-frame-0, 50%); }
+  8.333% { border-radius: var(--blocked-messages-frame-1, 50%); }
+  16.667% { border-radius: var(--blocked-messages-frame-2, 50%); }
+  25% { border-radius: var(--blocked-messages-frame-3, 50%); }
+  33.333% { border-radius: var(--blocked-messages-frame-4, 50%); }
+  41.667% { border-radius: var(--blocked-messages-frame-5, 50%); }
+  50% { border-radius: var(--blocked-messages-frame-6, 50%); }
+  58.333% { border-radius: var(--blocked-messages-frame-7, 50%); }
+  66.667% { border-radius: var(--blocked-messages-frame-8, 50%); }
+  75% { border-radius: var(--blocked-messages-frame-9, 50%); }
+  83.333% { border-radius: var(--blocked-messages-frame-10, 50%); }
+  91.667% { border-radius: var(--blocked-messages-frame-11, 50%); }
+  100% { border-radius: var(--blocked-messages-rest-radius, 50%); }
 }
 @media (prefers-reduced-motion: reduce) {
   .status-dot.assistant-talking,
   .status-dot.assistant-act,
   .status-dot.assistant-background,
-  .status-dot.assistant-ask_permission_to_talk,
-  .status-dot.incoming-message-urgent { animation: none; }
+  .status-dot.assistant-pending_messages_blocked,
+  .status-dot.incoming-message-urgent,
+  .status-dot.assistant-pending_messages_blocked::before,
+  .status-dot.incoming-message-urgent::before { animation: none; }
 }
 .topbar-actions { justify-self: end; display: flex; align-items: center; gap: 24px; }
 .compact-select { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }

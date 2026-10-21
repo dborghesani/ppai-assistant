@@ -209,6 +209,48 @@ def test_meeting_preserves_permission_state_for_started_decision(confirmed, stat
     asyncio.run(check())
 
 
+@pytest.mark.parametrize(
+    "changed_facts,should_call_backend",
+    [
+        ("The meeting is being prepared and has not started yet.", False),
+        (
+            "The meeting is being prepared and has not started yet.\n"
+            "The driver is late for the meeting.",
+            True,
+        ),
+    ],
+)
+def test_meeting_prepare_skips_decision_call_unless_lateness_changed(changed_facts, should_call_backend):
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    from agents.tasks.meeting import MeetingTask
+    from agents.tasks.decision import DecisionInput, NotificationDecision
+    from config import ConfigAssistant
+    from data.agents_dataclasses import ActionType, InterventionType, SuggestionType, ToneType, UrgencyType
+
+    async def check():
+        task = MeetingTask(ConfigAssistant(), Mock())
+        task.backend.run = AsyncMock(return_value=NotificationDecision(
+            urgency=UrgencyType.NONE,
+            tone=ToneType.CALM,
+            intervention_type=InterventionType.NONE,
+            action=ActionType.NONE,
+            suggestion_type=SuggestionType.NONE,
+            reason="No new lateness.",
+        ))
+        decision = await task.execute(DecisionInput(
+            driver_name="David", changed_facts=changed_facts, context="No additional facts.",
+        ))
+
+        assert task.backend.run.await_count == int(should_call_backend)
+        if not should_call_backend:
+            assert decision.action is ActionType.NONE
+            assert decision.urgency is UrgencyType.NONE
+            assert decision.spoken_message is None
+
+    asyncio.run(check())
+
+
 @pytest.mark.parametrize("choice", ["route", "skip"])
 @pytest.mark.parametrize("fact", [
     "The driver has arrived at the meeting.",
@@ -1148,6 +1190,7 @@ def test_slow_manual_lookup_speaks_llm_acknowledgement_before_final_response():
         agent = make_routed_agent([])
         agent.opt = ConfigAssistant()
         agent.conversation_history = []
+        agent._assistant_flags = 0
         agent.opt.wait_message_delay_seconds = 0
         lookup_released, lookup_done = asyncio.Event(), asyncio.Event()
         speech_started, speech_released = asyncio.Event(), asyncio.Event()
@@ -2133,6 +2176,30 @@ def test_automotive_agent_dispatches_with_only_task_context():
     assert "Rock" not in str(inputs)
 
 
+def test_automotive_agent_uses_structured_context_instead_of_prefix_parsing():
+    import asyncio
+    from data.events import CarEvent, EventName
+    from data.agents_dataclasses import SkillType
+
+    changed_fact = "The driver is using a phone."
+    supporting_fact = "Changed just now: This phrase is part of an unchanged fact."
+    agent = make_routed_agent([TaskType.WELLBEING])
+    event = CarEvent(
+        SkillType.NONE,
+        EventName.KNOWLEDGE_UPDATED,
+        {"DriverPhysicalState.activity": "On the phone"},
+        [f"Changed just now: {changed_fact}", supporting_fact],
+        changed_facts=[changed_fact],
+        supporting_facts=[supporting_fact],
+    )
+
+    asyncio.run(agent.process_car_event(event))
+
+    inputs = agent.tasks[TaskType.WELLBEING].execute.await_args.args[0]
+    assert inputs.changed_facts == f"- {changed_fact}"
+    assert inputs.context == f"- {supporting_fact}"
+
+
 def test_late_meeting_scenario_routes_through_router_prompt():
     import asyncio
     from agents.tasks import routing
@@ -2160,6 +2227,50 @@ def test_late_meeting_scenario_routes_through_router_prompt():
     inputs = agent.tasks[TaskType.MEETING].execute.await_args.args[0]
     assert "late for the meeting" in inputs.changed_facts
     assert "being prepared" in inputs.context
+
+
+def test_blocked_messages_use_unified_action_and_most_urgent_tone():
+    import asyncio
+    from unittest.mock import AsyncMock, Mock
+    from agents.automotive_agent import AutomotiveAgent
+    from agents.tasks.decision import NotificationDecision
+    from data.agents_dataclasses import ActionType, InterventionType, SkillType, SuggestionType, ToneType, UrgencyType
+    from data.events import CarEvent, EventName
+
+    agent = make_routed_agent([TaskType.MESSAGES])
+    agent.handle_notification_decision = AutomotiveAgent.handle_notification_decision.__get__(agent)
+    agent.action_manager.handle_decision = Mock()
+    agent.messages_task.most_urgent_classification = Mock(
+        return_value=(ToneType.SERIOUS, UrgencyType.CRITICAL),
+    )
+
+    async def handle_message_decision(event, decision, *, on_classified):
+        on_classified(decision.tone, decision.urgency)
+
+    agent.messages_task.handle_decision = AsyncMock(side_effect=handle_message_decision)
+    agent.on_incoming_message_classified = Mock()
+    decision = NotificationDecision(
+        urgency=UrgencyType.LOW,
+        tone=ToneType.CALM,
+        intervention_type=InterventionType.ACT,
+        action=ActionType.BLOCK_PENDING_MESSAGES,
+        suggestion_type=SuggestionType.NONE,
+        reason="Driver attention is low.",
+    )
+
+    asyncio.run(agent.handle_notification_decision(
+        CarEvent(SkillType.NONE, EventName.KNOWLEDGE_UPDATED, {}, []),
+        decision,
+        task_type=TaskType.MESSAGES,
+    ))
+
+    agent.messages_task.handle_decision.assert_awaited_once()
+    agent.on_incoming_message_classified.assert_called_once_with(
+        ToneType.SERIOUS, UrgencyType.CRITICAL,
+    )
+    agent.action_manager.handle_decision.assert_called_once_with(
+        ActionType.BLOCK_PENDING_MESSAGES, {},
+    )
 
 
 @pytest.mark.parametrize("outcome", ["complete", "cancel_generation", "cancel_sentence", "cancel_playback", "error"])

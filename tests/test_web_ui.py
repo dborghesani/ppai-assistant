@@ -130,10 +130,10 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("VehicleState", response["result"])
         await socket.close()
 
-    async def test_websocket_ready_restores_pending_permission_status(self) -> None:
+    async def test_websocket_ready_restores_blocked_messages_status(self) -> None:
         self.web_ui.bridge.dumpAssistantStatus = lambda: {
             "status": AssistantStatus.IDLE.value,
-            "flags": AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
+            "flags": AssistantStatus.PENDING_MESSAGES_BLOCKED.bit,
         }
 
         socket = await self.client.ws_connect("/ws")
@@ -143,7 +143,7 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
             ready["data"]["assistantStatus"],
             {
                 "status": AssistantStatus.IDLE.value,
-                "flags": AssistantStatus.ASK_PERMISSION_TO_TALK.bit,
+                "flags": AssistantStatus.PENDING_MESSAGES_BLOCKED.bit,
             },
         )
         await socket.close()

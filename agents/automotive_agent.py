@@ -214,6 +214,10 @@ class AutomotiveAgent:
     def notify_incoming_message_classification(
         self, tone: ToneType, urgency: UrgencyType
     ) -> None:
+        most_urgent = getattr(self.messages_task, "most_urgent_classification", None)
+        classification = most_urgent() if callable(most_urgent) else None
+        if classification is not None:
+            tone, urgency = classification
         if self.on_incoming_message_classified is not None:
             self.on_incoming_message_classified(tone, urgency)
 
@@ -225,7 +229,7 @@ class AutomotiveAgent:
     @property
     def assistant_status(self) -> AssistantStatus:
         """Dominant active status (the permission flag is an overlay, not a state)."""
-        flags = self._assistant_flags & ~AssistantStatus.ASK_PERMISSION_TO_TALK.bit
+        flags = self._assistant_flags & ~AssistantStatus.PENDING_MESSAGES_BLOCKED.bit
         for status in AssistantStatus:
             if flags & status.bit:
                 return status
@@ -241,23 +245,23 @@ class AutomotiveAgent:
         self.set_assistant_status(status)
 
     def set_assistant_status(self, status: AssistantStatus) -> None:
-        permission_bit = AssistantStatus.ASK_PERMISSION_TO_TALK.bit
-        if status is AssistantStatus.ASK_PERMISSION_TO_TALK:
+        blocked_messages_bit = AssistantStatus.PENDING_MESSAGES_BLOCKED.bit
+        if status is AssistantStatus.PENDING_MESSAGES_BLOCKED:
             # Persistent overlay: survives talking/acting/notify until cleared.
-            new_flags = self._assistant_flags | permission_bit
+            new_flags = self._assistant_flags | blocked_messages_bit
         else:
             # Any other status is the exclusive current activity; IDLE means none.
             activity = AssistantStatus.IDLE.bit if status is AssistantStatus.IDLE else status.bit
-            new_flags = (self._assistant_flags & permission_bit) | activity
+            new_flags = (self._assistant_flags & blocked_messages_bit) | activity
         if new_flags == self._assistant_flags:
             return
         self._assistant_flags = new_flags
         self._notify_assistant_flags()
 
-    def clear_permission_to_talk(self) -> None:
-        if not self._assistant_flags & AssistantStatus.ASK_PERMISSION_TO_TALK.bit:
+    def clear_blocked_messages_status(self) -> None:
+        if not self._assistant_flags & AssistantStatus.PENDING_MESSAGES_BLOCKED.bit:
             return
-        self._assistant_flags &= ~AssistantStatus.ASK_PERMISSION_TO_TALK.bit
+        self._assistant_flags &= ~AssistantStatus.PENDING_MESSAGES_BLOCKED.bit
         self._notify_assistant_flags()
 
     def _notify_assistant_flags(self) -> None:
@@ -502,7 +506,9 @@ class AutomotiveAgent:
             await self.process_car_event(event)
 
     async def process_car_event(self, event: CarEvent) -> None:
-        facts = dict(event.facts or getattr(self, "knowledge_facts_provider", lambda: {})())
+        knowledge_facts = event.facts or getattr(self, "knowledge_facts_provider", lambda: {})()
+        facts = dict(knowledge_facts)
+        has_fact_snapshot = bool(knowledge_facts)
         changes = dict(event.event_value) if isinstance(event.event_value, dict) else {}
         # A fact is relevant when it changed: the current definition of each
         # changed key IS the fact, taken straight from the fact snapshot.
@@ -528,13 +534,23 @@ class AutomotiveAgent:
         self.logger.info("[LLM] Event dispatched", tasks=[task.value for task in task_types])
         decisions = []
         for task_type in task_types:
-            selected_facts = DECISION_TASKS[task_type].select_facts(facts)
-            selected_changes = {key: value for key, value in selected_facts.items() if key in changes}
-            supporting = [value for key, value in selected_facts.items() if key not in changes]
-            if not event.facts and not getattr(self, "knowledge_facts_provider", lambda: {})():
-                supporting = [fact for fact in event.context if not fact.startswith("Changed just now:")]
+            if has_fact_snapshot:
+                selected_facts = DECISION_TASKS[task_type].select_facts(facts)
+                changed_facts = [
+                    value for key, value in selected_facts.items() if key in changes
+                ]
+                supporting = [
+                    value for key, value in selected_facts.items() if key not in changes
+                ]
+            else:
+                changed_facts = list(event.changed_facts or [])
+                supporting = (
+                    list(event.supporting_facts)
+                    if event.supporting_facts is not None
+                    else list(event.context)
+                )
             decision_input = {
-                "changed_facts": "\n".join(f"- {fact}" for fact in selected_changes.values())
+                "changed_facts": "\n".join(f"- {fact}" for fact in changed_facts)
                     or "No specific vehicle fact changed.",
                 "context": "\n".join(f"- {fact}" for fact in supporting)
                     or "No additional vehicle context is available.",
@@ -814,18 +830,13 @@ class AutomotiveAgent:
         self, event: CarEvent, decision: NotificationDecision,
         *, task_type: TaskType | None = None,
     ) -> None:
-        if task_type is TaskType.MESSAGES and decision.action is not ActionType.ASK_PERMISSION_TO_TALK:
+        if task_type is TaskType.MESSAGES:
             await self.messages_task.handle_decision(
                 event, decision,
                 on_classified=self.notify_incoming_message_classification,
             )
-            return
-        if task_type is TaskType.MESSAGES:
-            self.notify_incoming_message_classification(decision.tone, decision.urgency)
-            self.action_manager.handle_decision(decision.action, {})
-            return
-        if decision.action is ActionType.POSTPONE_NOTIFICATION_DELIVERY:
-            self.action_manager.handle_decision(decision.action, {})
+            if decision.action is ActionType.BLOCK_PENDING_MESSAGES:
+                self.action_manager.handle_decision(ActionType.BLOCK_PENDING_MESSAGES, {})
             return
         if decision.action is ActionType.READ_PENDING_MESSAGES:
             parameters = {}
@@ -835,7 +846,7 @@ class AutomotiveAgent:
                 }
             self.action_manager.handle_decision(decision.action, parameters)
             return
-        if decision.action is ActionType.ASK_PERMISSION_TO_TALK:
+        if decision.action is ActionType.BLOCK_PENDING_MESSAGES:
             self.action_manager.handle_decision(decision.action, {})
             return
         if decision.action is ActionType.ASK_ATTEND_MEETING:

@@ -73,8 +73,8 @@ class VehicleCommandTask:
         self.llm = self.backend.llm
         self.direct_vehicle_actions = tuple(action for action in ActionType if action not in {
             ActionType.NONE, ActionType.FIND_REST_AREA, ActionType.ASK_ATTEND_MEETING,
-            ActionType.PROPOSE_MUSIC, ActionType.ASK_PERMISSION_TO_TALK,
-            ActionType.POSTPONE_NOTIFICATION_DELIVERY, ActionType.READ_PENDING_MESSAGES,
+            ActionType.PROPOSE_MUSIC, ActionType.BLOCK_PENDING_MESSAGES,
+            ActionType.READ_PENDING_MESSAGES,
             ActionType.PLAY_MUSIC, *registered_actions,
         })
         self.direct_action_options = enum_options(self.direct_vehicle_actions)

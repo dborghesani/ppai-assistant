@@ -90,8 +90,7 @@ class ActionType(str, Enum):
     DISABLE_LANE_KEEP_ASSIST = "disable_lane_keep_assist"
     ENABLE_BLIND_SPOT_MONITOR = "enable_blind_spot_monitor"
     DISABLE_BLIND_SPOT_MONITOR = "disable_blind_spot_monitor"
-    ASK_PERMISSION_TO_TALK = "ask_permission_to_talk"
-    POSTPONE_NOTIFICATION_DELIVERY = "postpone_notification_delivery"
+    BLOCK_PENDING_MESSAGES = "block_pending_messages"
     READ_PENDING_MESSAGES = "read_pending_messages"
     APPLY_RESTRICTIVE_ADAS_PROFILE = "apply_restrictive_adas_profile"
     ENABLE_SIDELIGHTS = "enable_sidelights"
@@ -149,10 +148,7 @@ class ActionType(str, Enum):
             ActionType.DISABLE_LANE_KEEP_ASSIST: "disable lane keeping assistance",
             ActionType.ENABLE_BLIND_SPOT_MONITOR: "enable blind spot monitoring",
             ActionType.DISABLE_BLIND_SPOT_MONITOR: "disable blind spot monitoring",
-            ActionType.ASK_PERMISSION_TO_TALK: "ask permission to read queued messages",
-            ActionType.POSTPONE_NOTIFICATION_DELIVERY: (
-                "defer an incoming message because fatigue is high or attention is low"
-            ),
+            ActionType.BLOCK_PENDING_MESSAGES: "block queued message delivery until the driver asks to read them or delivery conditions are met",
             ActionType.READ_PENDING_MESSAGES: (
                 "deliver queued messages when manual privacy is off, no more than one person "
                 "is inside, and fatigue/attention allow delivery; also read postponed messages "
@@ -266,7 +262,7 @@ class SuggestionType(str, Enum):
 class AssistantStatus(str, Enum):
     IDLE = "idle"  # UI: stationary white ball (gray while connecting/reconnecting)
     TALKING = "talking"  # UI: tone-colored organic wobble
-    ASK_PERMISSION_TO_TALK = "ask_permission_to_talk"  # UI: stationary white ball; no dedicated animation
+    PENDING_MESSAGES_BLOCKED = "pending_messages_blocked"  # UI: periodic urgent-message pulse
     ASK_PERMISSION_TO_ACT = "ask_permission_to_act"  # UI: stationary white ball; no dedicated animation
     ACT = "act"  # UI: brief enlargement pulse, then returns to idle size
     NOTIFY = "notify"  # UI: stationary white ball; no dedicated animation
@@ -283,7 +279,7 @@ class AssistantStatus(str, Enum):
         return {
             AssistantStatus.IDLE: "The assistant is idle.",
             AssistantStatus.TALKING: "The assistant is talking.",
-            AssistantStatus.ASK_PERMISSION_TO_TALK: "The assistant is asking for permission to talk.",
+            AssistantStatus.PENDING_MESSAGES_BLOCKED: "Queued messages are blocked from delivery.",
             AssistantStatus.ASK_PERMISSION_TO_ACT: "The assistant is asking for permission to act.",
             AssistantStatus.ACT: "The assistant is performing an action.",
             AssistantStatus.NOTIFY: "The assistant is notifying the user.",

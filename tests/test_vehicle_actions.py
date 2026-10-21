@@ -957,3 +957,5 @@ def test_knowledge_event_marks_changed_fact_ahead_of_supporting_facts():
         "2 children are detected inside the vehicle.",
     ]
     assert event.event_value == {"DriverPhysicalState.fatigue_level": "high"}
+    assert event.changed_facts == ["Fatigue level is high."]
+    assert event.supporting_facts == ["2 children are detected inside the vehicle."]

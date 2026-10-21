@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, ClassVar
 
 import structlog
 from crewai import Agent, Crew, Process, Task
@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from agents.backends.crewai_backend import CrewAIBackend
 from agents.tasks.decision import DECISION_PROMPT, DecisionInput, DecisionTask, NotificationDecision, enum_options
 from agents.tasks.routing import TaskType
-from data.agents_dataclasses import ActionType, InterventionType, SkillType, SuggestionType, ToneType, UrgencyType
+from data.agents_dataclasses import ActionType, AssistantStatus, InterventionType, SkillType, SuggestionType, ToneType, UrgencyType
 from data.events import CarEvent, EventName, IncomingMessage
 
 if TYPE_CHECKING:
@@ -28,8 +28,8 @@ TASK = DecisionTask(
         "UnreadMessages.count",
     ),
     actions=(
-        ActionType.NONE, ActionType.ASK_PERMISSION_TO_TALK,
-        ActionType.POSTPONE_NOTIFICATION_DELIVERY, ActionType.READ_PENDING_MESSAGES,
+        ActionType.NONE, ActionType.BLOCK_PENDING_MESSAGES,
+        ActionType.READ_PENDING_MESSAGES,
     ),
     instructions="""
 Handle incoming messages and recovery of pending delivery, driven by the
@@ -41,7 +41,7 @@ urgency=high for ASAP/immediate requests, stranded people or near deadlines, cri
 only for immediate serious-injury risk. Bad news is not enthusiastic. Urgency and
 tone must remain classified even when delivery is blocked.
 For a new message arrival, apply this exhaustive ordered table:
-1. ask_permission_to_talk when either of two fully independent conditions holds;
+1. block_pending_messages when either of two fully independent conditions holds;
    each condition alone is sufficient and they can trigger separately:
    - Privacy condition: "Privacy mode is on." or the privacy fact is missing or
      unknown. Privacy is a manual driver-only switch; it is never inferred from
@@ -52,14 +52,14 @@ For a new message arrival, apply this exhaustive ordered table:
    Only 0 or 1 occupant ("No people..." or "One person...") keeps the occupancy
    condition off.
 2. Neither condition holds, and attention is low/very low
-=> postpone_notification_delivery.
+=> block_pending_messages.
 3. Otherwise => read_pending_messages.
 Use intervention_type=act, suggestion_type=none, spoken_message=null for all three.
 Never reveal sender/content in spoken_message; the delivery flow speaks the queue.
 Message urgency never changes this table. Heavy traffic alone is not a privacy veto.
 For knowledge_updated recovery, pending_count>0 and neither blocking condition
 from rule 1 holds, decide ONLY by attention level using this exact mapping:
-- attention is low or very low => postpone_notification_delivery.
+- attention is low or very low => block_pending_messages.
 - attention is medium, high, very high or unknown => read_pending_messages
     (urgency=low, tone=empathetic, spoken_message=null).
 A very high attention level is an EXCELLENT moment to read: it NEVER vetoes or
@@ -305,11 +305,8 @@ class MessagesTask:
             self.remember_classification(self.newest_message or {}, decision.tone, decision.urgency)
         on_classified(decision.tone, decision.urgency)
 
-        if decision.action is ActionType.ASK_PERMISSION_TO_TALK:
-            return None
-        if decision.action is ActionType.POSTPONE_NOTIFICATION_DELIVERY:
-            self.handle_action(decision.action, {
-                "event_value": self.newest_message if new_message else event.event_value,
+        if decision.action is ActionType.BLOCK_PENDING_MESSAGES:
+            self.handle_action(ActionType.BLOCK_PENDING_MESSAGES, {
                 "context": self._knowledge_context(),
             })
             return None
@@ -324,7 +321,7 @@ class MessagesTask:
 
     def handle_action(self, action: ActionType, parameters: dict[str, Any] | None = None) -> None:
         parameters = parameters or {}
-        if action is ActionType.POSTPONE_NOTIFICATION_DELIVERY:
+        if action is ActionType.BLOCK_PENDING_MESSAGES:
             self.postpone(parameters)
         elif action is ActionType.READ_PENDING_MESSAGES:
             if self.read_task is not None and not self.read_task.done():
@@ -339,8 +336,9 @@ class MessagesTask:
             pending_messages = self.select_deliverable(parameters)
             if not pending_messages:
                 return
-            for entry in pending_messages:
-                self.classifications.pop((entry.sender, entry.text), None)
+            clear_blocked_status = getattr(self.agent, "clear_blocked_messages_status", None)
+            if callable(clear_blocked_status):
+                clear_blocked_status()
             self.read_task = asyncio.create_task(self.deliver_pending_messages(
                 pending_messages, str(parameters.get("acknowledgement", "")),
                 absorb_extras=not parameters.get("postponed_only"),
@@ -400,6 +398,16 @@ class MessagesTask:
             delivered = True
         except Exception as error:
             self.logger.warning("Pending message delivery failed", error=str(error))
+            if self.pending_count and self.agent is not None:
+                classification = self.most_urgent_classification()
+                notify_classification = getattr(
+                    self.agent, "notify_incoming_message_classification", None,
+                )
+                if classification is not None and callable(notify_classification):
+                    notify_classification(*classification)
+                set_status = getattr(self.agent, "set_assistant_status", None)
+                if callable(set_status):
+                    set_status(AssistantStatus.PENDING_MESSAGES_BLOCKED)
         finally:
             if delivered:
                 self.remove_pending_messages(messages)
@@ -431,12 +439,11 @@ class MessagesTask:
         With force=True the count is republished even when unchanged, so the
         knowledge pipeline re-evaluates the fact (e.g. a delivery blocker
         changed and the queue fact must be reconsidered alongside it)."""
+        if self.pending_count == 0 and self.agent is not None:
+            self.agent.clear_blocked_messages_status()
         if not force and self.pending_count == self.published_unread_count:
             return
         self.published_unread_count = self.pending_count
-        if self.pending_count == 0 and self.agent is not None:
-            # Queue drained: the persistent permission overlay is no longer needed.
-            self.agent.clear_permission_to_talk()
         if self.update_knowledge is not None:
             self.update_knowledge("UnreadMessages", {"count": self.pending_count})
 

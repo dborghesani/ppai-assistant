@@ -380,16 +380,16 @@ let speakingTone = null;
 let actPulseTimer = null;
 let showActPulse = false;
 let incomingMessageClassification = null;
-let permissionMessageClassification = null;
+let blockedMessageClassification = null;
 let incomingMessageTimer = null;
 let pendingAssistantMessage = null;
 let assistantTurnPaused = false;
 let friendSimulationActive = false;
-const PERMISSION_BIT = 1 << 2; // AssistantStatus.ASK_PERMISSION_TO_TALK index
-let permissionReminderSeconds = 10; // overridden from config via ready payload
+const BLOCKED_MESSAGES_BIT = 1 << 2; // AssistantStatus.PENDING_MESSAGES_BLOCKED index
+let blockedMessageReminderSeconds = 10; // overridden from config via ready payload
 let assistantFlags = 1; // idle
-let permissionReminderTimer = null;
-let permissionPulseTimer = null; // active only for the duration of a pulse
+let blockedMessageReminderTimer = null;
+let blockedMessagePulseTimer = null; // active only for the duration of a pulse
 let toastTimer;
 const musicAudio = document.querySelector("#music-audio");
 let musicQueue = [];
@@ -571,7 +571,7 @@ function setConnection(state) {
     connectionTimer = setTimeout(() => {
       connectionState = "connected";
       renderDriveStatus();
-      maybeVibrateForPermission();
+      maybeVibrateForBlockedMessages();
     }, 2500);
     return;
   }
@@ -598,16 +598,16 @@ function randomizeOfflineShape(dot) {
   dot.style.setProperty("--offline-flat", random(.24, .33));
 }
 
-function permissionRestRadius() {
+function blockedMessagesRestRadius() {
   return "50% 50% 50% 50% / 50% 50% 50% 50%";
 }
 
-function randomizePermissionShape(dot) {
+function randomizeBlockedMessagesShape(dot) {
   const pointCount = 12;
   const phases = Array.from({ length: pointCount }, () => Math.random() * Math.PI * 2);
   const amplitudes = Array.from({ length: pointCount }, () => 10 + Math.random() * 4);
-  dot.style.setProperty("--permission-rest-radius", permissionRestRadius());
-  dot.style.setProperty("--permission-frame-0", permissionRestRadius());
+  dot.style.setProperty("--blocked-messages-rest-radius", blockedMessagesRestRadius());
+  dot.style.setProperty("--blocked-messages-frame-0", blockedMessagesRestRadius());
 
   for (let frame = 1; frame < pointCount; frame += 1) {
     const pointOffsets = phases.map((phase, index) => (
@@ -623,7 +623,7 @@ function randomizePermissionShape(dot) {
     const horizontal = cornerRadii.slice(0, 4).map(value => `${value.toFixed(2)}%`).join(" ");
     const vertical = cornerRadii.slice(4).map(value => `${value.toFixed(2)}%`).join(" ");
     dot.style.setProperty(
-      `--permission-frame-${frame}`,
+      `--blocked-messages-frame-${frame}`,
       `${horizontal} / ${vertical}`,
     );
   }
@@ -640,13 +640,13 @@ function renderDriveStatus() {
         ? "background"
         : assistantStatus;
   const messageClassification = visualStatus === "idle"
-    ? incomingMessageClassification || (permissionPulseTimer ? permissionMessageClassification : null)
+    ? incomingMessageClassification || (blockedMessagePulseTimer ? blockedMessageClassification : null)
     : null;
   const classifiedIncomingMessage =
     !disconnected && messageClassification !== null;
   const urgentIncomingMessage = classifiedIncomingMessage &&
     ["high", "critical"].includes(messageClassification.urgency);
-  dot.className = `status-dot ${connectionState} assistant-${visualStatus}${permissionPulseTimer ? " assistant-ask_permission_to_talk" : ""}${classifiedIncomingMessage ? " incoming-message-classified" : ""}${urgentIncomingMessage && incomingMessageClassification ? " incoming-message-urgent" : ""}`;
+  dot.className = `status-dot ${connectionState} assistant-${visualStatus}${blockedMessagePulseTimer && assistantStatus === "idle" ? " assistant-pending_messages_blocked" : ""}${classifiedIncomingMessage ? " incoming-message-classified" : ""}${urgentIncomingMessage && incomingMessageClassification ? " incoming-message-urgent" : ""}`;
   if (classifiedIncomingMessage) {
     dot.dataset.messageTone = messageClassification.tone;
     dot.dataset.messageUrgency = messageClassification.urgency;
@@ -678,7 +678,7 @@ function setSpeakingTone(tone) {
 function setIncomingMessageClassification(classification) {
   clearTimeout(incomingMessageTimer);
   incomingMessageClassification = classification;
-  permissionMessageClassification = classification;
+  blockedMessageClassification = classification;
   if (!classification) {
     renderDriveStatus();
     return;
@@ -686,7 +686,7 @@ function setIncomingMessageClassification(classification) {
 
   if (["high", "critical"].includes(classification.urgency)) {
     const dot = document.querySelector("#connection-dot");
-    randomizePermissionShape(dot);
+    randomizeBlockedMessagesShape(dot);
     dot.classList.remove("incoming-message-urgent");
     void dot.offsetWidth;
   }
@@ -694,59 +694,72 @@ function setIncomingMessageClassification(classification) {
   incomingMessageTimer = setTimeout(() => {
     incomingMessageTimer = null;
     incomingMessageClassification = null;
-    if (!(assistantFlags & PERMISSION_BIT)) permissionMessageClassification = null;
+    if (!(assistantFlags & BLOCKED_MESSAGES_BIT)) blockedMessageClassification = null;
     renderDriveStatus();
   }, 1960);
 }
 
-function restartPermissionPulse(dot) {
-  randomizePermissionShape(dot);
-  dot.classList.remove("assistant-ask_permission_to_talk");
+function restartBlockedMessagesPulse(dot) {
+  randomizeBlockedMessagesShape(dot);
+  dot.classList.remove("assistant-pending_messages_blocked");
   void dot.offsetWidth;
-  dot.classList.add("assistant-ask_permission_to_talk");
+  dot.classList.add("assistant-pending_messages_blocked");
   // The transparent-blob visual lives only for the pulse itself; afterwards
-  // the regular dot rendering takes over again (permission-impatient runs
+  // the regular dot rendering takes over again (blocked-message-pulse runs
   // .28s x 7 iterations). Arm the pulse window before the render so
   // renderDriveStatus keeps the class.
-  clearTimeout(permissionPulseTimer);
-  permissionPulseTimer = setTimeout(() => {
-    permissionPulseTimer = null;
-    renderDriveStatus();
-  }, 1960);
+  clearTimeout(blockedMessagePulseTimer);
+  blockedMessagePulseTimer = setTimeout(() => {
+    finishBlockedMessagePulse();
+  }, 2050);
   renderDriveStatus();
+}
+
+function finishBlockedMessagePulse() {
+  const statusDot = document.querySelector("#connection-dot");
+  statusDot.style.transition = "none";
+  blockedMessagePulseTimer = null;
+  renderDriveStatus();
+  void statusDot.offsetWidth;
+  statusDot.style.removeProperty("transition");
 }
 
 // Episodic reminder: vibration only when the current visual is the idle
 // fallback; any higher-priority active state keeps its own animation and
 // suppresses the vibration until it ends.
-function maybeVibrateForPermission() {
-  if (!(assistantFlags & PERMISSION_BIT)) return;
+function maybeVibrateForBlockedMessages() {
+  if (!(assistantFlags & BLOCKED_MESSAGES_BIT)) return;
   if (assistantStatus !== "idle" || connectionState !== "connected") return;
-  restartPermissionPulse(document.querySelector("#connection-dot"));
+  restartBlockedMessagesPulse(document.querySelector("#connection-dot"));
 }
 
 function setAssistantFlags(flags) {
-  const hadPermission = !!(assistantFlags & PERMISSION_BIT);
+  const hadBlockedMessages = !!(assistantFlags & BLOCKED_MESSAGES_BIT);
   assistantFlags = flags;
-  const hasPermission = !!(flags & PERMISSION_BIT);
-  if (hasPermission && !permissionReminderTimer) {
-    permissionReminderTimer = setInterval(
-      maybeVibrateForPermission, permissionReminderSeconds * 1000,
+  const hasBlockedMessages = !!(flags & BLOCKED_MESSAGES_BIT);
+  if (hasBlockedMessages && !blockedMessageReminderTimer) {
+    blockedMessageReminderTimer = setInterval(
+      maybeVibrateForBlockedMessages, blockedMessageReminderSeconds * 1000,
     );
-    maybeVibrateForPermission();
-  } else if (!hasPermission && hadPermission) {
-    clearInterval(permissionReminderTimer);
-    permissionReminderTimer = null;
-    permissionMessageClassification = null;
-    clearTimeout(permissionPulseTimer);
-    permissionPulseTimer = null;
-    renderDriveStatus();
+    maybeVibrateForBlockedMessages();
+  } else if (!hasBlockedMessages && hadBlockedMessages) {
+    clearInterval(blockedMessageReminderTimer);
+    blockedMessageReminderTimer = null;
+    blockedMessageClassification = null;
+    clearTimeout(blockedMessagePulseTimer);
+    finishBlockedMessagePulse();
   }
 }
 
 function setAssistantStatus(status, flags) {
   if (flags !== undefined) setAssistantFlags(flags);
   assistantStatus = status;
+  if (status === "idle") {
+    maybeVibrateForBlockedMessages();
+  } else if (blockedMessagePulseTimer) {
+    clearTimeout(blockedMessagePulseTimer);
+    finishBlockedMessagePulse();
+  }
   // When the assistant pauses for low attention, close the current bubble
   // with an ellipsis; the resumed speech opens a fresh bubble.
   if (status === "paused_attention" && !assistantTurnPaused) {
@@ -768,16 +781,16 @@ function setAssistantStatus(status, flags) {
   } else if (status !== "idle") {
     showActPulse = false;
     clearTimeout(actPulseTimer);
-    // A higher-priority state takes over the visual: end any permission pulse.
-    clearTimeout(permissionPulseTimer);
-    permissionPulseTimer = null;
+    // A higher-priority state takes over the visual: end the blocked-message pulse.
+    clearTimeout(blockedMessagePulseTimer);
+    finishBlockedMessagePulse();
   }
   renderDriveStatus();
 }
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
-    maybeVibrateForPermission();
+    maybeVibrateForBlockedMessages();
   }
 });
 
@@ -1318,7 +1331,11 @@ function renderChangedEvents(changes) {
 }
 
 bridge.on("ready", data => {
-  if (data.assistantStatus) setAssistantStatus(data.assistantStatus);
+  if (typeof data.assistantStatus === "string") {
+    setAssistantStatus(data.assistantStatus);
+  } else if (data.assistantStatus) {
+    setAssistantStatus(data.assistantStatus.status, data.assistantStatus.flags);
+  }
   renderKnowledge(data.knowledge);
   rememberControlState("DriverPreferences", data.driverPreferences);
   rememberControlState("DriverAgenda", data.driverAgendaState);
@@ -1328,7 +1345,7 @@ bridge.on("ready", data => {
   const ducking = Number(data.musicDuckingFactor);
   musicDuckingFactor = Number.isFinite(ducking) && ducking > 0 && ducking <= 1 ? ducking : 0.25;
   if (Number.isFinite(Number(data.permissionReminderSeconds)) && Number(data.permissionReminderSeconds) > 0) {
-    permissionReminderSeconds = Number(data.permissionReminderSeconds);
+    blockedMessageReminderSeconds = Number(data.permissionReminderSeconds);
   }
   updateMusicVolume();
   renderMusic(data.musicState);

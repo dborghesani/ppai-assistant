@@ -6,7 +6,13 @@ from pydantic import BaseModel
 from agents.backends.crewai_backend import CrewAIBackend
 from agents.tasks.decision import DecisionInput, DecisionTask, NotificationDecision
 from agents.tasks.routing import TaskType
-from data.agents_dataclasses import ActionType, SkillType
+from data.agents_dataclasses import (
+    ActionType, InterventionType, SkillType, SuggestionType, ToneType, UrgencyType,
+)
+
+
+PREPARING_MEETING_FACT = "The meeting is being prepared and has not started yet."
+LATE_MEETING_FACT = "The driver is late for the meeting."
 
 
 TASK = DecisionTask(
@@ -107,6 +113,20 @@ class MeetingTask:
         self.on_decline = on_decline
 
     async def execute(self, task_input: DecisionInput) -> NotificationDecision:
+        changed_facts = task_input.changed_facts.casefold()
+        if (
+            PREPARING_MEETING_FACT.casefold() in changed_facts
+            and LATE_MEETING_FACT.casefold() not in changed_facts
+        ):
+            return NotificationDecision(
+                urgency=UrgencyType.NONE,
+                tone=ToneType.CALM,
+                intervention_type=InterventionType.NONE,
+                skill=SkillType.NONE,
+                action=ActionType.NONE,
+                suggestion_type=SuggestionType.NONE,
+                reason="Meeting preparation is handled by the agenda manager.",
+            )
         inputs = {
             "driver_name": task_input.driver_name,
             "changed_facts": task_input.changed_facts,

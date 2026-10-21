@@ -565,11 +565,13 @@ class KnowledgeManager:
             facts["VehicleMotion.moving"] = (
                 "The vehicle is moving." if speed > 0 else "The vehicle is stationary."
             )
-        changed_context = [f"Changed just now: {facts[key]}" for key in changes if key in facts]
-        supporting_context = [value for key, value in facts.items() if key not in changes]
+        changed_facts = [facts[key] for key in changes if key in facts]
+        supporting_facts = [value for key, value in facts.items() if key not in changes]
+        changed_context = [f"Changed just now: {fact}" for fact in changed_facts]
         await self.knowledge_event_queue.put(CarEvent(
             skill=SkillType.NONE, event_name=EventName.KNOWLEDGE_UPDATED,
-            event_value=dict(changes), context=changed_context + supporting_context, facts=facts,
+            event_value=dict(changes), context=changed_context + supporting_facts, facts=facts,
+            changed_facts=changed_facts, supporting_facts=supporting_facts,
         ))
 
     def _relative_knowledge(

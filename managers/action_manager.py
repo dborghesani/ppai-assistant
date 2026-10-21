@@ -74,12 +74,12 @@ class ActionManager:
     def handle_decision(
         self, action_type: ActionType, parameters: dict[str, Any] | None = None
     ) -> None:
-        if action_type is ActionType.ASK_PERMISSION_TO_TALK:
-            self.agent.set_assistant_status(AssistantStatus.ASK_PERMISSION_TO_TALK)
-        elif action_type in {
-            ActionType.READ_PENDING_MESSAGES,
-            ActionType.POSTPONE_NOTIFICATION_DELIVERY,
-        }:
+        if action_type is ActionType.BLOCK_PENDING_MESSAGES:
+            if self.agent.messages_task.pending_count:
+                self.agent.set_assistant_status(AssistantStatus.PENDING_MESSAGES_BLOCKED)
+            else:
+                self.agent.clear_blocked_messages_status()
+        elif action_type is ActionType.READ_PENDING_MESSAGES:
             self.agent.messages_task.handle_action(action_type, parameters)
         elif action_type is ActionType.ASK_ATTEND_MEETING:
             self.mark_awaiting_meeting_confirmation()

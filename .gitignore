@@ -80,6 +80,7 @@ target/
 
 # Model weights and artifacts (kept out of git for now, too large to push)
 models/
+!voice/moshi/moshi/models/
 
 # IPython
 profile_default/

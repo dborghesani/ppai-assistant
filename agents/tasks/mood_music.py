@@ -47,15 +47,25 @@ TASK = DecisionTask(
     suggestions=(SuggestionType.NONE, SuggestionType.REGULATE_EMOTIONAL_STATE),
     instructions="""
 Respond only to explicitly CHANGED driver emotions, never fatigue, attention,
-activities or driving tension. Neutral and intensity none remain silent.
-Non-neutral low/medium emotion => brief warm acknowledgement, no music proposal.
-Anger/fear/disgust at medium intensity may warrant a gentle calming suggestion;
-happy/sad/surprise alone do not justify a driving-safety warning.
-Non-neutral high/very high/extreme emotion => propose_music, intervention_type=act,
-urgency=low, suggestion_type=none. Acknowledge the emotion and ask permission in
-spoken_message. Never claim selection or playback has started. Prefer a
-safety-relevant emotion when multiple emotions are reported. Playback/selection
-and confirmation belong to the music manager, not this decision.
+activities or driving tension. Every reported non-neutral emotion qualifies for
+mood-matching music: anger, disgust, fear, happiness, sadness and surprise.
+For a changed emotion explicitly present at low, medium, high, very high or extreme
+intensity, return action=propose_music, intervention_type=act, urgency=low,
+suggestion_type=none and a nonempty spoken_message acknowledging the mood and
+asking permission to find matching music. Positive emotions do
+not require distress, persistence or a driving-safety risk to qualify.
+Example: "Happiness level is very high." => propose_music and "You seem happy!
+Would you like me to find some music to match your mood?", not silent output.
+Ignore emotional neutrality at every intensity. A change only in neutrality
+requires silent output: urgency=none, intervention_type=none, action=none,
+suggestion_type=none, spoken_message=null. Neutrality must not trigger an offer
+based on other emotions found only in supporting context. For mixed changed
+emotions, ignore neutrality and evaluate the other changed emotions normally.
+An absent emotion (none, zero, "No ... detected") alone remains silent; its
+absence is not another emotion. Use all present changed emotions for a mixed
+mood, not only negative emotions. Do not invent a driving-safety warning from
+happiness, sadness or surprise. Never claim selection or playback has started.
+Playback/selection and confirmation belong to the music manager, not this decision.
 """,
 )
 

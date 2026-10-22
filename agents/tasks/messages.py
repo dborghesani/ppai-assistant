@@ -49,16 +49,19 @@ For a new message arrival, apply this exhaustive ordered table:
    - Occupancy condition: "Multiple people are detected inside the vehicle."
      or the occupant fact is missing or unknown. Occupancy is about who is in
      the cabin only; it never toggles or implies privacy.
-   Only 0 or 1 occupant ("No people..." or "One person...") keeps the occupancy
-   condition off.
+     Only 0 or 1 occupant ("No people..." or "One person...") keeps the occupancy
+     condition off. Numerically, 0 or 1 permits delivery; 2 or more blocks it.
 2. Neither condition holds, and attention is low/very low
 => block_pending_messages.
 3. Otherwise => read_pending_messages.
 Use intervention_type=act, suggestion_type=none, spoken_message=null for all three.
 Never reveal sender/content in spoken_message; the delivery flow speaks the queue.
 Message urgency never changes this table. Heavy traffic alone is not a privacy veto.
-For knowledge_updated recovery, pending_count>0 and neither blocking condition
-from rule 1 holds, decide ONLY by attention level using this exact mapping:
+For knowledge_updated recovery, including occupancy returning from 2 or more
+people to 0 or 1, pending_count>0 and neither blocking condition from rule 1
+holds, decide ONLY by attention level using this exact mapping. Re-evaluate even
+if the unread count itself did not change; a republished pending count can trigger
+this recovery decision:
 - attention is low or very low => block_pending_messages.
 - attention is medium, high, very high or unknown => read_pending_messages
     (urgency=low, tone=empathetic, spoken_message=null).

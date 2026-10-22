@@ -34,20 +34,49 @@ TASK = DecisionTask(
         SuggestionType.PREPARE_FOR_MANEUVER,
     ),
     instructions="""
-Provide driving coaching, not wellbeing or music. Treat reported driving tension
-as a driving-style signal; excessively aggressive/high tension warrants calm-driving
-guidance, never an inferred emotion or playlist. Only the state explicitly says
-"This condition has persisted for a while" to mark sustained aggression: in that
-case, tighten safety by enabling ADAS aids (increase following distance, enable
-adaptive cruise control, lane keep assist or blind spot monitor, or apply the
-restrictive ADAS profile) alongside a calm-driving suggestion. Without that
-persistence statement, aggressive tension alone gets moderate advice (calm-driving
-or reduce-speed suggestion) and never a naming or shaming tone.
+Provide driving coaching, not wellbeing or music. Driving tension is a driving-style
+signal, not an inferred emotion. Never use a naming/shaming tone or suggest music.
+Changed facts identify the trigger. Supporting facts describe context, NOT changes.
+Apply the following driving-tension table literally; high AND very high qualify:
+- Changed facts reports high or very high driving tension WITHOUT "This condition
+    has persisted for a while" => initial advice, NOT silence and NOT ADAS:
+    urgency=medium, tone=calm, intervention_type=suggest, action=none,
+    suggestion_type=calm_driving, spoken_message="You're driving with high tension.
+    Try to relax and drive more smoothly."
+    This advice is REQUIRED even if stationary/parked and no hazards are present.
+    Persistence is NOT a prerequisite for advice; it is ONLY needed for escalation.
+- Changed facts reports high or very high driving tension WITH "This condition
+    has persisted for a while" => escalate to an ADAS action with a calm-driving
+    suggestion. Prior advice does not prevent escalation. Available aids: increase
+    following distance, adaptive cruise control, lane keep assist, blind spot monitor,
+    restrictive ADAS profile. Do not replace this action with advice alone.
+    Set intervention_type=act and provide a nonempty spoken_message acknowledging
+    the selected ADAS action in the first person as an action being initiated.
+    For apply_restrictive_adas_profile, for example: "I'm activating the restrictive
+    driver-assistance profile to help you drive more smoothly."
+    For increase_following_distance: "I'm increasing the following distance to
+    give you more space." Name only the selected action, not unselected aids or
+    invented settings. Do not claim completion before it is confirmed.
+    Do NOT say only "Please reduce your speed and increase following distance"
+    or ask the driver to manually perform the action the assistant is taking.
+    A brief calm-driving suggestion may follow, but must not replace the acknowledgement.
+- Changed facts reports only ADAS activation/settings, or says "No specific vehicle
+    fact changed." => SILENT, even with persistent very high tension in Supporting
+    facts. Do not move that tension into Changed facts or treat ADAS activation as
+    worsening tension. Do not acknowledge activation with another coaching message.
+Silent means urgency=none, intervention_type=none, action=none,
+suggestion_type=none, spoken_message=null.
+If supplied evidence says ADAS already addressed the same tension episode, do not
+repeat the action or return to initial advice for unchanged tension. Never invent
+previous interventions. Explicit worsening or a new episode after recovery may
+justify a fresh intervention. A new hazard in Changed facts always takes priority
+over these silence rules; assess it using the hazard rules below.
 Warn about a lane change with turn signal Off. An active signal with no manoeuvre
 requires explicit sustained duration before warning; a newly active signal is routine.
 Never replace the actual Left/Right/Both value with an example.
-Vehicle speed too high means >10 km/h above the detected limit: warn. High alone,
-optimal/low/too low and fluctuations alone remain silent. An ADAS target is not a
+Vehicle speed too high means >10 km/h above the detected limit: warn. Speed rated
+high alone, optimal/low/too low and speed fluctuations alone remain silent.
+These speed-only silence rules do NOT apply to high driving tension. An ADAS target is not a
 speed limit. Without reliable evidence, never invent a limit or unsafe speed.
 Warn when a door/trunk is open AND the vehicle is explicitly moving.
 Dangerous object detected + doors explicitly unlocked => warn and lock_doors;

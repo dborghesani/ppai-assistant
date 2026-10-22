@@ -615,6 +615,15 @@ def test_decision_router_treats_message_delivery_changes_as_domain_facts(key, fa
     }
 
 
+def test_message_prompt_explicitly_allows_delivery_after_occupancy_returns_to_one():
+    from agents.tasks.messages import TASK as MESSAGE_TASK
+
+    instructions = MESSAGE_TASK.instructions
+    assert "0 or 1 permits delivery; 2 or more blocks it." in instructions
+    assert "occupancy returning from 2 or more\npeople to 0 or 1" in instructions
+    assert "a republished pending count can trigger\nthis recovery decision" in instructions
+
+
 @pytest.mark.parametrize("choice", ["route", "skip"])
 @pytest.mark.parametrize("fact", [
     "Anger level is high.", "Disgust level is high.", "Fear level is high.",

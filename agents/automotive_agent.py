@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+import random
 import re
 import time
 from dataclasses import dataclass, field
@@ -8,7 +9,9 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import structlog
 from agents.tasks.decision import DecisionInput, NotificationDecision
-from agents.tasks.activity_recognition import ActivityRecognitionTask
+from agents.tasks.activity_recognition import (
+    ActivityRecognitionExternalTask, ActivityRecognitionInternalTask,
+)
 from agents.tasks import comfort, driving, meeting, messages, mood_music, vehicle_command, wellbeing, surroundings
 from agents.backends.crewai_backend import CrewAIBackend
 from agents.backends.decision_backend import DecisionBackend, KevBackend, LayaBackend
@@ -23,7 +26,7 @@ from config import PROJECT_ROOT, ConfigAssistant
 from crewai import LLM
 from data.events import CarEvent, EventName
 from openai import AsyncOpenAI
-from tools.driving_frame_capture import capture_frame as capture_video_frame, RecordingFrameCapture
+from tools.video_capture import VideoCapture, VideoFrames
 from managers.vehicle_manual_manager import VehicleManualManager
 from sim.friend_message_agent import FriendMessageAgent
 
@@ -87,7 +90,20 @@ class AutomotiveAgent:
             ResponseSource.VEHICLE_MANUAL: self.manual_response_context,
         }
         self.ollama_backend = OllamaBackend(opt, self.log_llm_usage)
-        self.activity_recognition_task = ActivityRecognitionTask(opt, self.ollama_backend)
+        self.activity_recognition_internal_task = ActivityRecognitionInternalTask(opt, self.ollama_backend)
+        self.activity_recognition_external_task = ActivityRecognitionExternalTask(opt, self.ollama_backend)
+        self.capture_sources = {
+            "internal": opt.internal_activity_source,
+            "external": opt.external_activity_source,
+            "scene": opt.scene_understanding_source,
+        }
+        if any(source not in {"camera_stream", "video_file"} for source in self.capture_sources.values()):
+            raise ValueError("Capture sources must be camera_stream or video_file")
+        self.video_capture = VideoCapture(
+            PROJECT_ROOT / "recordings",
+            sample_rate_hz=opt.activity_capture_frequency_hz,
+            buffer_capacity=opt.activity_capture_frame_count,
+        )
         self.voice_llm = self.ollama_backend.client
         self.knowledge_facts_provider: Callable[[], dict[str, str]] = lambda: {}
 
@@ -127,12 +143,9 @@ class AutomotiveAgent:
             registered_actions=self.action_manager.registered_actions,
         )
         self.driving_frame_provider: Callable[[], Awaitable[dict | None]] = async_no_driving_frame
-        self.frame_capture = RecordingFrameCapture(
-            PROJECT_ROOT / Path(opt.driving_video).parent
-        )
         self.surroundings_task = surroundings.SurroundingsTask(
             opt, self.log_llm_usage, backend=self.ollama_backend, speak=self.speak,
-            frame_provider=self._describe_frame, set_status=self.set_assistant_status,
+            frame_provider=self._describe_frames, set_status=self.set_assistant_status,
         )
         def build_decision_backend(model: str | None) -> DecisionBackend:
             if opt.decision_model == "kev":
@@ -175,22 +188,37 @@ class AutomotiveAgent:
         if self.on_music_update is not None:
             self.on_music_update(value)
 
-    async def _describe_frame(self) -> "surroundings.SceneFrame | None":
+    async def _describe_frames(self) -> VideoFrames | None:
         try:
-            capture = await self.driving_frame_provider()
-            if not capture:
-                return None
-            frame = await capture_video_frame(
-                self.frame_capture, capture.get("video_path"), capture.get("seconds"),
-            )
-            if frame is None:
-                return None
-            return surroundings.SceneFrame(
-                image_base64=frame.image_base64, source=frame.source,
-            )
+            source = self.capture_sources["scene"]
+            start_seconds = 0.0
+            video_path = None
+            if source == "video_file":
+                capture = await self.driving_frame_provider()
+                requested_path = capture.get("video_path") if capture else None
+                video_path = self.video_capture.resolve_recording(
+                    requested_path, self.opt.driving_video,
+                )
+                if video_path is None:
+                    return None
+                start_seconds = float(capture.get("seconds") or 0.0) if capture else 0.0
+            self.video_capture.start_buffer("scene", source, video_path, start_seconds)
+            return await self.video_capture.get_buffer_frames("scene")
         except Exception as error:
             self.logger.warning("Driving frame provider failed", error=str(error))
             return None
+
+    def activity_recordings(self, scope: str) -> list[Path]:
+        if scope not in {"internal", "external"}:
+            raise ValueError("Activity scope must be internal or external")
+        prefixes = {"internal": "activity_intl_", "external": "activity_ext_"}
+        if not self.video_capture.recordings_dir.is_dir():
+            return []
+        return sorted(
+            path for path in self.video_capture.recordings_dir.iterdir()
+            if path.is_file() and path.name.startswith(prefixes[scope])
+            and path.suffix.lower() in self.video_capture.VIDEO_EXTENSIONS
+        )
 
     @property
     def music_task(self) -> mood_music.MoodMusicTask:

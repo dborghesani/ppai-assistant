@@ -66,6 +66,11 @@ class ConfigAssistant:
     # Driving simulation: local recording shown in the Web UI (Scenarios tab).
     # Path relative to the project root; an extension is appended when missing.
     driving_video: str = "recordings/rome.mp4"
+    internal_activity_source: str = "camera_stream"
+    external_activity_source: str = "video_file"
+    scene_understanding_source: str = "video_file"
+    activity_capture_frequency_hz: float = 2.0
+    activity_capture_frame_count: int = 6
 
     # MQTT broker configuration
     mqtt_enabled: bool = False

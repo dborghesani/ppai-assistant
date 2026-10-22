@@ -323,6 +323,12 @@ class DriverPhysicalState:
     )  # [0.0, 1.0]
 
 
+@dataclass
+class VehicleSecurityState:
+    sentry_mode_enabled: bool | None = knowledge_field(default=False)
+    activity: str | None = knowledge_field(default=None)
+
+
 DEFAULT_MUSIC_PREFERENCE = (
     "I enjoy 1970s rock, Radiohead, Zero 7 and classical music. "
     "When happy, choose warm, upbeat 1970s-style rock. When sad or reflective, "

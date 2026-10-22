@@ -9,7 +9,9 @@ from unittest.mock import Mock
 import pytest
 import structlog
 from data.agents_dataclasses import ActionType, SkillType
-from data.assistant_dataclasses import DetectedObjects, DriverPreferences, VehicleState
+from data.assistant_dataclasses import (
+    DetectedObjects, DriverPreferences, VehicleSecurityState, VehicleState,
+)
 from managers.database_manager import DatabaseManager
 from managers.action_manager import ActionManager
 from managers.knowledge_manager import KnowledgeManager
@@ -23,6 +25,7 @@ class FakeDatabase:
             "VehicleState": state or VehicleState(),
             "DetectedObjects": DetectedObjects(),
             "DriverPreferences": DriverPreferences(),
+            "VehicleSecurityState": VehicleSecurityState(),
         }
         self.writes: list[tuple[str, str, Any]] = []
 
@@ -208,6 +211,17 @@ def test_restrictive_adas_profile_updates_simulated_controls():
     assert state.adaptive_cruise_control_on is True
     assert state.lane_keep_assist_enabled is True
     assert state.blind_spot_monitor is True
+
+
+def test_enable_sentry_mode_updates_vehicle_security_state():
+    bridge = make_bridge()
+
+    bridge.apply_vehicle_action(ActionType.ENABLE_SENTRY_MODE, {})
+
+    assert bridge.database_manager.current_state["VehicleSecurityState"].sentry_mode_enabled is True
+    assert bridge.database_manager.writes == [
+        ("VehicleSecurityState", "sentry_mode_enabled", True),
+    ]
 
 
 def test_vehicle_state_snapshot_fills_unreported_fields_from_defaults():

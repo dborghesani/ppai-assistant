@@ -11,12 +11,16 @@ TASK = DecisionTask(
     context_fields=(
         "DriverPhysicalState", "DetectedObjects.children_inside",
         "DetectedObjects.people_inside", "DetectedObjects.animal_inside",
+        "VehicleSecurityState.sentry_mode_enabled",
         "VehicleMotion.speed", "VehicleMotion.moving", "VehicleState.adas_target_speed",
         "VehicleState.following_distance_level", "VehicleState.adaptive_cruise_control_on",
         "VehicleState.lane_keep_assist_enabled", "VehicleState.blind_spot_monitor",
         "EnvironmentState.traffic", "EnvironmentState.time_of_day",
     ),
-    actions=(ActionType.NONE, ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE),
+    actions=(
+        ActionType.NONE, ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE,
+        ActionType.ENABLE_SENTRY_MODE,
+    ),
     suggestions=(
         SuggestionType.NONE, SuggestionType.TAKE_BREAK,
         SuggestionType.RESTORE_ATTENTION, SuggestionType.REDUCE_DISTRACTION,
@@ -34,6 +38,14 @@ Other explicitly distracting activities, such as eating, justify a concise warni
 when relevant to driving, not automatic ADAS. Idle/normal activity remains silent.
 Children out of place => calm high-priority warning to ensure supervision and that
 they are clear of the vehicle before moving; if moving, advise a stop only when safe.
+Children or animals unattended inside the vehicle => high-priority warning to check
+on them promptly. Do not claim a particular cause or outcome.
+When CHANGED facts indicate that the cabin is empty (the detected occupant count is
+zero), and Supporting facts show sentry mode is off, enable sentry mode silently:
+urgency=low, intervention_type=act, action=enable_sentry_mode, suggestion_type=none,
+spoken_message=null. Trigger this only when the changed information establishes zero
+occupants; an isolated sentry-mode change, unknown occupancy, or any detected person
+must not activate it.
 Do not invent their location or immediate danger. Mere child/animal presence is not
 a hazard. Normal attention and low fatigue do not require a wellbeing announcement.
 The simulated ADAS profile lowers target speed, increases following distance and

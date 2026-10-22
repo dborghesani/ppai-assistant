@@ -1998,6 +1998,16 @@ def test_wellbeing_owns_activities_but_does_not_read_emotions_or_preferences():
     }
 
 
+def test_wellbeing_can_enable_sentry_when_changed_occupancy_reaches_zero():
+    from agents.tasks.wellbeing import TASK
+    from data.agents_dataclasses import ActionType
+
+    assert ActionType.ENABLE_SENTRY_MODE in TASK.actions
+    assert "the cabin is empty (the detected occupant count is" in TASK.instructions
+    assert "Supporting facts show sentry mode is off" in TASK.instructions
+    assert "an isolated sentry-mode change" in TASK.instructions
+
+
 def test_mood_task_cannot_apply_adas_or_read_fatigue():
     from agents.tasks.mood_music import TASK
     from data.agents_dataclasses import ActionType

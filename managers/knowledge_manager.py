@@ -108,6 +108,9 @@ class KnowledgeManager:
         ("VehicleState", "privacy_mode"): lambda value: (
             "Privacy mode is on." if value else "Privacy mode is off."
         ),
+        ("VehicleSecurityState", "sentry_mode_enabled"): lambda value: (
+            "Vehicle sentry mode is enabled." if value else "Vehicle sentry mode is disabled."
+        ),
         ("DetectedObjects", "animal_inside"): lambda value: (
             "An animal (dog or cat) is detected inside the vehicle."
             if value
@@ -202,6 +205,15 @@ class KnowledgeManager:
         ("DriverPhysicalState", "activity"): lambda value: {
             "Idle": "No distracting driver activity is detected.",
             "No activity detected": "No monitored activity is currently detected inside the vehicle.",
+            "driver_about_to_exit": "The driver is about to exit the vehicle.",
+            "driver_driving": "Normal driving activity is detected.",
+            "driver_talking": "The driver is talking, which may distract from driving.",
+            "driver_eating": "The driver is eating, which distracts from driving.",
+            "driver_on_the_phone": "The driver is using a phone, which seriously distracts from driving.",
+            "driver_sleeping": "The driver appears to be asleep and unable to drive safely.",
+            "children_out_of_place": "Children are outside their seating positions inside the vehicle.",
+            "children_unattended": "Children are unattended inside the vehicle.",
+            "animal_unattended": "An animal is unattended inside the vehicle.",
             "About to exit": "The driver is about to exit the vehicle.",
             "Driving": "Normal driving activity is detected.",
             "Talking": "The driver is talking, which may distract from driving.",
@@ -210,6 +222,14 @@ class KnowledgeManager:
             "Sleeping": "The driver appears to be asleep and unable to drive safely.",
             "Children out of place": "Children are outside their seating positions inside the vehicle.",
         }.get(value, f"The driver's current activity is {value}."),
+        ("VehicleSecurityState", "activity"): lambda value: {
+            "No activity detected": "No external vehicle activity is currently detected.",
+            "vehicle_impact": "An impact against the vehicle has been detected.",
+            "vandalism": "Vandalism against the vehicle has been detected.",
+            "break_in_attempt": "An attempt to break into the vehicle has been detected.",
+            "intrusion": "An intrusion into the vehicle has been detected.",
+            "Unknown": "External vehicle activity could not be determined.",
+        }.get(value, f"External vehicle activity is {value}."),
         ("EnvironmentState", "forecast_weather"): lambda value: {
             "Sunny": "The weather forecast predicts sunny conditions.",
             "Cloudy": "The weather forecast predicts cloudy conditions.",

@@ -25,6 +25,10 @@ class WebUIServer:
         "startDrivingSimulation",
         "stopDrivingSimulation",
         "reportDrivingVideoTime",
+        "startActivityVideo",
+        "stopActivityVideo",
+        "waitCaptureBufferReady",
+        "setCaptureSource",
         "intChanged",
         "minimumUrgencyChanged",
         "musicControl",
@@ -62,6 +66,9 @@ class WebUIServer:
         recordings_dir = PROJECT_ROOT / Path(driving_video).parent
         recordings_dir.mkdir(parents=True, exist_ok=True)
         self._app.router.add_static("/recordings", recordings_dir)
+        video_capture = getattr(getattr(bridge, "agent", None), "video_capture", None)
+        activity_recordings_dir = getattr(video_capture, "recordings_dir", PROJECT_ROOT / "recordings")
+        self._app.router.add_static("/activity-recordings", activity_recordings_dir)
 
         for event_name in (
             "responseReceived",
@@ -86,11 +93,15 @@ class WebUIServer:
             "drivingVideoCaptureRequested",
             "activityDetectionChanged",
             "driverPhysicalStateChanged",
+            "vehicleSecurityStateChanged",
+            "captureSourcesChanged",
+            "activityVideoStateChanged",
         ):
             bridge.on(
                 event_name,
                 lambda *args, name=event_name: self._queue_broadcast(name, *args),
             )
+        self.bridge.on("waitCaptureBufferReady", self._queue_broadcast)
 
     @property
     def url(self) -> str:
@@ -138,6 +149,10 @@ class WebUIServer:
         socket = web.WebSocketResponse(heartbeat=20)
         await socket.prepare(request)
         self._clients.add(socket)
+        activity_detection_task = getattr(self.bridge, "_activity_detection_task", None)
+        activity_detection_busy = (
+            activity_detection_task is not None and not activity_detection_task.done()
+        )
         await socket.send_json(
             {
                 "event": "ready",
@@ -145,11 +160,22 @@ class WebUIServer:
                     "knowledge": self.bridge.dumpKnowledgeData(),
                     "vehicleState": self.bridge.dumpVehicleState(),
                     "driverPhysicalState": getattr(self.bridge, "dumpDriverPhysicalState", lambda: {})(),
-                    "activityDetectionBusy": bool(
-                        getattr(self.bridge, "_activity_detection_task", None) is not None
-                        and not self.bridge._activity_detection_task.done()
-                    ),
+                    "activityDetectionBusy": activity_detection_busy,
                     "detectedObjectsState": self.bridge.dumpDetectedObjectsState(),
+                    "vehicleSecurityState": getattr(
+                        self.bridge, "dumpVehicleSecurityState", lambda: {
+                            "sentry_mode_enabled": False,
+                            "activity": "No activity detected",
+                        },
+                    )(),
+                    "captureSources": getattr(self.bridge, "dumpCaptureSources", lambda: {
+                        "internal": "camera_stream",
+                        "external": "video_file",
+                        "scene": "video_file",
+                    })(),
+                    "activityRecordings": getattr(self.bridge, "dumpActivityRecordings", lambda: {
+                        "internal": [], "external": [],
+                    })(),
                     "driverPreferences": self.bridge.dumpDriverPreferences(),
                     "driverAgendaState": getattr(self.bridge, "dumpDriverAgendaState", lambda: {
                         "meeting_status": "none", "meeting_timing": "none",

@@ -1,6 +1,8 @@
 import sys
 import unittest
 from collections import defaultdict
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
@@ -47,6 +49,25 @@ class FakeBridge:
             "people_inside": 1,
         }
 
+    def dumpVehicleSecurityState(self) -> dict:
+        return {
+            "sentry_mode_enabled": False,
+            "activity": "No activity detected",
+        }
+
+    def dumpCaptureSources(self) -> dict:
+        return {
+            "internal": "camera_stream",
+            "external": "video_file",
+            "scene": "video_file",
+        }
+
+    def dumpActivityRecordings(self) -> dict:
+        return {
+            "internal": ["activity_intl_driver_eating.mp4"],
+            "external": ["activity_ext_vandalism.mp4"],
+        }
+
     def dumpDriverPreferences(self) -> dict:
         return self.driver_preferences
 
@@ -88,6 +109,27 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
 
         app_response = await self.client.get("/static/app.js")
         app_script = await app_response.text()
+        index_response = await self.client.get("/")
+        index_html = await index_response.text()
+        self.assertIn('data-tab="activities"', index_html)
+        self.assertIn('data-tab="scenario"', index_html)
+        self.assertIn('"driver_eating"', app_script)
+        self.assertIn('"children_unattended"', app_script)
+        self.assertIn('"animal_unattended"', app_script)
+        self.assertIn('title: "Vehicle security", type: "toggles", cls: "VehicleSecurityState"', app_script)
+        self.assertIn('["Sentry mode", "sentry_mode_enabled", false, "On", "Off"]', app_script)
+        self.assertIn('data-capture-scope="${group.scope}"', app_script)
+        self.assertIn('type: "captureSource", scope: "scene"', app_script)
+        self.assertIn('buttonLabel = group.scope === "external" ? "Bump" : "Detect"', app_script)
+        self.assertIn("let activityDetectionBusy = { internal: false, external: false };", app_script)
+        self.assertIn("const buttonBusy = Boolean(activityDetectionBusy[buttonScope]);", app_script)
+        self.assertIn('.activity-detect-button[aria-pressed="true"]:disabled', (await (await self.client.get("/static/style.css")).text()))
+        self.assertNotIn("getUserMedia", app_script)
+        self.assertIn("const CHANGED_EVENT_VISIBLE_MS = 5000;", app_script)
+        self.assertIn('empty.textContent = "No recent changes";', app_script)
+        self.assertIn("video[data-activity-video]", app_script)
+        self.assertIn('bridge.call("startActivityVideo"', app_script)
+        self.assertIn('bridge.call("stopActivityVideo"', app_script)
         self.assertIn(
             '["People inside", "people_inside", 0, 5, 1, 1, "integer"]',
             app_script,
@@ -116,6 +158,28 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(
+            ready["data"]["vehicleSecurityState"],
+            {
+                "sentry_mode_enabled": False,
+                "activity": "No activity detected",
+            },
+        )
+        self.assertEqual(
+            ready["data"]["captureSources"],
+            {
+                "internal": "camera_stream",
+                "external": "video_file",
+                "scene": "video_file",
+            },
+        )
+        self.assertEqual(
+            ready["data"]["activityRecordings"],
+            {
+                "internal": ["activity_intl_driver_eating.mp4"],
+                "external": ["activity_ext_vandalism.mp4"],
+            },
+        )
+        self.assertEqual(
             ready["data"]["driverPreferences"],
             {"preferred_cabin_temperature": None, "preferred_music": ""},
         )
@@ -129,6 +193,24 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["id"], 1)
         self.assertIn("VehicleState", response["result"])
         await socket.close()
+
+    async def test_activity_recordings_are_served_from_capture_directory(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            recording = Path(temporary_directory) / "activity_intl_driver_eating.mp4"
+            recording.write_bytes(b"activity video")
+            bridge = FakeBridge()
+            bridge.agent = SimpleNamespace(video_capture=SimpleNamespace(
+                recordings_dir=Path(temporary_directory),
+            ))
+            server = WebUIServer(bridge)
+            client = TestClient(TestServer(server._app))
+            await client.start_server()
+            try:
+                response = await client.get("/activity-recordings/activity_intl_driver_eating.mp4")
+                self.assertEqual(response.status, 200)
+                self.assertEqual(await response.read(), b"activity video")
+            finally:
+                await client.close()
 
     async def test_websocket_ready_restores_blocked_messages_status(self) -> None:
         self.web_ui.bridge.dumpAssistantStatus = lambda: {

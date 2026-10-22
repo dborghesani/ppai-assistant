@@ -44,13 +44,14 @@
     <main class="dashboard">
       <aside class="control-panel" aria-label="Demo telemetry controls">
         <div class="panel-heading">
-          <div><span class="eyebrow">DEMO INPUTS</span><h2>Vehicle context</h2></div>
+          <div><h2 class="panel-title">Vehicle context</h2></div>
           <button id="reset-controls" class="icon-button" type="button" title="Reset controls" aria-label="Reset controls">&#8634;</button>
         </div>
         <div class="tabs" role="tablist" aria-label="Context categories">
           <button class="tab active" data-tab="driver" role="tab" aria-selected="true">Driver</button>
           <button class="tab" data-tab="road" role="tab" aria-selected="false">Road</button>
           <button class="tab" data-tab="vehicle" role="tab" aria-selected="false">Vehicle</button>
+          <button class="tab" data-tab="activities" role="tab" aria-selected="false">Activities</button>
           <button class="tab" data-tab="scenario" role="tab" aria-selected="false">Scenarios</button>
         </div>
         <div id="control-content" class="control-content"></div>
@@ -59,8 +60,7 @@
       <section class="assistant-panel" aria-label="Assistant conversation">
         <div class="assistant-header">
           <div>
-            <span class="eyebrow">IN-CAR COPILOT</span>
-            <h1>How can I help?</h1>
+            <h1 class="panel-title">How can I help?</h1>
           </div>
           <div class="assistant-header-actions">
             <button id="clear-conversation" class="icon-button" type="button" title="Clear conversation" aria-label="Clear conversation" disabled>&#8634;</button>
@@ -69,15 +69,6 @@
         </div>
 
         <div id="conversation" class="conversation" aria-live="polite">
-          <div class="welcome-state" id="welcome-state">
-            <div class="voice-rings"><span></span><span></span><span></span></div>
-            <p>Ask about your route, comfort, vehicle, or what is happening around you.</p>
-            <div class="suggestions">
-              <button type="button">How am I doing?</button>
-              <button type="button">Summarize the drive</button>
-              <button type="button">Is everything safe?</button>
-            </div>
-          </div>
         </div>
 
         <section id="music-panel" class="music-panel" aria-label="Music" hidden>
@@ -107,10 +98,10 @@
 
       <aside class="knowledge-panel" aria-label="Live vehicle knowledge">
         <div class="panel-heading">
-          <div><span class="eyebrow">LIVE CONTEXT</span><h2>What the car knows</h2></div>
+          <div><h2 class="panel-title">What the car knows</h2></div>
           <span class="live-pill"><i></i> Live</span>
         </div>
-        <section class="changed-context" aria-labelledby="changed-context-heading">
+        <section class="changed-context knowledge-group" aria-labelledby="changed-context-heading">
           <h3 id="changed-context-heading">What changed</h3>
           <div id="changed-events" class="changed-events" aria-live="polite">
             <p class="changed-empty">No recent changes</p>

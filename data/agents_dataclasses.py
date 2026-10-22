@@ -1,15 +1,25 @@
 from enum import Enum
 
 
-class ActivityType(str, Enum):
+class ActivityTypeInternal(str, Enum):
     NONE = "No activity detected"
-    TALKING = "Talking"
-    DRIVING = "Driving"
-    EATING = "Eating"
-    ON_THE_PHONE = "On the phone"
-    SLEEPING = "Sleeping"
-    ABOUT_TO_EXIT = "About to exit"
-    CHILDREN_OUT_OF_PLACE = "Children out of place"
+    DRIVER_TALKING = "driver_talking"
+    DRIVER_DRIVING = "driver_driving"
+    DRIVER_EATING = "driver_eating"
+    DRIVER_ON_THE_PHONE = "driver_on_the_phone"
+    DRIVER_SLEEPING = "driver_sleeping"
+    DRIVER_ABOUT_TO_EXIT = "driver_about_to_exit"
+    CHILDREN_OUT_OF_PLACE = "children_out_of_place"
+    CHILDREN_UNATTENDED = "children_unattended"
+    ANIMAL_UNATTENDED = "animal_unattended"
+    UNKNOWN = "Unknown"
+
+class ActivityTypeExternal(str, Enum):
+    NONE = "No activity detected"
+    VEHICLE_IMPACT = "vehicle_impact"
+    VANDALISM = "vandalism"
+    BREAK_IN_ATTEMPT = "break_in_attempt"
+    INTRUSION = "intrusion"
     UNKNOWN = "Unknown"
 
 
@@ -53,6 +63,7 @@ class ToneType(str, Enum):
 
 class ActionType(str, Enum):
     NONE = "none"
+    ENABLE_SENTRY_MODE = "enable_sentry_mode"
     ENABLE_HEATING = "enable_heating"
     DISABLE_HEATING = "disable_heating"
     OPEN_WINDOWS = "open_windows"
@@ -111,6 +122,7 @@ class ActionType(str, Enum):
     def description(self) -> str:
         return {
             ActionType.NONE: "No direct action.",
+            ActionType.ENABLE_SENTRY_MODE: "enable the simulated vehicle sentry mode while the vehicle is unoccupied",
             ActionType.ENABLE_HEATING: "enable cabin heating",
             ActionType.DISABLE_HEATING: "disable cabin heating",
             ActionType.OPEN_WINDOWS: "open the windows",

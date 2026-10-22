@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import random
 import time
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
@@ -8,10 +9,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, DefaultDict, Tuple
 
 import structlog
-from data.agents_dataclasses import ActionType, ActivityType
+from data.agents_dataclasses import ActionType, ActivityTypeExternal, ActivityTypeInternal
+from agents.tasks.activity_recognition import ActivityDetectionExternal, ActivityDetectionInternal
 from agents.automotive_agent import AutomotiveAgent
 from config import ConfigAssistant
-from data.assistant_dataclasses import DetectedObjects, DriverAgenda, DriverPreferences, VehicleState
+from data.assistant_dataclasses import (
+    DetectedObjects, DriverAgenda, DriverPreferences, VehicleSecurityState, VehicleState,
+)
 from managers.database_manager import DatabaseManager
 from managers.mqtt_thread import MqttThreadClient
 from data.events import CarEvent, EventName
@@ -74,6 +78,11 @@ class VehicleBridge:
         self._driving_capture_event: asyncio.Event | None = None
         self._last_driving_time: dict | None = None
         self._activity_detection_task: asyncio.Task | None = None
+        if self.agent.capture_sources.get("internal") == "camera_stream":
+            try:
+                self.agent.video_capture.start_buffer("internal", "camera_stream")
+            except Exception as error:
+                self.logger.warning("Could not start internal camera buffer", error=str(error))
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:
@@ -99,6 +108,10 @@ class VehicleBridge:
     def apply_vehicle_action(
         self, action_type: ActionType, parameters: dict[str, Any]
     ) -> None:
+        if action_type is ActionType.ENABLE_SENTRY_MODE:
+            self.database_manager.write_measure("VehicleSecurityState", "sentry_mode_enabled", True)
+            self._emit("vehicleSecurityStateChanged", {"sentry_mode_enabled": True})
+            return
         window_fields = (
             "window_open_front_left",
             "window_open_front_right",
@@ -247,6 +260,7 @@ class VehicleBridge:
 
     def close(self) -> None:
         """Release audio and thread-backed resources before the event loop closes."""
+        self.agent.video_capture.close()
         self.agent.action_manager.close()
         self.agent.cancel_message_tasks()
         if self.stt_manager is not None:
@@ -287,7 +301,7 @@ class VehicleBridge:
 
     def _resolve_recording(self, requested: str | None) -> Path | None:
         """Map a bare name, file name or path to an existing recording file."""
-        return self.agent.frame_capture.resolve_recording(requested, self.opt.driving_video)
+        return self.agent.video_capture.resolve_recording(requested, self.opt.driving_video)
 
     @property
     def recordings_dir(self) -> Path:
@@ -305,7 +319,8 @@ class VehicleBridge:
     async def capture_driving_frame(self) -> dict | None:
         """Ask the Web UI for the current recording and playback time."""
         if not self._driving_video_path:
-            return None
+            path = self._resolve_recording(None)
+            return {"video_path": str(path), "seconds": 0.0} if path is not None else None
         self._driving_capture_result = None
         self._driving_capture_event = asyncio.Event()
         self._emit("drivingVideoCaptureRequested", {})
@@ -313,7 +328,7 @@ class VehicleBridge:
             await asyncio.wait_for(self._driving_capture_event.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             self.logger.warning("Driving video capture time not reported by the UI")
-        result = self._driving_capture_result or {}
+        result: dict[str, Any] = self._driving_capture_result or {}
         fallback = self._last_driving_time or {}
         seconds = result.get("seconds")
         if seconds is None:
@@ -564,12 +579,22 @@ class VehicleBridge:
 
     def stringChanged(self, classname, varname, value):
         if (classname, varname) == ("DriverPhysicalState", "activity"):
-            activity = ActivityType.NONE if value == "Idle" else ActivityType(value)
-            if activity is ActivityType.UNKNOWN:
+            activity = ActivityTypeInternal.NONE if value == "Idle" else ActivityTypeInternal(value)
+            if activity is ActivityTypeInternal.UNKNOWN:
                 raise ValueError("Unknown is not a manual activity")
             self.send_event("DriverPhysicalState.activity", activity.value)
             if self.agent.is_listening:
                 self._emit("driverPhysicalStateChanged", {"activity": activity.value})
+            return
+        if (classname, varname) == ("VehicleSecurityState", "activity"):
+            activity = ActivityTypeExternal(value)
+            if activity is ActivityTypeExternal.UNKNOWN:
+                raise ValueError("Unknown is not a manual external activity")
+            if activity is not ActivityTypeExternal.NONE and not self.dumpVehicleSecurityState()["sentry_mode_enabled"]:
+                raise ValueError("Enable sentry mode before setting an external activity")
+            self.send_event("VehicleSecurityState.activity", activity.value)
+            if self.agent.is_listening:
+                self._emit("vehicleSecurityStateChanged", {"activity": activity.value})
             return
         if classname == "DriverAgenda":
             allowed = {
@@ -586,38 +611,135 @@ class VehicleBridge:
         if classname == "DriverAgenda":
             return value
 
-    def detectActivity(self, frames: list[dict]) -> bool:
+    def detectActivity(self, scope: str = "internal") -> bool:
         if self._activity_detection_task is not None and not self._activity_detection_task.done():
             raise ValueError("Activity detection is already running")
-        if not isinstance(frames, list) or not 2 <= len(frames) <= 8:
-            raise ValueError("Provide 2 to 8 camera frames")
-        self._activity_detection_task = asyncio.create_task(self._detect_activity(frames))
+        if scope not in {"internal", "external"}:
+            raise ValueError("Activity scope must be internal or external")
+        if scope == "external" and not self.dumpVehicleSecurityState()["sentry_mode_enabled"]:
+            raise ValueError("Enable sentry mode before external activity detection")
+        self._activity_detection_task = asyncio.create_task(self._detect_activity(scope))
         return True
 
-    async def _detect_activity(self, frames: list[dict]) -> None:
-        self._emit("activityDetectionChanged", {"busy": True})
+    async def _detect_activity(self, scope: str = "internal") -> None:
+        self._emit("activityDetectionChanged", {"busy": True, "scope": scope})
         try:
-            result = await asyncio.wait_for(
-                self.agent.activity_recognition_task.detect(frames), timeout=90,
-            )
-            if result.activity is not ActivityType.UNKNOWN:
-                self.database_manager.write_measure("DriverPhysicalState", "activity", result.activity.value)
-                self._emit("driverPhysicalStateChanged", {"activity": result.activity.value})
-            self.logger.info("Cabin activity detected", **result.model_dump(mode="json"))
-            self._emit("activityDetectionChanged", {"busy": False, **result.model_dump(mode="json")})
+            source_name = self.agent.capture_sources[scope]
+            active_source = self.agent.video_capture.buffer_source(scope)
+            video_path = active_source[1] if active_source and active_source[0] == source_name else None
+            if source_name == "video_file" and video_path is None:
+                raise RuntimeError("Select and start an activity video before detection")
+            source = self.agent.video_capture.start_buffer(scope, source_name, video_path)
+            frames = await self.agent.video_capture.get_buffer_frames(scope)
+            self._emit("activityDetectionChanged", {
+                "busy": True, "scope": scope, "source": source,
+            })
+            if scope == "internal":
+                result: ActivityDetectionInternal | ActivityDetectionExternal = await asyncio.wait_for(
+                    self.agent.activity_recognition_internal_task.detect(frames), timeout=90,
+                )
+            else:
+                result = await asyncio.wait_for(
+                    self.agent.activity_recognition_external_task.detect(frames), timeout=90,
+                )
+            unknown = ActivityTypeInternal.UNKNOWN if scope == "internal" else ActivityTypeExternal.UNKNOWN
+            if result.activity is not unknown:
+                classname = "DriverPhysicalState" if scope == "internal" else "VehicleSecurityState"
+                self.database_manager.write_measure(classname, "activity", result.activity.value)
+                event_name = "driverPhysicalStateChanged" if scope == "internal" else "vehicleSecurityStateChanged"
+                self._emit(event_name, {"activity": result.activity.value})
+            self.logger.info("Vehicle activity detected", scope=scope, source=source, **result.model_dump(mode="json"))
+            self._emit("activityDetectionChanged", {
+                "busy": False, "scope": scope, "source": source,
+                **result.model_dump(mode="json"),
+            })
         except asyncio.CancelledError:
-            self._emit("activityDetectionChanged", {"busy": False})
+            self._emit("activityDetectionChanged", {"busy": False, "scope": scope})
             raise
         except Exception as error:
-            self.logger.warning("Cabin activity detection failed", error=str(error))
-            self._emit("activityDetectionChanged", {"busy": False, "error": "Activity detection failed"})
+            self.logger.warning("Vehicle activity detection failed", scope=scope, error=str(error))
+            self._emit("activityDetectionChanged", {"busy": False, "scope": scope, "error": "Activity detection failed"})
 
     def dumpDriverPhysicalState(self) -> dict[str, Any]:
         state = self.database_manager.current_state.get("DriverPhysicalState")
         return {"activity": getattr(state, "activity", None)}
 
     def boolChanged(self, classname, varname, value):
+        if classname == "VehicleSecurityState":
+            if varname != "sentry_mode_enabled" or not isinstance(value, bool):
+                raise ValueError("Invalid vehicle security state")
         self.send_event(f"{classname}.{varname}", value)
+        state_updates = {varname: value}
+        if classname == "VehicleSecurityState" and varname == "sentry_mode_enabled" and not value:
+            activity = ActivityTypeExternal.NONE.value
+            self.send_event("VehicleSecurityState.activity", activity)
+            state_updates["activity"] = activity
+            self.agent.video_capture.stop_buffer("external")
+            self._emit("activityVideoStateChanged", {"scope": "external", "active": False})
+        elif (classname == "VehicleSecurityState" and varname == "sentry_mode_enabled"
+              and value and self.agent.capture_sources.get("external") == "camera_stream"):
+            self.agent.video_capture.start_buffer("external", "camera_stream")
+        if classname == "VehicleSecurityState" and self.agent.is_listening:
+            self._emit("vehicleSecurityStateChanged", state_updates)
+
+    def setCaptureSource(self, scope: str, source: str) -> str:
+        if scope not in self.agent.capture_sources or source not in {"camera_stream", "video_file"}:
+            raise ValueError("Invalid activity or scene capture source")
+        self.agent.capture_sources[scope] = source
+        self.agent.video_capture.stop_buffer(scope)
+        config_key = {
+            "internal": "internal_activity_source",
+            "external": "external_activity_source",
+            "scene": "scene_understanding_source",
+        }[scope]
+        setattr(self.opt, config_key, source)
+        if scope in {"internal", "external"} and source == "camera_stream":
+            if scope == "internal" or self.dumpVehicleSecurityState()["sentry_mode_enabled"]:
+                self.agent.video_capture.start_buffer(scope, source)
+        self._emit("captureSourcesChanged", self.dumpCaptureSources())
+        return source
+
+    def dumpCaptureSources(self) -> dict[str, str]:
+        return dict(self.agent.capture_sources)
+
+    def dumpActivityRecordings(self) -> dict[str, list[str]]:
+        return {
+            scope: [path.name for path in self.agent.activity_recordings(scope)]
+            for scope in ("internal", "external")
+        }
+
+    async def waitCaptureBufferReady(self, scope: str) -> bool:
+        if scope not in {"internal", "external"}:
+            raise ValueError("Activity scope must be internal or external")
+        if scope == "external" and not self.dumpVehicleSecurityState()["sentry_mode_enabled"]:
+            raise ValueError("Enable sentry mode before external activity capture")
+        await self.agent.video_capture.wait_buffer_ready(scope)
+        return True
+
+    async def startActivityVideo(self, scope: str, filename: str, seconds: float = 0.0) -> bool:
+        if scope not in {"internal", "external"}:
+            raise ValueError("Activity scope must be internal or external")
+        if self.agent.capture_sources[scope] != "video_file":
+            raise ValueError("Select video file as the activity source first")
+        if scope == "external" and not self.dumpVehicleSecurityState()["sentry_mode_enabled"]:
+            self.boolChanged("VehicleSecurityState", "sentry_mode_enabled", True)
+        recordings = {path.name: path for path in self.agent.activity_recordings(scope)}
+        video_path = recordings.get(filename)
+        if video_path is None:
+            raise ValueError("Video is not available for this activity scope")
+        self.agent.video_capture.start_buffer(scope, "video_file", video_path, seconds)
+        await self.agent.video_capture.wait_buffer_ready(scope)
+        self._emit("activityVideoStateChanged", {
+            "scope": scope, "active": True, "filename": filename,
+        })
+        return True
+
+    def stopActivityVideo(self, scope: str) -> bool:
+        if scope not in {"internal", "external"}:
+            raise ValueError("Activity scope must be internal or external")
+        self.agent.video_capture.stop_buffer(scope)
+        self._emit("activityVideoStateChanged", {"scope": scope, "active": False})
+        return True
 
     def _on_knowledge_updated(self) -> None:
         """Called synchronously by KnowledgeManager right after its context changes."""
@@ -673,13 +795,7 @@ class VehicleBridge:
         state = self.database_manager.current_state.get("VehicleState")
         values = asdict(VehicleState())
         if isinstance(state, VehicleState):
-            values.update(
-                {
-                    key: value
-                    for key, value in asdict(state).items()
-                    if value is not None
-                }
-            )
+            values.update({key: value for key, value in asdict(state).items() if value is not None})
         return values
 
     def dumpDriverAgendaState(self) -> dict[str, Any]:
@@ -700,4 +816,11 @@ class VehicleBridge:
                     if value is not None
                 }
             )
+        return values
+
+    def dumpVehicleSecurityState(self) -> dict[str, Any]:
+        state = self.database_manager.current_state.get("VehicleSecurityState")
+        values = asdict(VehicleSecurityState())
+        if isinstance(state, VehicleSecurityState):
+            values.update({key: value for key, value in asdict(state).items() if value is not None})
         return values

@@ -1,7 +1,6 @@
 const CONTROL_GROUPS = {
   driver: [
     { title: "Driver name", type: "text", cls: "DriverPreferences", key: "driver_name", value: "David", maxLength: 80 },
-    { title: "Activity", type: "activities", cls: "DriverPhysicalState", key: "activity", value: "", options: ["Talking", "Driving", "Eating", "On the phone", "Sleeping", "About to exit", "Children out of place"] },
     { title: "Emotion", type: "ranges", cls: "DriverEmotionState", controls: [
       ["Angry", "angry", 0, 1, 0, .01, "decimal"], ["Disgust", "disgust", 0, 1, 0, .01, "decimal"],
       ["Fear", "fear", 0, 1, 0, .01, "decimal"], ["Happy", "happy", 0, 1, 0, .01, "decimal"],
@@ -38,6 +37,9 @@ const CONTROL_GROUPS = {
       ["Rear left door", "door_open_rear_left", false, "Open", "Closed"], ["Rear right door", "door_open_rear_right", false, "Open", "Closed"],
       ["Trunk", "trunk_open", false, "Open", "Closed"], ["Navigation", "navigation_active", false, "Active", "Inactive"],
       ["Privacy mode", "privacy_mode", false, "On", "Off"]
+    ]},
+    { title: "Vehicle security", type: "toggles", cls: "VehicleSecurityState", controls: [
+      ["Sentry mode", "sentry_mode_enabled", false, "On", "Off"]
     ]},
     { title: "Windows & roof", type: "toggles", cls: "VehicleState", controls: [
       ["Front left window", "window_open_front_left", false, "Open", "Closed"], ["Front right window", "window_open_front_right", false, "Open", "Closed"],
@@ -92,18 +94,40 @@ const CONTROL_GROUPS = {
       ["Dogs or cats inside", "animal_inside", false, "Detected", "Not detected"]
     ]}
   ],
+  activities: [
+    { title: "Inside the vehicle", type: "activities", cls: "DriverPhysicalState", key: "activity", scope: "internal", value: "No activity detected", options: [
+      { label: "No activity detected", value: "No activity detected" },
+      { label: "Driver talking", value: "driver_talking" },
+      { label: "Driver driving", value: "driver_driving" },
+      { label: "Driver eating", value: "driver_eating" },
+      { label: "Driver on the phone", value: "driver_on_the_phone" },
+      { label: "Driver sleeping", value: "driver_sleeping" },
+      { label: "Driver about to exit", value: "driver_about_to_exit" },
+      { label: "Children out of place", value: "children_out_of_place" },
+      { label: "Children unattended", value: "children_unattended" },
+      { label: "Animal unattended", value: "animal_unattended" }
+    ] },
+    { title: "Outside the vehicle", type: "activities", cls: "VehicleSecurityState", key: "activity", scope: "external", value: "No activity detected", options: [
+      { label: "No activity detected", value: "No activity detected" },
+      { label: "Impact against vehicle", value: "vehicle_impact" },
+      { label: "Vandalism", value: "vandalism" },
+      { label: "Break-in attempt", value: "break_in_attempt" },
+      { label: "Intrusion", value: "intrusion" }
+    ] }
+  ],
   scenario: [
-    { title: "Demo scenarios", type: "scenarios", hint: "Choose a scenario to add context or start a message simulation.", controls: [
+    { type: "scenarios", controls: [
       { label: "Meeting", id: "meeting", description: "A work meeting about an autonomous parking system, covering product scope, architecture, safety and driver experience.", groups: [
-        { title: "Meeting phase", type: "meeting", cls: "DriverAgenda", keys: ["meeting_status", "meeting_timing"], controls: [
-          { label: "Prepare", status: "prepare" },
-          { label: "Late", timing: "late" },
-          { label: "Started", status: "started" }
+        { title: "", type: "meeting", cls: "DriverAgenda", keys: ["meeting_status", "meeting_timing"], controls: [
+          { label: "Meeting preparation", status: "prepare" },
+          { label: "I'm late", timing: "late" },
+          { label: "Meeting started", status: "started" }
         ]}
       ]},
       { label: "Messages from Luca", id: "friend_messages", description: "Luca sends occasional messages about mutual friends. Privacy mode queues them until you allow the assistant to read them.", simulation: "friend-messages" },
       { label: "Driving simulation video", id: "driving_video", description: "Play a YouTube driving video in the assistant panel; you can keep chatting while it runs.", simulation: "driving-video" }
-    ]}
+    ]},
+    { title: "Scene understanding source", type: "captureSource", scope: "scene" }
   ]
 };
 
@@ -161,73 +185,67 @@ class BridgeClient {
 const bridge = new BridgeClient();
 const controlContent = document.querySelector("#control-content");
 const conversation = document.querySelector("#conversation");
-const welcomeState = document.querySelector("#welcome-state");
 const input = document.querySelector("#message-input");
 const conversationButton = document.querySelector("#conversation-toggle");
 const clearConversationButton = document.querySelector("#clear-conversation");
 const duplicateSuppressionToggle = document.querySelector("#duplicate-suppression-toggle");
+let captureSources = {
+  internal: "camera_stream",
+  external: "video_file",
+  scene: "video_file",
+};
+let activityRecordings = { internal: [], external: [] };
+let selectedActivityVideos = { internal: "", external: "" };
+let activityVideoActive = { internal: false, external: false };
+let activityVideoStarting = { internal: false, external: false };
+let activityBufferReady = { internal: false, external: false };
 let activeTab = "driver";
 let activeScenario = null;
 let drivingSimulationActive = false;
 let drivingVideoReady = false;
 const DEFAULT_DRIVING_VIDEO_URL = "/recordings/rome.mp4";
 let drivingVideoUrl = DEFAULT_DRIVING_VIDEO_URL;
-let activityDetectionBusy = false;
+let activityDetectionBusy = { internal: false, external: false };
 
-function setActivityDetectionBusy(busy) {
-  activityDetectionBusy = busy;
-  const button = document.querySelector("#detect-activity");
-  if (button) {
-    button.disabled = busy;
-    button.setAttribute("aria-pressed", String(busy));
-    button.textContent = busy ? "Detecting..." : "Detect...";
-  }
+function setActivityDetectionBusy(scope, busy) {
+  if (scope) activityDetectionBusy[scope] = busy;
+  document.querySelectorAll(".activity-detect-button").forEach(button => {
+    const sentryEnabled = Boolean(controlState[controlStateKey("VehicleSecurityState", "sentry_mode_enabled")]);
+    const buttonScope = button.dataset.scope;
+    const buttonBusy = Boolean(activityDetectionBusy[buttonScope]);
+    button.disabled = buttonBusy || !activityBufferReady[buttonScope]
+      || (buttonScope === "external" && !sentryEnabled);
+    button.setAttribute("aria-pressed", String(buttonBusy));
+    button.textContent = buttonBusy ? "Detecting..." : buttonScope === "external" ? "Bump" : "Detect";
+  });
 }
 
-async function detectCabinActivity() {
-  if (activityDetectionBusy) return;
-  setActivityDetectionBusy(true);
-  let stream;
-  let video;
+function setActivityVideoActive(scope, active) {
+  activityVideoActive[scope] = active;
+  activityVideoStarting[scope] = false;
+  activityBufferReady[scope] = active;
+  setActivityDetectionBusy(scope, activityDetectionBusy[scope]);
+}
+
+async function detectCabinActivity(scope = "internal") {
+  if (activityDetectionBusy[scope]) return;
+  setActivityDetectionBusy(scope, true);
   try {
-    stream = await navigator.mediaDevices.getUserMedia({video: {width: 640, height: 480}, audio: false});
-    video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.srcObject = stream;
-    video.className = "cabin-camera-preview";
-    video.setAttribute("aria-label", "Cabin camera");
-    document.querySelector('[data-class="DriverPhysicalState"][data-key="activity"]')?.append(video);
-    await video.play();
-    if (!video.videoWidth || !video.videoHeight) throw new Error("Camera is not ready");
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.min(640, video.videoWidth);
-    canvas.height = Math.round(canvas.width * video.videoHeight / video.videoWidth);
-    const context = canvas.getContext("2d");
-    const frames = [];
-    const started = performance.now();
-    for (let index = 0; index < 6; index++) {
-      if (index) await new Promise(resolve => setTimeout(resolve, 500));
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      frames.push({image: canvas.toDataURL("image/jpeg", 0.65), seconds: (performance.now() - started) / 1000});
-    }
-    stream.getTracks().forEach(track => track.stop());
-    await bridge.call("detectActivity", frames);
+    await bridge.call("detectActivity", scope);
   } catch (error) {
-    showToast(error.message || "Camera unavailable");
-    setActivityDetectionBusy(false);
-  } finally {
-    stream?.getTracks().forEach(track => track.stop());
-    if (video) video.srcObject = null;
-    video?.remove();
+    showToast(error.message || "Activity detection failed");
+    setActivityDetectionBusy(scope, false);
   }
 }
 
 bridge.on("activityDetectionChanged", data => {
   const state = data[0];
-  setActivityDetectionBusy(state.busy);
+  setActivityDetectionBusy(state.scope, state.busy);
   if (state.error) showToast(state.error);
   else if (state.activity === "Unknown") showToast("Activity could not be determined");
+  else if (!state.busy && state.urgency && state.urgency !== "none") {
+    showToast(`Activity detected (${state.urgency})`);
+  }
 });
 bridge.on("driverPhysicalStateChanged", data => {
   rememberControlState("DriverPhysicalState", data[0]);
@@ -846,19 +864,44 @@ function renderMeetingChoices(group) {
     const payload = control.timing ? { timing: control.timing } : { status: control.status };
     return `<button type="button" data-meeting='${escapeHtml(JSON.stringify(payload))}' aria-pressed="${current}">${escapeHtml(control.label)}</button>`;
   }).join("");
-  return `<section class="control-section" data-type="meeting" data-class="${group.cls}"><h3>${group.title}</h3><div class="segmented" role="group" aria-label="${group.title}">${options}</div></section>`;
+  const heading = group.title ? `<h3>${escapeHtml(group.title)}</h3>` : "";
+  return `<section class="control-section" data-type="meeting" data-class="${group.cls}">${heading}<div class="segmented" role="group" aria-label="Meeting controls">${options}</div></section>`;
 }
 
 function renderControls(tabName) {
+  controlContent.dataset.tab = tabName;
   controlContent.innerHTML = CONTROL_GROUPS[tabName].map((group, groupIndex) => {
     if (group.type === "text") {
       const current = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
-      return `<section class="control-section" data-type="text" data-class="${group.cls}"><label class="preference-field" for="${tabName}-${group.key}"><span>${group.title}</span><input id="${tabName}-${group.key}" type="text" data-key="${group.key}" maxlength="${group.maxLength}" value="${escapeHtml(current)}" autocomplete="given-name"></label></section>`;
+      return `<section class="control-section" data-type="text" data-class="${group.cls}"><label class="preference-field" for="${tabName}-${group.key}"><span class="control-field-title">${group.title}</span><input id="${tabName}-${group.key}" type="text" data-key="${group.key}" maxlength="${group.maxLength}" value="${escapeHtml(current)}" autocomplete="given-name"></label></section>`;
     }
     if (group.type === "activities") {
-      const value = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
-      const options = group.options.map(option => `<label><input type="checkbox" value="${escapeHtml(option)}" ${value === option ? "checked" : ""}><span>${escapeHtml(option)}</span></label>`).join("");
-      return `<section class="control-section" data-type="activities" data-class="${group.cls}" data-key="${group.key}"><h3>${group.title}</h3><div class="segmented">${options}<button id="detect-activity" class="scenario-button" type="button" aria-pressed="${activityDetectionBusy}" ${activityDetectionBusy ? "disabled" : ""}>${activityDetectionBusy ? "Detecting..." : "Detect..."}</button></div></section>`;
+      const aliases = { "Talking": "driver_talking", "Driving": "driver_driving", "Eating": "driver_eating", "On the phone": "driver_on_the_phone", "Sleeping": "driver_sleeping", "About to exit": "driver_about_to_exit", "Children out of place": "children_out_of_place" };
+      const rawValue = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
+      const value = aliases[rawValue] || rawValue;
+      const options = group.options.map(option => {
+          const optionValue = typeof option === "string" ? option : option.value;
+        const label = typeof option === "string" ? option : option.label;
+          return `<label><input type="checkbox" value="${escapeHtml(optionValue)}" ${value === optionValue ? "checked" : ""}><span>${escapeHtml(label)}</span></label>`;
+      }).join("");
+      const sentryEnabled = Boolean(controlState[controlStateKey("VehicleSecurityState", "sentry_mode_enabled")]);
+      const source = captureSources[group.scope] || "camera_stream";
+      const selectedVideo = selectedActivityVideos[group.scope];
+      const recordings = activityRecordings[group.scope] || [];
+      const fileControls = source === "video_file"
+        ? `<label class="capture-source-field"><span>Video</span><select data-activity-video-scope="${group.scope}" aria-label="${group.title} video"><option value="" ${selectedVideo ? "" : "selected"}>No video</option>${recordings.map(name => `<option value="${escapeHtml(name)}" ${name === selectedVideo ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></label>${selectedVideo ? `<div class="activity-video-frame"><video class="activity-video" controls preload="metadata" data-activity-video data-scope="${group.scope}" data-filename="${escapeHtml(selectedVideo)}" src="/activity-recordings/${encodeURIComponent(selectedVideo)}"></video></div>` : recordings.length ? "" : `<p class="activity-video-empty">No ${group.scope} activity videos found.</p>`}`
+        : "";
+      const busy = Boolean(activityDetectionBusy[group.scope]);
+      const disabled = busy
+        || (source === "video_file" && (!selectedVideo || !activityVideoActive[group.scope]))
+        || (group.scope === "external" && !sentryEnabled);
+      const sourceSelect = `<label class="capture-source-field"><span>Source</span><select data-capture-scope="${group.scope}" aria-label="${group.title} source"><option value="camera_stream" ${source === "camera_stream" ? "selected" : ""}>Camera stream</option><option value="video_file" ${source === "video_file" ? "selected" : ""}>Video file</option></select></label>`;
+      const buttonLabel = group.scope === "external" ? "Bump" : "Detect";
+      return `<section class="control-section" data-type="activities" data-class="${group.cls}" data-key="${group.key}" data-scope="${group.scope}"><h3>${group.title}</h3>${sourceSelect}${fileControls}<div class="segmented">${options}<button class="scenario-button activity-detect-button" type="button" data-scope="${group.scope}" aria-pressed="${busy}" ${disabled ? "disabled" : ""}>${busy ? "Detecting..." : buttonLabel}</button></div></section>`;
+    }
+    if (group.type === "captureSource") {
+      const source = captureSources[group.scope] || "video_file";
+      return `<section class="control-section" data-type="captureSource"><h3>${group.title}</h3><label class="capture-source-field"><span>Source</span><select data-capture-scope="${group.scope}" aria-label="${group.title}"><option value="camera_stream" ${source === "camera_stream" ? "selected" : ""}>Camera stream</option><option value="video_file" ${source === "video_file" ? "selected" : ""}>Video file</option></select></label></section>`;
     }
     if (group.type === "options") {
       const name = `${tabName}-${groupIndex}-${group.key}`;
@@ -868,7 +911,7 @@ function renderControls(tabName) {
     }
     if (group.type === "textarea") {
       const current = controlState[controlStateKey(group.cls, group.key)] ?? group.value ?? "";
-      return `<section class="control-section" data-type="textarea" data-class="${group.cls}"><h3>${group.title}</h3><label class="preference-field" for="${tabName}-${group.key}"><span>Describe the music you enjoy</span><textarea id="${tabName}-${group.key}" data-key="${group.key}" maxlength="500" rows="4" placeholder="${escapeHtml(group.placeholder)}">${escapeHtml(current)}</textarea></label></section>`;
+      return `<section class="control-section" data-type="textarea" data-class="${group.cls}"><h3>${group.title}</h3><textarea class="auto-grow-textarea" id="${tabName}-${group.key}" data-key="${group.key}" aria-label="${group.title}" maxlength="500" rows="1" placeholder="${escapeHtml(group.placeholder)}">${escapeHtml(current)}</textarea></section>`;
     }
     if (group.type === "toggles") {
       const controls = group.controls.map(([label, key, checked, on, off]) => {
@@ -879,6 +922,7 @@ function renderControls(tabName) {
     }
     if (group.type === "scenarios") {
       const hint = group.hint ? `<p class="scenario-hint">${escapeHtml(group.hint)}</p>` : "";
+      const heading = group.title ? `<h3>${escapeHtml(group.title)}</h3>` : "";
       const scenarios = group.controls.map(scenario => {
         if (Array.isArray(scenario.groups)) {
           const rendered = scenario.groups.map(subGroup => subGroup.type === "meeting"
@@ -900,7 +944,7 @@ function renderControls(tabName) {
           : `data-scenario="${scenario.id}"`;
         return `<div class="scenario-item"><div class="scenario-copy"><h4>${escapeHtml(scenario.label)}</h4><p>${escapeHtml(scenario.description)}</p></div><button type="button" class="scenario-button"${buttonId} ${dataAttribute} aria-pressed="${active}">${buttonLabel}</button></div>`;
       }).join("");
-      return `<section class="control-section" data-type="scenarios"><h3>${group.title}</h3>${hint}${scenarios}${drivingSimulationActive ? `<section id="driving-video-block" class="driving-video-panel" aria-label="Driving simulation video">${DRIVING_VIDEO_BLOCK_HTML}</section>` : ""}</section>`;
+      return `<section class="control-section" data-type="scenarios">${heading}${hint}${scenarios}${drivingSimulationActive ? `<section id="driving-video-block" class="driving-video-panel" aria-label="Driving simulation video">${DRIVING_VIDEO_BLOCK_HTML}</section>` : ""}</section>`;
     }
     const controls = group.controls.map(([label, key, min, max, value, step, format, ownClass]) => {
       const controlClass = ownClass || group.cls;
@@ -910,7 +954,15 @@ function renderControls(tabName) {
     const sectionClass = group.cls ? ` data-class="${group.cls}"` : "";
     return `<section class="control-section" data-type="ranges"${sectionClass}><h3>${group.title}</h3>${controls}</section>`;
   }).join("");
+  controlContent.querySelectorAll("textarea.auto-grow-textarea").forEach(resizeTextArea);
   if (tabName === "scenario") setFriendSimulation(friendSimulationActive);
+}
+
+function resizeTextArea(textarea) {
+  textarea.style.height = "auto";
+  const style = getComputedStyle(textarea);
+  const borders = Number.parseFloat(style.borderTopWidth) + Number.parseFloat(style.borderBottomWidth);
+  textarea.style.height = `${textarea.scrollHeight + borders}px`;
 }
 
 function updateControlsInPlace(className, values) {
@@ -942,7 +994,7 @@ function updateControlsInPlace(className, values) {
           .find(input => input.dataset.key === key);
         if (!inputElement) return;
         inputElement.checked = Boolean(value);
-        const control = CONTROL_GROUPS.vehicle
+        const control = Object.values(CONTROL_GROUPS).flat()
           .filter(group => group.type === "toggles" && group.cls === className)
           .flatMap(group => group.controls)
           .find(item => item[1] === key);
@@ -967,6 +1019,12 @@ function updateControlsInPlace(className, values) {
       }
     });
   });
+  if (className === "VehicleSecurityState" && Object.hasOwn(values || {}, "sentry_mode_enabled")) {
+    const enabled = Boolean(values.sentry_mode_enabled);
+    controlContent.querySelectorAll('.activity-detect-button[data-scope="external"]').forEach(button => {
+      button.disabled = Boolean(activityDetectionBusy.external) || !enabled;
+    });
+  }
 }
 
 function sendProgressive(inputElement, fromValue, toValue) {
@@ -990,9 +1048,11 @@ controlContent.addEventListener("pointerdown", event => {
   if (event.target.matches('input[type="range"]')) event.target.dataset.start = event.target.value;
 });
 controlContent.addEventListener("click", event => {
-  if (event.target.closest("#detect-activity")) detectCabinActivity();
+  const detectButton = event.target.closest(".activity-detect-button");
+  if (detectButton) detectCabinActivity(detectButton.dataset.scope);
 });
 controlContent.addEventListener("input", event => {
+  if (event.target.matches("textarea.auto-grow-textarea")) resizeTextArea(event.target);
   if (event.target.matches('input[type="range"]')) {
     const value = Number(event.target.value);
     event.target.nextElementSibling.value = formatValue(value, event.target.dataset.format);
@@ -1001,8 +1061,72 @@ controlContent.addEventListener("input", event => {
   }
   if (event.target.matches("#driving-video-seek")) scrubDrivingVideo(Number(event.target.value));
 });
+controlContent.addEventListener("play", event => {
+  const video = event.target.closest("video[data-activity-video]");
+  if (!video) return;
+  const {scope, filename} = video.dataset;
+  activityVideoStarting[scope] = true;
+  bridge.call("startActivityVideo", scope, filename, video.currentTime)
+    .then(() => {
+      if (video.paused) {
+        return bridge.call("stopActivityVideo", scope);
+      }
+      setActivityVideoActive(scope, true);
+    })
+    .catch(error => {
+      setActivityVideoActive(scope, false);
+      if (!video.paused) {
+        video.pause();
+        showToast(error.message || "Could not start activity video");
+      }
+    });
+}, true);
+controlContent.addEventListener("pause", event => {
+  const video = event.target.closest("video[data-activity-video]");
+  if (!video || (!activityVideoActive[video.dataset.scope] && !activityVideoStarting[video.dataset.scope])) return;
+  const {scope} = video.dataset;
+  setActivityVideoActive(scope, false);
+  bridge.call("stopActivityVideo", scope).catch(() => {});
+}, true);
 controlContent.addEventListener("change", event => {
   const target = event.target;
+  if (target.matches("select[data-activity-video-scope]")) {
+    const scope = target.dataset.activityVideoScope;
+    selectedActivityVideos[scope] = target.value;
+    if (activityVideoActive[scope]) bridge.call("stopActivityVideo", scope).catch(() => {});
+    setActivityVideoActive(scope, false);
+    if (activeTab === "activities") renderControls("activities");
+    return;
+  }
+  if (target.matches("select[data-capture-scope]")) {
+    const scope = target.dataset.captureScope;
+    const requestedSource = target.value;
+    target.disabled = true;
+    activityBufferReady[scope] = false;
+    setActivityDetectionBusy(scope, activityDetectionBusy[scope]);
+    bridge.call("setCaptureSource", scope, requestedSource)
+      .then(source => {
+        captureSources[scope] = source;
+        if (scope === "internal" || scope === "external") {
+          setActivityVideoActive(scope, false);
+          if (source === "camera_stream") {
+            return bridge.call("waitCaptureBufferReady", scope)
+              .then(() => {
+                activityBufferReady[scope] = true;
+                setActivityDetectionBusy(scope, activityDetectionBusy[scope]);
+              });
+          }
+        }
+        if (["activities", "scenario"].includes(activeTab)) renderControls(activeTab);
+        return undefined;
+      })
+      .catch(() => {
+        target.value = captureSources[scope];
+        showToast("Could not update capture source");
+      })
+      .finally(() => { target.disabled = false; });
+    return;
+  }
   if (target.matches('input[type="radio"]')) {
     const section = target.closest(".control-section");
     controlState[controlStateKey(section.dataset.class, section.dataset.key)] = target.value;
@@ -1018,13 +1142,14 @@ controlContent.addEventListener("change", event => {
       bridge.call("stringChanged", section.dataset.class, section.dataset.key, activity).catch(() => {});
       return;
     }
-    const control = CONTROL_GROUPS.vehicle
+    const control = Object.values(CONTROL_GROUPS).flat()
       .filter(item => item.type === "toggles" && item.cls === section.dataset.class)
       .flatMap(item => item.controls)
       .find(item => item[1] === target.dataset.key);
     controlState[controlStateKey(section.dataset.class, target.dataset.key)] = target.checked;
     target.closest(".switch-control").querySelector("[data-state]").textContent = target.checked ? control[3] : control[4];
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
+    updateControlsInPlace(section.dataset.class, { [target.dataset.key]: target.checked });
   } else if (target.matches('textarea[data-key], input[type="text"][data-key]')) {
     const section = target.closest(".control-section");
     controlState[controlStateKey(section.dataset.class, target.dataset.key)] = target.value;
@@ -1137,6 +1262,13 @@ controlContent.addEventListener("click", event => {
 });
 
 document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
+  if (activeTab === "activities" && tab.dataset.tab !== "activities") {
+    for (const scope of ["internal", "external"]) {
+      if (!activityVideoActive[scope]) continue;
+      setActivityVideoActive(scope, false);
+      bridge.call("stopActivityVideo", scope).catch(() => {});
+    }
+  }
   document.querySelector(".tab.active").classList.remove("active");
   document.querySelectorAll(".tab").forEach(item => item.setAttribute("aria-selected", "false"));
   tab.classList.add("active");
@@ -1162,8 +1294,8 @@ document.querySelector("#reset-controls").addEventListener("click", () => {
     if (section.dataset.type === "activities") return;
     bridge.call("boolChanged", section.dataset.class, target.dataset.key, target.checked).catch(() => {});
   });
-  controlContent.querySelectorAll('[data-type="activities"]').forEach(() => {
-    bridge.call("stringChanged", "DriverPhysicalState", "activity", "No activity detected").catch(() => {});
+  controlContent.querySelectorAll('[data-type="activities"]').forEach(section => {
+    bridge.call("stringChanged", section.dataset.class, section.dataset.key, "No activity detected").catch(() => {});
   });
   controlContent.querySelectorAll('input[type="range"]').forEach(target => {
     const value = Number(target.value);
@@ -1195,7 +1327,6 @@ duplicateSuppressionToggle.addEventListener("change", event => {
 
 function addMessage(role, text) {
   if (role === "user") { pendingAssistantMessage = null; assistantTurnPaused = false; }
-  welcomeState?.remove();
   const article = document.createElement("article");
   article.className = `message ${role}`;
   article.innerHTML = `<div class="meta">${role === "user" ? "You" : "Drive assistant"}</div><div class="bubble"></div>`;
@@ -1207,7 +1338,7 @@ function addMessage(role, text) {
 }
 
 function clearConversationView() {
-  conversation.replaceChildren(welcomeState);
+  conversation.replaceChildren();
   pendingAssistantMessage = null;
   input.value = "";
   input.style.height = "auto";
@@ -1257,7 +1388,6 @@ input.addEventListener("input", () => {
   input.style.height = "auto";
   input.style.height = `${Math.min(input.scrollHeight, 110)}px`;
 });
-document.querySelectorAll(".suggestions button").forEach(button => button.addEventListener("click", () => sendMessage(button.textContent)));
 
 function setConversation(active) {
   conversationActive = active;
@@ -1309,10 +1439,19 @@ function renderKnowledge(rawKnowledge) {
   }).join("");
 }
 
+const CHANGED_EVENT_VISIBLE_MS = 5000;
+
 function renderChangedEvents(changes) {
   const container = document.querySelector("#changed-events");
   if (!Array.isArray(changes) || changes.length === 0) return;
 
+  const restoreEmptyState = () => {
+    if (container.querySelector(".changed-event, .changed-empty")) return;
+    const empty = document.createElement("p");
+    empty.className = "changed-empty";
+    empty.textContent = "No recent changes";
+    container.append(empty);
+  };
   container.querySelector(".changed-empty")?.remove();
   [...changes].reverse().forEach(change => {
     const item = document.createElement("div");
@@ -1321,8 +1460,11 @@ function renderChangedEvents(changes) {
     container.prepend(item);
     setTimeout(() => {
       item.classList.add("is-expiring");
-      setTimeout(() => item.remove(), 200);
-    }, 1800);
+      setTimeout(() => {
+        item.remove();
+        restoreEmptyState();
+      }, 200);
+    }, CHANGED_EVENT_VISIBLE_MS);
   });
 
   while (container.children.length > 6) {
@@ -1341,7 +1483,17 @@ bridge.on("ready", data => {
   rememberControlState("DriverAgenda", data.driverAgendaState);
   rememberControlState("VehicleState", data.vehicleState);
   rememberControlState("DriverPhysicalState", data.driverPhysicalState);
-  setActivityDetectionBusy(Boolean(data.activityDetectionBusy));
+  rememberControlState("VehicleSecurityState", data.vehicleSecurityState);
+  captureSources = { ...captureSources, ...(data.captureSources || {}) };
+  activityRecordings = { ...activityRecordings, ...(data.activityRecordings || {}) };
+  for (const scope of ["internal", "external"]) {
+    const recordings = activityRecordings[scope] || [];
+    if (!recordings.includes(selectedActivityVideos[scope])) {
+      selectedActivityVideos[scope] = "";
+    }
+  }
+  setActivityDetectionBusy("internal", false);
+  setActivityDetectionBusy("external", false);
   const ducking = Number(data.musicDuckingFactor);
   musicDuckingFactor = Number.isFinite(ducking) && ducking > 0 && ducking <= 1 ? ducking : 0.25;
   if (Number.isFinite(Number(data.permissionReminderSeconds)) && Number(data.permissionReminderSeconds) > 0) {
@@ -1352,7 +1504,20 @@ bridge.on("ready", data => {
   rememberControlState("DetectedObjects", data.detectedObjectsState);
   setFriendSimulation(Boolean(data.friendMessageSimulationActive));
   duplicateSuppressionToggle.checked = Boolean(data.duplicateSuppressionEnabled);
-  if (["driver", "vehicle", "scenario"].includes(activeTab)) renderControls(activeTab);
+  if (["driver", "vehicle", "activities", "scenario"].includes(activeTab)) renderControls(activeTab);
+  for (const scope of ["internal", "external"]) {
+    if (captureSources[scope] === "camera_stream"
+        && (scope !== "external" || controlState[controlStateKey("VehicleSecurityState", "sentry_mode_enabled")])) {
+      activityBufferReady[scope] = false;
+      bridge.call("setCaptureSource", scope, "camera_stream")
+        .then(() => bridge.call("waitCaptureBufferReady", scope))
+        .then(() => {
+          activityBufferReady[scope] = true;
+          setActivityDetectionBusy(scope, activityDetectionBusy[scope]);
+        })
+        .catch(() => showToast(`Could not start ${scope} camera buffer`));
+    }
+  }
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
   bridge.call("minimumUrgencyChanged", document.querySelector("#urgency-select").value).catch(() => {});
@@ -1394,6 +1559,21 @@ bridge.on("vehicleStateChanged", data => {
 bridge.on("detectedObjectsStateChanged", data => {
   const changed = rememberControlState("DetectedObjects", data[0]);
   if (changed) updateControlsInPlace("DetectedObjects", data[0]);
+});
+bridge.on("captureSourcesChanged", data => {
+  captureSources = { ...captureSources, ...(data[0] || {}) };
+  controlContent.querySelectorAll("select[data-capture-scope]").forEach(select => {
+    select.value = captureSources[select.dataset.captureScope] || select.value;
+  });
+});
+bridge.on("activityVideoStateChanged", data => {
+  const state = data[0] || {};
+  if (state.scope) setActivityVideoActive(state.scope, Boolean(state.active));
+});
+bridge.on("vehicleSecurityStateChanged", data => {
+  const changed = rememberControlState("VehicleSecurityState", data[0]);
+  if (changed) updateControlsInPlace("VehicleSecurityState", data[0]);
+  setActivityDetectionBusy("external", activityDetectionBusy.external);
 });
 bridge.on("driverPreferencesChanged", data => {
   const changed = rememberControlState("DriverPreferences", data[0]);

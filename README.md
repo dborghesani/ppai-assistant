@@ -74,6 +74,10 @@ This project demonstrates an in-vehicle intelligent assistant capable of handlin
    (torch alone is ~1GB). Voice features are opt-in at runtime (`tts_enabled`/`stt_enabled`, both `False` by
    default) so you don't need a GPU just to run the app in text-only mode.
 
+   Local face-cluster enrollment in the Driver tab is included in the standard install.
+   Face detection uses DeepFace's YOLOv8n-face backend; the first acquisition downloads
+   the YOLO face-detector and ArcFace embedding weights. Captured frames are not retained.
+
 3. **Run a Local LLM**:
    Ensure you have **Ollama** installed and running. Pull the default model:
    ```bash

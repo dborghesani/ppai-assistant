@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 from aiohttp.test_utils import TestClient, TestServer
 from data.agents_dataclasses import AssistantStatus
 from agents.automotive_agent import AutomotiveAgent
+from ui.face_clusters import FaceClusterStore, FaceSample
 from ui.bridge import VehicleBridge
 from ui.web_server import WebUIServer
 
@@ -25,6 +26,7 @@ class FakeBridge:
         self.friend_simulation_running = False
         self.conversation_cleared = False
         self.duplicate_suppression_enabled = False
+        self.face_recognition_requested = False
         self.driver_preferences = {
             "preferred_cabin_temperature": None,
             "preferred_music": "",
@@ -79,6 +81,10 @@ class FakeBridge:
         self.friend_simulation_running = True
         return self.friend_simulation_running
 
+    def recognizeFace(self) -> bool:
+        self.face_recognition_requested = True
+        return True
+
     def duplicateSuppressionChanged(self, enabled: bool) -> None:
         self.duplicate_suppression_enabled = enabled
 
@@ -119,11 +125,33 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('title: "Vehicle security", type: "toggles", cls: "VehicleSecurityState"', app_script)
         self.assertIn('["Sentry mode", "sentry_mode_enabled", false, "On", "Off"]', app_script)
         self.assertIn('data-capture-scope="${group.scope}"', app_script)
+        self.assertIn('type: "faceClusters"', app_script)
+        self.assertIn('class="scenario-button face-acquire-button"', app_script)
+        self.assertIn('class="icon-button face-recognize-button"', app_script)
+        self.assertIn('data-face-rename="${person.id}"', app_script)
+        self.assertIn('class="face-cluster-delete"', app_script)
+        self.assertIn('class="face-preview"', app_script)
+        self.assertIn("fetch(facePreviewStreamUrl", app_script)
+        self.assertIn('new Blob([jpeg], {type: "image/jpeg"})', app_script)
+        self.assertIn("response.body.getReader()", app_script)
+        self.assertIn("createImageBitmap", app_script)
+        self.assertIn('facePreviewStreamAbortController?.abort()', app_script)
+        self.assertIn("context.strokeRect(left, top, clippedWidth, clippedHeight);", app_script)
+        self.assertIn("state.previewDetections", app_script)
+        self.assertIn('typeof state.previewFrame === "string"', app_script)
+        self.assertIn("}, 3000);", app_script)
+        self.assertIn('bridge.call("mergeFaceClusters"', app_script)
+        self.assertIn('bridge.call("selectFaceCluster"', app_script)
+        self.assertIn('bridge.call("recognizeFace"', app_script)
+        self.assertIn("if (!scenarioId) return;", app_script)
         self.assertIn('type: "captureSource", scope: "scene"', app_script)
         self.assertIn('buttonLabel = group.scope === "external" ? "Bump" : "Detect"', app_script)
         self.assertIn("let activityDetectionBusy = { internal: false, external: false };", app_script)
         self.assertIn("const buttonBusy = Boolean(activityDetectionBusy[buttonScope]);", app_script)
         self.assertIn('.activity-detect-button[aria-pressed="true"]:disabled', (await (await self.client.get("/static/style.css")).text()))
+        stylesheet = await (await self.client.get("/static/style.css")).text()
+        self.assertIn(".face-cluster-actions > button { height: 38px; min-height: 38px;", stylesheet)
+        self.assertIn(".face-preview-canvas { display: block; max-width: 100%; max-height: 220px; width: auto; height: auto; }", stylesheet)
         self.assertNotIn("getUserMedia", app_script)
         self.assertIn("const CHANGED_EVENT_VISIBLE_MS = 5000;", app_script)
         self.assertIn('empty.textContent = "No recent changes";', app_script)
@@ -183,6 +211,8 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
             ready["data"]["driverPreferences"],
             {"preferred_cabin_temperature": None, "preferred_music": ""},
         )
+        self.assertEqual(ready["data"]["faceClusters"], [])
+        self.assertIsNone(ready["data"]["selectedFaceClusterId"])
         self.assertEqual(
             ready["data"]["knowledge"],
             {"VehicleState": {"engine_on": False}},
@@ -211,6 +241,58 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await response.read(), b"activity video")
             finally:
                 await client.close()
+
+    async def test_face_cluster_thumbnail_route_serves_registered_ids_only(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            store = FaceClusterStore(
+                Path(temporary_directory),
+                sample_extractor=lambda _: [FaceSample((1.0, 0.0), b"jpeg-thumbnail")],
+            )
+            cluster = store.process_frames([b"frame"])["clusters"][0]
+            bridge = FakeBridge()
+            bridge.face_clusters = store
+            server = WebUIServer(bridge)
+            client = TestClient(TestServer(server._app))
+            await client.start_server()
+            try:
+                response = await client.get(cluster["thumbnail"])
+                self.assertEqual(response.status, 200)
+                self.assertEqual(await response.read(), b"jpeg-thumbnail")
+                missing = await client.get(f"/face-clusters/{'0' * 32}.jpg")
+                self.assertEqual(missing.status, 404)
+            finally:
+                await client.close()
+
+    async def test_face_preview_stream_serves_active_scan_as_mjpeg(self) -> None:
+        class ActiveCamera:
+            def __init__(self):
+                self.source_checks = 0
+
+            def buffer_source(self, scope):
+                self.source_checks += 1
+                return ("camera_stream", None) if self.source_checks < 4 else None
+
+            def latest_buffer_frame(self, scope):
+                return SimpleNamespace(
+                    image_base64="anBlZ2J5dGVz",
+                    seconds=1.0,
+                )
+
+        bridge = self.web_ui.bridge
+        bridge._face_detection_task = SimpleNamespace(done=lambda: False)
+        bridge.agent = SimpleNamespace(video_capture=ActiveCamera())
+
+        response = await self.client.get("/face-preview.mjpeg")
+        body = await response.read()
+
+        self.assertEqual(response.status, 200)
+        self.assertTrue(response.headers["Content-Type"].startswith("multipart/x-mixed-replace"))
+        self.assertIn(b"--frame\r\nContent-Type: image/jpeg", body)
+        self.assertIn(b"jpegbytes", body)
+
+    async def test_face_preview_stream_is_unavailable_outside_face_scan(self) -> None:
+        response = await self.client.get("/face-preview.mjpeg")
+        self.assertEqual(response.status, 404)
 
     async def test_websocket_ready_restores_blocked_messages_status(self) -> None:
         self.web_ui.bridge.dumpAssistantStatus = lambda: {
@@ -251,6 +333,16 @@ class WebUIServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"id": 7, "result": True}, messages)
         self.assertIn({"event": "conversationCleared", "data": []}, messages)
         self.assertTrue(cast(Any, self.web_ui.bridge).conversation_cleared)
+        await socket.close()
+
+    async def test_websocket_starts_read_only_face_recognition(self) -> None:
+        socket = await self.client.ws_connect("/ws")
+        await socket.receive_json()
+        await socket.send_json({"id": 9, "method": "recognizeFace", "params": []})
+
+        response = await socket.receive_json()
+        self.assertEqual(response, {"id": 9, "result": True})
+        self.assertTrue(cast(Any, self.web_ui.bridge).face_recognition_requested)
         await socket.close()
 
     async def test_websocket_accepts_legacy_friend_simulation_method(self) -> None:

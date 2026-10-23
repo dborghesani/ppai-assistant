@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import MethodType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -10,13 +11,14 @@ import pytest
 import structlog
 from data.agents_dataclasses import ActionType, SkillType
 from data.assistant_dataclasses import (
-    DetectedObjects, DriverPreferences, VehicleSecurityState, VehicleState,
+    DetectedObjects, DriverEmotionState, DriverPreferences, VehicleSecurityState, VehicleState,
 )
 from managers.database_manager import DatabaseManager
 from managers.action_manager import ActionManager
 from managers.knowledge_manager import KnowledgeManager
 from managers.source_manager import SourceManager
 from ui.bridge import VehicleBridge
+from ui.face_clusters import FaceClusterStore, FaceSample
 
 
 class FakeDatabase:
@@ -25,6 +27,7 @@ class FakeDatabase:
             "VehicleState": state or VehicleState(),
             "DetectedObjects": DetectedObjects(),
             "DriverPreferences": DriverPreferences(),
+            "DriverEmotionState": DriverEmotionState(),
             "VehicleSecurityState": VehicleSecurityState(),
         }
         self.writes: list[tuple[str, str, Any]] = []
@@ -101,6 +104,289 @@ def test_driver_preferences_are_persisted_and_broadcast():
     assert bridge.database_manager.writes[-1] == ("DriverPreferences", "driver_name", "Alex")
     bridge.setDriverPreference("driver_name", "   ")
     assert bridge.dumpDriverPreferences()["driver_name"] == "David"
+
+
+def test_face_cluster_selection_links_and_clears_driver_state(tmp_path):
+    bridge = make_bridge()
+    samples = {
+        b"alice": FaceSample((1.0, 0.0), b"alice"),
+        b"bob": FaceSample((0.0, 1.0), b"bob"),
+    }
+    bridge.face_clusters = FaceClusterStore(
+        tmp_path,
+        sample_extractor=lambda frame: [samples[frame]],
+    )
+    bridge.dumpFaceClusters = MethodType(VehicleBridge.dumpFaceClusters, bridge)
+    bridge.selectFaceCluster = MethodType(VehicleBridge.selectFaceCluster, bridge)
+    bridge.dumpSelectedFaceClusterId = MethodType(VehicleBridge.dumpSelectedFaceClusterId, bridge)
+    bridge._setFaceClusterId = MethodType(VehicleBridge._setFaceClusterId, bridge)
+    bridge.deleteFaceCluster = MethodType(VehicleBridge.deleteFaceCluster, bridge)
+    bridge.mergeFaceClusters = MethodType(VehicleBridge.mergeFaceClusters, bridge)
+    clusters = bridge.face_clusters.process_frames([b"alice", b"bob"])["clusters"]
+    source_id, target_id = (cluster["id"] for cluster in clusters)
+
+    assert bridge.selectFaceCluster(source_id) == source_id
+    assert bridge.database_manager.current_state["DriverPreferences"].face_cluster_id == source_id
+    assert bridge.database_manager.current_state["DriverEmotionState"].face_cluster_id == source_id
+
+    assert bridge.selectFaceCluster(None) is None
+    assert bridge.database_manager.current_state["DriverPreferences"].face_cluster_id is None
+    assert bridge.database_manager.current_state["DriverEmotionState"].face_cluster_id is None
+    bridge.selectFaceCluster(source_id)
+
+    bridge.mergeFaceClusters(source_id, target_id)
+    assert bridge.database_manager.current_state["DriverPreferences"].face_cluster_id == target_id
+    assert bridge.database_manager.current_state["DriverEmotionState"].face_cluster_id == target_id
+
+    bridge.deleteFaceCluster(target_id)
+    assert bridge.database_manager.current_state["DriverPreferences"].face_cluster_id is None
+    assert bridge.database_manager.current_state["DriverEmotionState"].face_cluster_id is None
+
+
+def test_camera_frame_capture_stops_buffer_after_sampling():
+    class CameraCapture:
+        def __init__(self):
+            self.started = False
+            self.stopped = False
+
+        def buffer_source(self, scope):
+            return ("camera_stream", None) if self.started else None
+
+        def start_buffer(self, scope, source):
+            self.started = True
+
+        def latest_buffer_frame(self, scope):
+            return None
+
+        async def get_buffer_frames(self, scope, frame_count):
+            return SimpleNamespace(frames=(), source="/dev/video0")
+
+        def stop_buffer(self, scope):
+            self.started = False
+            self.stopped = True
+
+    capture = CameraCapture()
+    bridge = SimpleNamespace(
+        agent=SimpleNamespace(
+            video_capture=capture,
+            capture_sources={"internal": "camera_stream"},
+        ),
+        _camera_capture_locks={"internal": asyncio.Lock()},
+    )
+    bridge._camera_capture_stream = MethodType(VehicleBridge._camera_capture_stream, bridge)
+    bridge._capture_camera_frames = MethodType(VehicleBridge._capture_camera_frames, bridge)
+
+    frames = asyncio.run(bridge._capture_camera_frames("internal", 2))
+
+    assert frames.source == "/dev/video0"
+    assert capture.stopped
+    assert not capture.started
+
+
+def test_camera_capture_streams_new_frames_to_preview_callback():
+    class CameraCapture:
+        def __init__(self):
+            self.started = False
+            self.stopped = False
+            self.latest_calls = 0
+            self.ready = asyncio.Event()
+
+        def buffer_source(self, scope):
+            return ("camera_stream", None) if self.started else None
+
+        def start_buffer(self, scope, source):
+            self.started = True
+
+        def latest_buffer_frame(self, scope):
+            self.latest_calls += 1
+            if self.latest_calls >= 2:
+                self.ready.set()
+            return SimpleNamespace(
+                image_base64=f"preview-{min(self.latest_calls - 1, 1)}",
+                seconds=float(min(self.latest_calls - 1, 1)),
+            )
+
+        async def get_buffer_frames(self, scope, frame_count):
+            await self.ready.wait()
+            return SimpleNamespace(
+                frames=(SimpleNamespace(image_base64="preview-1", seconds=1.0),),
+                source="/dev/video0",
+            )
+
+        def stop_buffer(self, scope):
+            self.started = False
+            self.stopped = True
+
+    capture = CameraCapture()
+    bridge = SimpleNamespace(
+        agent=SimpleNamespace(
+            video_capture=capture,
+            capture_sources={"internal": "camera_stream"},
+        ),
+        _camera_capture_locks={"internal": asyncio.Lock()},
+    )
+    bridge._camera_capture_stream = MethodType(VehicleBridge._camera_capture_stream, bridge)
+    bridge._capture_camera_frames = MethodType(VehicleBridge._capture_camera_frames, bridge)
+    previews = []
+
+    async def capture_with_preview():
+        return await bridge._capture_camera_frames("internal", 2, previews.append)
+
+    asyncio.run(capture_with_preview())
+
+    assert previews == [
+        SimpleNamespace(image_base64="preview-0", seconds=0.0),
+        SimpleNamespace(image_base64="preview-1", seconds=1.0),
+    ]
+    assert capture.stopped
+
+
+def test_camera_buffer_readiness_is_on_demand_compatible():
+    class CameraCapture:
+        def buffer_source(self, scope):
+            return None
+
+        async def wait_buffer_ready(self, scope):
+            raise AssertionError("on-demand camera buffers are not held open")
+
+    bridge = SimpleNamespace(
+        agent=SimpleNamespace(
+            capture_sources={"internal": "camera_stream"},
+            video_capture=CameraCapture(),
+        )
+    )
+
+    assert asyncio.run(VehicleBridge.waitCaptureBufferReady(bridge, "internal"))
+
+
+def test_empty_face_acquisition_deselects_current_person(tmp_path):
+    async def get_frames(scope, frame_count):
+        return SimpleNamespace(
+            frames=[SimpleNamespace(image_base64="ZW1wdHktZnJhbWU=", seconds=0.0)],
+        )
+
+    @asynccontextmanager
+    async def camera_stream(scope):
+        yield SimpleNamespace(
+            get_buffer_frames=get_frames,
+            latest_buffer_frame=lambda _scope: None,
+        )
+
+    bridge = SimpleNamespace(
+        face_clusters=FaceClusterStore(tmp_path, sample_extractor=lambda _: []),
+        _emit=Mock(),
+        _camera_capture_stream=camera_stream,
+        _setFaceClusterId=Mock(),
+        dumpFaceClusters=lambda: [],
+        dumpSelectedFaceClusterId=lambda: "a" * 32,
+        logger=Mock(),
+    )
+    bridge._capture_camera_frames = MethodType(VehicleBridge._capture_camera_frames, bridge)
+    bridge._detect_face_clusters = MethodType(VehicleBridge._detect_face_clusters, bridge)
+
+    asyncio.run(bridge._detect_face_clusters())
+
+    bridge._setFaceClusterId.assert_called_once_with("")
+    result = bridge._emit.call_args_list[-1].args[1]
+    assert result["selectedId"] is None
+    assert result["matched"] is False
+
+
+def test_face_acquisition_emits_a_preview_frame_and_detection_count():
+    class FaceStore:
+        def extract_frame_samples(self, frame):
+            return [FaceSample((1.0, 0.0), b"sample-face", (0.2, 0.1, 0.4, 0.6))]
+
+        def process_frames(self, frames):
+            assert frames == [b"sample-frame"]
+            return {
+                "matchedIds": ["a" * 32],
+                "created": 0,
+                "updated": 1,
+                "detectedFaces": 1,
+                "previewDetections": [(0.2, 0.1, 0.4, 0.6)],
+                "clusters": [],
+            }
+
+    async def get_frames(scope, frame_count):
+        return SimpleNamespace(
+            frames=[SimpleNamespace(image_base64="c2FtcGxlLWZyYW1l", seconds=0.0)],
+        )
+
+    @asynccontextmanager
+    async def camera_stream(scope):
+        yield SimpleNamespace(
+            get_buffer_frames=get_frames,
+            latest_buffer_frame=lambda _scope: None,
+        )
+
+    bridge = SimpleNamespace(
+        face_clusters=FaceStore(),
+        _emit=Mock(),
+        _camera_capture_stream=camera_stream,
+        _setFaceClusterId=Mock(),
+        dumpFaceClusters=lambda: [],
+        dumpSelectedFaceClusterId=lambda: None,
+        logger=Mock(),
+    )
+    bridge._capture_camera_frames = MethodType(VehicleBridge._capture_camera_frames, bridge)
+    bridge._detect_face_clusters = MethodType(VehicleBridge._detect_face_clusters, bridge)
+
+    asyncio.run(bridge._detect_face_clusters())
+
+    emitted = [call.args[1] for call in bridge._emit.call_args_list]
+    assert any(event.get("previewStreamActive") is True for event in emitted)
+    assert any(
+        event.get("previewFrame") == "c2FtcGxlLWZyYW1l"
+        and event.get("previewDetections") == [(0.2, 0.1, 0.4, 0.6)]
+        for event in emitted
+    )
+    assert emitted[-1]["detectedFaces"] == 1
+    assert emitted[-1]["previewDetections"] == [(0.2, 0.1, 0.4, 0.6)]
+
+
+def test_startup_face_recognition_with_no_face_clears_active_identity(tmp_path):
+    samples = {
+        b"registered": FaceSample((1.0, 0.0), b"registered"),
+    }
+    store = FaceClusterStore(tmp_path, sample_extractor=lambda frame: [samples[frame]] if frame in samples else [])
+    cluster_id = store.process_frames([b"registered"])["clusters"][0]["id"]
+    database = FakeDatabase()
+    database.current_state["DriverPreferences"].face_cluster_id = cluster_id
+    database.current_state["DriverEmotionState"].face_cluster_id = cluster_id
+
+    async def capture_frames(scope, frame_count):
+        return SimpleNamespace(
+            frames=[SimpleNamespace(image_base64="dW5rbm93bg==", seconds=0.0)],
+        )
+
+    @asynccontextmanager
+    async def camera_stream(scope):
+        yield SimpleNamespace(
+            get_buffer_frames=capture_frames,
+            latest_buffer_frame=lambda _scope: None,
+        )
+
+    bridge = SimpleNamespace(
+        database_manager=database,
+        face_clusters=store,
+        _camera_capture_stream=camera_stream,
+        _emit=Mock(),
+        logger=Mock(),
+    )
+    bridge._capture_camera_frames = MethodType(VehicleBridge._capture_camera_frames, bridge)
+    bridge._setFaceClusterId = MethodType(VehicleBridge._setFaceClusterId, bridge)
+    bridge.dumpFaceClusters = MethodType(VehicleBridge.dumpFaceClusters, bridge)
+    bridge._recognize_face_cluster = MethodType(VehicleBridge._recognize_face_cluster, bridge)
+
+    asyncio.run(bridge._recognize_face_cluster())
+
+    assert database.current_state["DriverPreferences"].face_cluster_id is None
+    assert database.current_state["DriverEmotionState"].face_cluster_id is None
+    result = bridge._emit.call_args_list[-1].args[1]
+    assert result["selectedId"] is None
+    assert result["matched"] is False
+    bridge.logger.info.assert_any_call("No face detected during driver recognition")
 
 
 def test_user_input_uses_driver_preferences_from_knowledge_context():

@@ -1,21 +1,21 @@
 const CONTROL_GROUPS = {
   driver: [
-    { title: "Driver name", type: "text", cls: "DriverPreferences", key: "driver_name", value: "David", maxLength: 80 },
-    { title: "Emotion", type: "ranges", cls: "DriverEmotionState", controls: [
+    { title: "Recognized people", type: "faceClusters" },
+    { title: "Emotion", type: "ranges", cls: "DriverEmotionState", requiresFace: true, controls: [
       ["Angry", "angry", 0, 1, 0, .01, "decimal"], ["Disgust", "disgust", 0, 1, 0, .01, "decimal"],
       ["Fear", "fear", 0, 1, 0, .01, "decimal"], ["Happy", "happy", 0, 1, 0, .01, "decimal"],
       ["Sad", "sad", 0, 1, 0, .01, "decimal"], ["Surprise", "surprise", 0, 1, 0, .01, "decimal"],
       ["Neutral", "neutral", 0, 1, 1, .01, "decimal"]
     ]},
-    { title: "Readiness", type: "ranges", controls: [
+    { title: "Readiness", type: "ranges", requiresFace: true, controls: [
       ["Fatigue", "fatigue_level", 0, 1, 0, .01, "decimal", "DriverPhysicalState"],
       ["Attention", "attention_level", 0, 1, 1, .01, "decimal", "DriverPhysicalState"],
       ["Driving tension", "driving_tension", 0, 1, 0, .01, "decimal", "DriverDrivingStyle"]
     ]},
-    { title: "Comfort preference", type: "ranges", cls: "DriverPreferences", controls: [
+    { title: "Comfort preference", type: "ranges", cls: "DriverPreferences", requiresFace: true, controls: [
       ["Preferred cabin temperature", "preferred_cabin_temperature", 16, 30, 22, .5, "temp"]
     ]},
-    { title: "Music preference", type: "textarea", cls: "DriverPreferences", key: "preferred_music", value: "", placeholder: "e.g. classic 1970s rock, guitar-driven and upbeat" }
+    { title: "Music preference", type: "textarea", cls: "DriverPreferences", key: "preferred_music", value: "", placeholder: "e.g. classic 1970s rock, guitar-driven and upbeat", requiresFace: true }
   ],
   road: [
     { title: "Weather", type: "options", cls: "EnvironmentState", key: "weather", value: "Sunny", options: ["Sunny", "Cloudy", "Rainy", "Snowy", "Foggy"] },
@@ -206,6 +206,23 @@ let drivingVideoReady = false;
 const DEFAULT_DRIVING_VIDEO_URL = "/recordings/rome.mp4";
 let drivingVideoUrl = DEFAULT_DRIVING_VIDEO_URL;
 let activityDetectionBusy = { internal: false, external: false };
+let faceClusters = [];
+let selectedFaceClusterId = null;
+let faceRecognitionBusy = false;
+let faceRecognitionReady = false;
+let faceRecognitionStatus = "";
+let facePreviewVisible = false;
+let facePreviewSource = "";
+let facePreviewStreamActive = false;
+let facePreviewStreamUrl = "";
+let facePreviewStreamAbortController = null;
+let facePreviewAnimationFrame = 0;
+let facePreviewDetections = [];
+let facePreviewCaption = "";
+let facePreviewHideTimer = null;
+let facePressTimer = null;
+let facePressOrigin = null;
+let faceLongPressTriggered = false;
 
 function setActivityDetectionBusy(scope, busy) {
   if (scope) activityDetectionBusy[scope] = busy;
@@ -213,11 +230,141 @@ function setActivityDetectionBusy(scope, busy) {
     const sentryEnabled = Boolean(controlState[controlStateKey("VehicleSecurityState", "sentry_mode_enabled")]);
     const buttonScope = button.dataset.scope;
     const buttonBusy = Boolean(activityDetectionBusy[buttonScope]);
-    button.disabled = buttonBusy || !activityBufferReady[buttonScope]
+    const needsVideoBuffer = captureSources[buttonScope] === "video_file";
+    button.disabled = buttonBusy || (needsVideoBuffer && !activityBufferReady[buttonScope])
       || (buttonScope === "external" && !sentryEnabled);
     button.setAttribute("aria-pressed", String(buttonBusy));
     button.textContent = buttonBusy ? "Detecting..." : buttonScope === "external" ? "Bump" : "Detect";
   });
+}
+
+function startFacePreview(caption) {
+  clearTimeout(facePreviewHideTimer);
+  facePreviewStreamAbortController?.abort();
+  facePreviewStreamAbortController = null;
+  facePreviewVisible = true;
+  facePreviewSource = "";
+  facePreviewStreamActive = false;
+  facePreviewStreamUrl = "";
+  facePreviewDetections = [];
+  facePreviewCaption = caption;
+}
+
+function drawFaceDetections(context, width, height) {
+  const lineWidth = Math.max(2, Math.round(width * 0.004));
+  context.lineWidth = lineWidth;
+  context.font = `${Math.max(12, Math.round(width * 0.026))}px Manrope, sans-serif`;
+  facePreviewDetections.forEach(([x, y, boxWidth, boxHeight]) => {
+    const left = Math.max(0, Math.min(width, x * width));
+    const top = Math.max(0, Math.min(height, y * height));
+    const clippedWidth = Math.max(0, Math.min(width - left, boxWidth * width));
+    const clippedHeight = Math.max(0, Math.min(height - top, boxHeight * height));
+    context.strokeStyle = "#72d5e8";
+    context.strokeRect(left, top, clippedWidth, clippedHeight);
+    const labelHeight = Math.max(20, lineWidth * 6);
+    context.fillStyle = "rgba(8, 11, 13, 0.82)";
+    context.fillRect(left, Math.max(0, top - labelHeight), Math.max(54, lineWidth * 18), labelHeight);
+    context.fillStyle = "#72d5e8";
+    context.fillText("Face", left + lineWidth * 2, Math.max(labelHeight * .75, top - lineWidth * 2));
+  });
+}
+
+function drawFacePreview(canvas) {
+  if (facePreviewStreamActive) {
+    void drawFacePreviewStream(canvas);
+    return;
+  }
+  if (!facePreviewSource) return;
+  const image = new Image();
+  image.addEventListener("load", () => {
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    canvas.parentElement.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    drawFaceDetections(context, canvas.width, canvas.height);
+  }, { once: true });
+  image.src = `data:image/jpeg;base64,${facePreviewSource}`;
+}
+
+async function drawFacePreviewStream(canvas) {
+  const controller = new AbortController();
+  facePreviewStreamAbortController?.abort();
+  facePreviewStreamAbortController = controller;
+  try {
+    const response = await fetch(facePreviewStreamUrl, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) return;
+    const reader = response.body.getReader();
+    let pending = new Uint8Array();
+    while (facePreviewStreamActive && canvas.isConnected) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      const joined = new Uint8Array(pending.length + value.length);
+      joined.set(pending);
+      joined.set(value, pending.length);
+      pending = joined;
+      while (true) {
+        let start = -1;
+        for (let index = 0; index < pending.length - 1; index += 1) {
+          if (pending[index] === 0xff && pending[index + 1] === 0xd8) {
+            start = index;
+            break;
+          }
+        }
+        if (start < 0) {
+          pending = pending.slice(pending.length && pending[pending.length - 1] === 0xff ? -1 : 0);
+          break;
+        }
+        let end = -1;
+        for (let index = start + 2; index < pending.length - 1; index += 1) {
+          if (pending[index] === 0xff && pending[index + 1] === 0xd9) {
+            end = index + 2;
+            break;
+          }
+        }
+        if (end < 0) {
+          pending = pending.slice(start);
+          break;
+        }
+        const jpeg = pending.slice(start, end);
+        pending = pending.slice(end);
+        const bitmap = await createImageBitmap(new Blob([jpeg], {type: "image/jpeg"}));
+        if (!facePreviewStreamActive || !canvas.isConnected) {
+          bitmap.close();
+          break;
+        }
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        canvas.parentElement.style.aspectRatio = `${canvas.width} / ${canvas.height}`;
+        const context = canvas.getContext("2d");
+        context.drawImage(bitmap, 0, 0);
+        drawFaceDetections(context, canvas.width, canvas.height);
+        bitmap.close();
+      }
+    }
+    await reader.cancel().catch(() => {});
+  } catch (error) {
+    if (error.name !== "AbortError") showToast("Live camera preview failed");
+  } finally {
+    if (facePreviewStreamAbortController === controller) {
+      facePreviewStreamAbortController = null;
+    }
+  }
+}
+
+function freezeFacePreview() {
+  facePreviewStreamActive = false;
+  facePreviewStreamAbortController?.abort();
+  facePreviewStreamAbortController = null;
+  cancelAnimationFrame(facePreviewAnimationFrame);
+  const canvas = controlContent.querySelector("canvas.face-preview-canvas");
+  if (canvas?.width && canvas?.height) {
+    facePreviewSource = canvas.toDataURL("image/jpeg", 0.88).split(",", 2)[1];
+  }
+  facePreviewStreamUrl = "";
 }
 
 function setActivityVideoActive(scope, active) {
@@ -870,10 +1017,24 @@ function renderMeetingChoices(group) {
 
 function renderControls(tabName) {
   controlContent.dataset.tab = tabName;
-  controlContent.innerHTML = CONTROL_GROUPS[tabName].map((group, groupIndex) => {
+  const groups = CONTROL_GROUPS[tabName].filter(group =>
+    tabName !== "driver" || !group.requiresFace
+      || (faceRecognitionReady && Boolean(selectedFaceClusterId))
+  );
+  controlContent.innerHTML = groups.map((group, groupIndex) => {
     if (group.type === "text") {
       const current = controlState[controlStateKey(group.cls, group.key)] ?? group.value;
       return `<section class="control-section" data-type="text" data-class="${group.cls}"><label class="preference-field" for="${tabName}-${group.key}"><span class="control-field-title">${group.title}</span><input id="${tabName}-${group.key}" type="text" data-key="${group.key}" maxlength="${group.maxLength}" value="${escapeHtml(current)}" autocomplete="given-name"></label></section>`;
+    }
+    if (group.type === "faceClusters") {
+      const people = faceClusters.map(person => `<div class="face-cluster${person.id === selectedFaceClusterId ? " is-selected" : ""}" data-face-id="${person.id}" draggable="true"><img src="${person.thumbnail}" alt="${escapeHtml(person.label)}" draggable="false"><button class="face-cluster-name" type="button" data-face-rename="${person.id}" title="Rename ${escapeHtml(person.label)}">${escapeHtml(person.label)}</button><small>${person.sample_count} samples</small><button class="face-cluster-delete" type="button" data-face-delete="${person.id}" aria-label="Delete ${escapeHtml(person.label)}">&times;</button></div>`).join("");
+      const empty = faceClusters.length ? "" : '<p class="face-cluster-empty">No people registered</p>';
+      const cameraUnavailable = captureSources.internal !== "camera_stream";
+      const actionsDisabled = faceRecognitionBusy || cameraUnavailable;
+      const preview = facePreviewVisible
+        ? `<figure class="face-preview"><div class="face-preview-image${facePreviewSource || facePreviewStreamActive ? " has-frame" : ""}">${facePreviewSource || facePreviewStreamActive ? '<canvas class="face-preview-canvas" aria-label="Camera frame with detected faces"></canvas>' : '<span class="face-preview-pending" aria-label="Waiting for camera frame"></span>'}</div><figcaption>${escapeHtml(facePreviewCaption)}</figcaption></figure>`
+        : "";
+      return `<section class="control-section face-cluster-section" data-type="faceClusters"><div class="face-cluster-list${faceRecognitionBusy ? " is-busy" : ""}" data-face-list>${people || empty}</div><div class="face-cluster-actions"><button class="scenario-button face-acquire-button" type="button" ${actionsDisabled ? "disabled" : ""}>${faceRecognitionBusy ? "Acquiring..." : "Acquire faces"}</button><button class="icon-button face-recognize-button" type="button" title="Recognize driver" aria-label="Recognize driver" ${actionsDisabled || !faceClusters.length ? "disabled" : ""}>&#8635;</button></div>${preview}<p class="face-cluster-status" role="status">${escapeHtml(faceRecognitionStatus)}</p></section>`;
     }
     if (group.type === "activities") {
       const aliases = { "Talking": "driver_talking", "Driving": "driver_driving", "Eating": "driver_eating", "On the phone": "driver_on_the_phone", "Sleeping": "driver_sleeping", "About to exit": "driver_about_to_exit", "Children out of place": "children_out_of_place" };
@@ -954,6 +1115,7 @@ function renderControls(tabName) {
     const sectionClass = group.cls ? ` data-class="${group.cls}"` : "";
     return `<section class="control-section" data-type="ranges"${sectionClass}><h3>${group.title}</h3>${controls}</section>`;
   }).join("");
+  controlContent.querySelectorAll("canvas.face-preview-canvas").forEach(drawFacePreview);
   controlContent.querySelectorAll("textarea.auto-grow-textarea").forEach(resizeTextArea);
   if (tabName === "scenario") setFriendSimulation(friendSimulationActive);
 }
@@ -1045,11 +1207,175 @@ function sendProgressive(inputElement, fromValue, toValue) {
 }
 
 controlContent.addEventListener("pointerdown", event => {
+  faceLongPressTriggered = false;
   if (event.target.matches('input[type="range"]')) event.target.dataset.start = event.target.value;
+  const cluster = event.target.closest(".face-cluster");
+  if (!cluster || event.target.closest("button, input")) return;
+  facePressOrigin = { x: event.clientX, y: event.clientY };
+  clearTimeout(facePressTimer);
+  facePressTimer = setTimeout(() => {
+    cluster.closest("[data-face-list]")?.classList.add("is-editing");
+    faceLongPressTriggered = true;
+    facePressTimer = null;
+  }, 650);
 });
 controlContent.addEventListener("click", event => {
+  if (event.target.closest("[data-face-rename-input]")) return;
   const detectButton = event.target.closest(".activity-detect-button");
   if (detectButton) detectCabinActivity(detectButton.dataset.scope);
+  const acquireButton = event.target.closest(".face-acquire-button");
+  if (acquireButton) {
+    faceRecognitionBusy = true;
+    faceRecognitionReady = false;
+    selectedFaceClusterId = null;
+    faceRecognitionStatus = "";
+    startFacePreview("Capturing faces...");
+    renderControls("driver");
+    bridge.call("startFaceRecognition").catch(error => {
+      faceRecognitionBusy = false;
+      faceRecognitionStatus = error.message || "Face acquisition failed";
+      if (activeTab === "driver") renderControls("driver");
+    });
+  }
+  const recognizeButton = event.target.closest(".face-recognize-button");
+  if (recognizeButton) {
+    faceRecognitionBusy = true;
+    faceRecognitionReady = false;
+    selectedFaceClusterId = null;
+    faceRecognitionStatus = "";
+    startFacePreview("Recognizing registered people...");
+    renderControls("driver");
+    bridge.call("recognizeFace").catch(error => {
+      faceRecognitionBusy = false;
+      faceRecognitionReady = true;
+      faceRecognitionStatus = error.message || "Face recognition failed";
+      if (activeTab === "driver") renderControls("driver");
+    });
+  }
+  const deleteButton = event.target.closest("[data-face-delete]");
+  if (deleteButton) {
+    bridge.call("deleteFaceCluster", deleteButton.dataset.faceDelete)
+      .then(clusters => {
+        faceClusters = clusters;
+        faceRecognitionStatus = "Person deleted";
+        if (activeTab === "driver") renderControls("driver");
+      })
+      .catch(error => showToast(error.message || "Could not delete person"));
+  }
+  const renameButton = event.target.closest("[data-face-rename]");
+  if (renameButton) {
+    const identifier = renameButton.dataset.faceRename;
+    const person = faceClusters.find(item => item.id === identifier);
+    if (!person) return;
+    const nameInput = document.createElement("input");
+    nameInput.className = "face-cluster-name-input";
+    nameInput.type = "text";
+    nameInput.maxLength = 40;
+    nameInput.value = person.label;
+    nameInput.dataset.faceRenameInput = identifier;
+    renameButton.replaceWith(nameInput);
+    nameInput.focus();
+    nameInput.select();
+    let finished = false;
+    const finish = save => {
+      if (finished) return;
+      finished = true;
+      const name = nameInput.value.trim();
+      if (!save || !name) {
+        if (save && !name) showToast("Enter a name for this person");
+        if (activeTab === "driver") renderControls("driver");
+        return;
+      }
+      bridge.call("renameFaceCluster", identifier, name)
+        .then(clusters => {
+          faceClusters = clusters;
+          faceRecognitionStatus = `${name} saved`;
+          if (activeTab === "driver") renderControls("driver");
+        })
+        .catch(error => showToast(error.message || "Could not rename person"));
+    };
+    nameInput.addEventListener("keydown", keyEvent => {
+      if (keyEvent.key === "Enter") {
+        keyEvent.preventDefault();
+        finish(true);
+      } else if (keyEvent.key === "Escape") {
+        keyEvent.preventDefault();
+        finish(false);
+      }
+    });
+    nameInput.addEventListener("blur", () => finish(true));
+    return;
+  }
+  const selectedCluster = event.target.closest(".face-cluster");
+  if (selectedCluster && !event.target.closest("button")) {
+    if (faceLongPressTriggered) {
+      faceLongPressTriggered = false;
+      return;
+    }
+    const faceList = selectedCluster.closest("[data-face-list]");
+    if (faceList?.classList.contains("is-editing")) {
+      faceList.classList.remove("is-editing");
+      return;
+    }
+    const identifier = selectedCluster.dataset.faceId === selectedFaceClusterId
+      ? null
+      : selectedCluster.dataset.faceId;
+    bridge.call("selectFaceCluster", identifier)
+      .then(identifier => {
+        selectedFaceClusterId = identifier;
+        faceRecognitionReady = Boolean(identifier);
+        const person = faceClusters.find(item => item.id === identifier);
+        faceRecognitionStatus = person ? `${person.label} selected` : "No driver selected";
+        if (activeTab === "driver") renderControls("driver");
+      })
+      .catch(error => showToast(error.message || "Could not select person"));
+  }
+});
+controlContent.addEventListener("pointermove", event => {
+  if (!facePressOrigin) return;
+  if (Math.hypot(event.clientX - facePressOrigin.x, event.clientY - facePressOrigin.y) > 10) {
+    clearTimeout(facePressTimer);
+    facePressTimer = null;
+    facePressOrigin = null;
+  }
+});
+for (const eventName of ["pointerup", "pointercancel", "pointerleave"]) {
+  controlContent.addEventListener(eventName, () => {
+    clearTimeout(facePressTimer);
+    facePressTimer = null;
+    facePressOrigin = null;
+  });
+}
+controlContent.addEventListener("dragstart", event => {
+  const cluster = event.target.closest(".face-cluster");
+  if (!cluster) return;
+  event.dataTransfer.setData("text/plain", cluster.dataset.faceId);
+  event.dataTransfer.effectAllowed = "move";
+});
+controlContent.addEventListener("dragover", event => {
+  const target = event.target.closest(".face-cluster");
+  if (!target) return;
+  event.preventDefault();
+  target.classList.add("is-drop-target");
+});
+controlContent.addEventListener("dragleave", event => {
+  event.target.closest(".face-cluster")?.classList.remove("is-drop-target");
+});
+controlContent.addEventListener("drop", event => {
+  const target = event.target.closest(".face-cluster");
+  if (!target) return;
+  event.preventDefault();
+  target.classList.remove("is-drop-target");
+  const sourceId = event.dataTransfer.getData("text/plain");
+  const targetId = target.dataset.faceId;
+  if (!sourceId || sourceId === targetId) return;
+  bridge.call("mergeFaceClusters", sourceId, targetId)
+    .then(clusters => {
+      faceClusters = clusters;
+      faceRecognitionStatus = "People merged";
+      if (activeTab === "driver") renderControls("driver");
+    })
+    .catch(error => showToast(error.message || "Could not merge people"));
 });
 controlContent.addEventListener("input", event => {
   if (event.target.matches("textarea.auto-grow-textarea")) resizeTextArea(event.target);
@@ -1109,13 +1435,8 @@ controlContent.addEventListener("change", event => {
         captureSources[scope] = source;
         if (scope === "internal" || scope === "external") {
           setActivityVideoActive(scope, false);
-          if (source === "camera_stream") {
-            return bridge.call("waitCaptureBufferReady", scope)
-              .then(() => {
-                activityBufferReady[scope] = true;
-                setActivityDetectionBusy(scope, activityDetectionBusy[scope]);
-              });
-          }
+          activityBufferReady[scope] = false;
+          setActivityDetectionBusy(scope, activityDetectionBusy[scope]);
         }
         if (["activities", "scenario"].includes(activeTab)) renderControls(activeTab);
         return undefined;
@@ -1250,6 +1571,7 @@ controlContent.addEventListener("click", event => {
     return;
   }
   const scenarioId = button.dataset.scenario;
+  if (!scenarioId) return;
   const wasActive = activeScenario === scenarioId;
   button.disabled = true;
   bridge.call("setScenario", scenarioId, !wasActive)
@@ -1480,11 +1802,20 @@ bridge.on("ready", data => {
   }
   renderKnowledge(data.knowledge);
   rememberControlState("DriverPreferences", data.driverPreferences);
+  faceClusters = Array.isArray(data.faceClusters) ? data.faceClusters : [];
+  selectedFaceClusterId = null;
+  faceRecognitionReady = faceClusters.length === 0;
+  faceRecognitionBusy = false;
+  faceRecognitionStatus = "";
   rememberControlState("DriverAgenda", data.driverAgendaState);
   rememberControlState("VehicleState", data.vehicleState);
   rememberControlState("DriverPhysicalState", data.driverPhysicalState);
   rememberControlState("VehicleSecurityState", data.vehicleSecurityState);
   captureSources = { ...captureSources, ...(data.captureSources || {}) };
+  faceRecognitionBusy = faceClusters.length > 0 && captureSources.internal === "camera_stream";
+  if (faceClusters.length && captureSources.internal !== "camera_stream") {
+    faceRecognitionStatus = "Internal camera stream unavailable";
+  }
   activityRecordings = { ...activityRecordings, ...(data.activityRecordings || {}) };
   for (const scope of ["internal", "external"]) {
     const recordings = activityRecordings[scope] || [];
@@ -1504,19 +1835,22 @@ bridge.on("ready", data => {
   rememberControlState("DetectedObjects", data.detectedObjectsState);
   setFriendSimulation(Boolean(data.friendMessageSimulationActive));
   duplicateSuppressionToggle.checked = Boolean(data.duplicateSuppressionEnabled);
+  const shouldRecognizeFace = faceClusters.length > 0
+    && captureSources.internal === "camera_stream";
+  if (shouldRecognizeFace) {
+    faceRecognitionBusy = true;
+    faceRecognitionReady = false;
+    faceRecognitionStatus = "";
+    startFacePreview("Recognizing registered people...");
+  }
   if (["driver", "vehicle", "activities", "scenario"].includes(activeTab)) renderControls(activeTab);
-  for (const scope of ["internal", "external"]) {
-    if (captureSources[scope] === "camera_stream"
-        && (scope !== "external" || controlState[controlStateKey("VehicleSecurityState", "sentry_mode_enabled")])) {
-      activityBufferReady[scope] = false;
-      bridge.call("setCaptureSource", scope, "camera_stream")
-        .then(() => bridge.call("waitCaptureBufferReady", scope))
-        .then(() => {
-          activityBufferReady[scope] = true;
-          setActivityDetectionBusy(scope, activityDetectionBusy[scope]);
-        })
-        .catch(() => showToast(`Could not start ${scope} camera buffer`));
-    }
+  if (shouldRecognizeFace) {
+    bridge.call("recognizeFace").catch(error => {
+      faceRecognitionBusy = false;
+      faceRecognitionReady = true;
+      faceRecognitionStatus = error.message || "Face recognition failed";
+      if (activeTab === "driver") renderControls("driver");
+    });
   }
   conversationButton.disabled = !data.sttEnabled;
   bridge.call("eventProcessingChanged", document.querySelector("#processing-toggle").checked).catch(() => {});
@@ -1565,10 +1899,87 @@ bridge.on("captureSourcesChanged", data => {
   controlContent.querySelectorAll("select[data-capture-scope]").forEach(select => {
     select.value = captureSources[select.dataset.captureScope] || select.value;
   });
+  if (faceClusters.length) {
+    faceRecognitionStatus = captureSources.internal === "camera_stream"
+      ? ""
+      : "Internal camera stream unavailable";
+  }
+  if (activeTab === "driver") renderControls("driver");
 });
 bridge.on("activityVideoStateChanged", data => {
   const state = data[0] || {};
   if (state.scope) setActivityVideoActive(state.scope, Boolean(state.active));
+});
+bridge.on("faceClustersChanged", data => {
+  const state = data[0] || {};
+  if (typeof state.busy === "boolean") faceRecognitionBusy = state.busy;
+  if (state.previewStreamActive === true) {
+    clearTimeout(facePreviewHideTimer);
+    facePreviewVisible = true;
+    facePreviewSource = "";
+    facePreviewStreamActive = true;
+    facePreviewStreamUrl = `/face-preview.mjpeg?session=${Date.now()}`;
+    facePreviewCaption = state.recognizing
+      ? "Live recognition of registered people"
+      : "Live face detection";
+  }
+  if (state.busy && !facePreviewVisible) {
+    startFacePreview(state.recognizing ? "Recognizing registered people..." : "Capturing faces...");
+  }
+  if (typeof state.preview === "string") {
+    facePreviewVisible = true;
+    facePreviewSource = state.preview;
+    facePreviewDetections = [];
+    facePreviewCaption = state.recognizing ? "Checking registered people..." : "Detecting faces...";
+  }
+  if (Array.isArray(state.previewDetections)) {
+    facePreviewDetections = state.previewDetections;
+  }
+  if (typeof state.previewFrame === "string") {
+    facePreviewVisible = true;
+    facePreviewSource = state.previewFrame;
+    if (state.previewStreamActive !== true) {
+      facePreviewStreamActive = false;
+      facePreviewStreamUrl = "";
+      cancelAnimationFrame(facePreviewAnimationFrame);
+    }
+  }
+  if (state.previewStreamActive === false && facePreviewStreamActive) {
+    freezeFacePreview();
+  }
+  if (Array.isArray(state.clusters)) faceClusters = state.clusters;
+  if (Object.hasOwn(state, "selectedId")) {
+    selectedFaceClusterId = state.selectedId;
+    faceRecognitionReady = Boolean(state.selectedId);
+  }
+  if (state.recognizing && !state.busy) faceRecognitionReady = true;
+  if (state.error) {
+    faceRecognitionStatus = state.error;
+    facePreviewCaption = state.error;
+    showToast(state.error);
+  } else if (state.recognizing && !state.matched) {
+    faceRecognitionStatus = "No registered face recognized";
+  } else if (typeof state.created === "number") {
+    faceRecognitionStatus = `${state.created} new, ${state.updated || 0} updated`;
+  }
+  if (typeof state.detectedFaces === "number") {
+    facePreviewCaption = state.detectedFaces === 0
+      ? "No faces detected"
+      : `${state.detectedFaces} face${state.detectedFaces === 1 ? "" : "s"} detected`;
+  }
+  if (Array.isArray(state.previewDetections) && typeof state.detectedFaces === "number") {
+    const previewCount = state.previewDetections.length;
+    facePreviewCaption = `${previewCount} face${previewCount === 1 ? "" : "s"} in frame, ${state.detectedFaces} detections across scan`;
+  }
+  if (state.busy === false && facePreviewVisible) {
+    clearTimeout(facePreviewHideTimer);
+    facePreviewHideTimer = setTimeout(() => {
+      facePreviewVisible = false;
+      facePreviewSource = "";
+      if (activeTab === "driver") renderControls("driver");
+    }, 3000);
+  }
+  if (activeTab === "driver") renderControls("driver");
 });
 bridge.on("vehicleSecurityStateChanged", data => {
   const changed = rememberControlState("VehicleSecurityState", data[0]);

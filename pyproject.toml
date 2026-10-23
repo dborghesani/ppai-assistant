@@ -31,6 +31,9 @@ dependencies = [
     "kev; python_version >= '3.12' and python_version < '3.14'",
     "flash-linear-attention==0.5.2",
     "causal-conv1d>=1.5; python_version >= '3.12' and platform_machine == 'x86_64'",
+    "deepface>=0.0.93",
+    "ultralytics>=8.1.6,<9",
+    "werkzeug>=3.0",
 ]
 
 [[tool.uv.index]]

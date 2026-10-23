@@ -44,6 +44,8 @@ def test_emotion_persistence_requires_duration_and_resets_when_emotion_drops():
     manager = KnowledgeManager.__new__(KnowledgeManager)
     manager.logger = Mock()
     for field in fields(DriverEmotionState):
+        if not field.metadata.get("knowledge", False):
+            continue
         if field.name == "neutral":
             assert not field.metadata["persistence_levels"]
             continue

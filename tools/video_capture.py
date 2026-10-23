@@ -358,6 +358,11 @@ class VideoCapture:
                 return None
             return self._buffer_settings.get(buffer_key)
 
+    def latest_buffer_frame(self, buffer_key: str) -> VideoFrame | None:
+        with self._buffer_condition:
+            buffer = self._buffers.get(buffer_key)
+            return buffer[-1] if buffer else None
+
     def close(self) -> None:
         for scope in tuple(self._buffer_threads):
             self.stop_buffer(scope)

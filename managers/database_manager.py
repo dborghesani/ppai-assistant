@@ -57,7 +57,7 @@ class DatabaseManager:
         query = f'''from(bucket: "{self.opt.influxdb_bucket}")
   |> range(start: 0)
   |> filter(fn: (r) => r._measurement == "DriverPreferences")
-  |> filter(fn: (r) => r._field == "preferred_cabin_temperature" or r._field == "preferred_music")
+    |> filter(fn: (r) => r._field == "preferred_cabin_temperature" or r._field == "preferred_music" or r._field == "face_cluster_id")
   |> last()'''
         try:
             records = self.run_records(query)
@@ -86,6 +86,14 @@ class DatabaseManager:
                     restored = True
             elif field_name == "preferred_music" and isinstance(value, str):
                 preferences.preferred_music = value.strip()[:500]
+                restored = True
+            elif (
+                field_name == "face_cluster_id"
+                and isinstance(value, str)
+                and len(value) == 32
+                and all(character in "0123456789abcdef" for character in value)
+            ):
+                preferences.face_cluster_id = value
                 restored = True
 
         if restored:
@@ -146,6 +154,14 @@ class DatabaseManager:
             self.logger.warning("Ignoring non-dataclass data event", data=data)
             return
 
+        name = type(data).__name__
+        previous = self.current_state.get(name)
+        if (
+            name in {"DriverPreferences", "DriverEmotionState"}
+            and previous is not None
+            and getattr(data, "face_cluster_id", None) is None
+        ):
+            setattr(data, "face_cluster_id", getattr(previous, "face_cluster_id", None))
         type_hints = get_type_hints(type(data))
         values = {}
         for data_field in fields(data):
@@ -161,7 +177,6 @@ class DatabaseManager:
             )
             return
 
-        name = type(data).__name__
         point = Point(name).time(time.time_ns(), write_precision=WritePrecision.NS)
         for field_name, field_value in values.items():
             point.field(field_name, self._influx_field_value(field_value))

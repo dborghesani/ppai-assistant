@@ -356,6 +356,7 @@ class DriverPreferences:
         value_kind="category",
         notify_on_change=False,
     )
+    face_cluster_id: str | None = None
 
 
 @dataclass
@@ -388,6 +389,7 @@ class DriverEmotionState:
                                             value_kind="intensity",
                                             #persistence_levels=("medium", "high", "very high")
                                             )
+    face_cluster_id: str | None = None
 
 @dataclass
 class DriverDrivingStyle:

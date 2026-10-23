@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import json
 import math
 import random
 import time
 from collections import defaultdict
+from collections.abc import Awaitable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, DefaultDict, Tuple
@@ -12,9 +15,9 @@ import structlog
 from data.agents_dataclasses import ActionType, ActivityTypeExternal, ActivityTypeInternal
 from agents.tasks.activity_recognition import ActivityDetectionExternal, ActivityDetectionInternal
 from agents.automotive_agent import AutomotiveAgent
-from config import ConfigAssistant
+from config import ConfigAssistant, PROJECT_ROOT
 from data.assistant_dataclasses import (
-    DetectedObjects, DriverAgenda, DriverPreferences, VehicleSecurityState, VehicleState,
+    DetectedObjects, DriverAgenda, DriverEmotionState, DriverPreferences, VehicleSecurityState, VehicleState,
 )
 from managers.database_manager import DatabaseManager
 from managers.mqtt_thread import MqttThreadClient
@@ -22,11 +25,11 @@ from data.events import CarEvent, EventName
 from managers.knowledge_manager import KnowledgeManager
 from data.agents_dataclasses import SkillType
 from agents.tasks.routing import TaskType
+from ui.face_clusters import FaceClusterStore
+from tools.video_capture import VideoFrame, VideoFrames
 
 if TYPE_CHECKING:
     from voice.stt_manager import STTManager
-
-
 class VehicleBridge:
     def __init__(
         self,
@@ -42,24 +45,17 @@ class VehicleBridge:
         self.agent = agent
         self.loop = loop
         self.database_manager = database_manager
-        self.database_manager.current_state.setdefault(
-            "DriverPreferences", DriverPreferences()
-        )
+        self.database_manager.current_state.setdefault("DriverPreferences", DriverPreferences())
         self.knowledge_manager = knowledge_manager
         self.knowledge_manager.on_context_updated = self._on_knowledge_updated
         self.knowledge_manager.on_knowledge_changed = self.on_knowledge_changed
         self.stt_manager = stt_manager
         self._listeners: DefaultDict[str, list[Callable[..., None]]] = defaultdict(list)
         self.agent.on_response = lambda message: self._emit("responseReceived", message)
-        self.agent.on_response_update = lambda message: self._emit(
-            "responseUpdated", message
-        )
-        self.agent.on_speaking_tone_changed = lambda tone: self._emit(
-            "speakingToneChanged", tone
-        )
+        self.agent.on_response_update = lambda message: self._emit("responseUpdated", message)
+        self.agent.on_speaking_tone_changed = lambda tone: self._emit("speakingToneChanged", tone)
         self.agent.on_incoming_message_classified = lambda tone, urgency: self._emit(
-            "incomingMessageClassified",
-            {"tone": tone.value, "urgency": urgency.value},
+            "incomingMessageClassified", {"tone": tone.value, "urgency": urgency.value}
         )
         self.agent.on_assistant_status_changed = lambda flags: self._emit(
             "assistantStatusChanged", {
@@ -78,11 +74,19 @@ class VehicleBridge:
         self._driving_capture_event: asyncio.Event | None = None
         self._last_driving_time: dict | None = None
         self._activity_detection_task: asyncio.Task | None = None
-        if self.agent.capture_sources.get("internal") == "camera_stream":
-            try:
-                self.agent.video_capture.start_buffer("internal", "camera_stream")
-            except Exception as error:
-                self.logger.warning("Could not start internal camera buffer", error=str(error))
+        self._face_detection_task: asyncio.Task | None = None
+        self._camera_capture_locks = {
+            scope: asyncio.Lock() for scope in ("internal", "external")
+        }
+        self.face_clusters = FaceClusterStore(PROJECT_ROOT / ".cache" / "face_clusters")
+        preferences = self.database_manager.current_state["DriverPreferences"]
+        if preferences.face_cluster_id and self.face_clusters.contains_cluster(preferences.face_cluster_id):
+            emotion_state = self.database_manager.current_state.setdefault(
+                "DriverEmotionState", DriverEmotionState()
+            )
+            emotion_state.face_cluster_id = preferences.face_cluster_id
+        else:
+            preferences.face_cluster_id = None
 
         self._mqtt_client: MqttThreadClient | None = None
         if self.opt.mqtt_enabled:
@@ -100,23 +104,16 @@ class VehicleBridge:
 
     def set_stt_manager(self, stt_manager: "STTManager | None") -> None:
         self.stt_manager = stt_manager
-        self._emit(
-            "sttEnabledChanged",
-            bool(stt_manager is not None and stt_manager.enabled),
-        )
+        self._emit("sttEnabledChanged", bool(stt_manager is not None and stt_manager.enabled))
 
-    def apply_vehicle_action(
-        self, action_type: ActionType, parameters: dict[str, Any]
-    ) -> None:
+    def apply_vehicle_action(self, action_type: ActionType, parameters: dict[str, Any]) -> None:
         if action_type is ActionType.ENABLE_SENTRY_MODE:
             self.database_manager.write_measure("VehicleSecurityState", "sentry_mode_enabled", True)
             self._emit("vehicleSecurityStateChanged", {"sentry_mode_enabled": True})
             return
         window_fields = (
-            "window_open_front_left",
-            "window_open_front_right",
-            "window_open_rear_left",
-            "window_open_rear_right",
+            "window_open_front_left", "window_open_front_right",
+            "window_open_rear_left", "window_open_rear_right",
         )
         state_updates: dict[str, Any] = {
             ActionType.OPEN_WINDOWS: dict.fromkeys(window_fields, True),
@@ -156,13 +153,9 @@ class VehicleBridge:
         vehicle_state = self.database_manager.current_state.get("VehicleState")
         if action_type is ActionType.APPLY_RESTRICTIVE_ADAS_PROFILE:
             current_target_speed = getattr(vehicle_state, "adas_target_speed", None)
-            current_following_distance = getattr(
-                vehicle_state, "following_distance_level", None
-            )
+            current_following_distance = getattr(vehicle_state, "following_distance_level", None)
             current_target_speed = 90 if current_target_speed is None else current_target_speed
-            current_following_distance = (
-                3 if current_following_distance is None else current_following_distance
-            )
+            current_following_distance = 3 if current_following_distance is None else current_following_distance
             state_updates = {
                 "adaptive_cruise_control_on": True,
                 "adas_target_speed": max(0, current_target_speed - 10),
@@ -170,62 +163,26 @@ class VehicleBridge:
                 "lane_keep_assist_enabled": True,
                 "blind_spot_monitor": True,
             }
-        elif action_type in {
-            ActionType.REDUCE_TARGET_SPEED,
-            ActionType.INCREASE_TARGET_SPEED,
-        }:
+        elif action_type in {ActionType.REDUCE_TARGET_SPEED, ActionType.INCREASE_TARGET_SPEED}:
             current_target_speed = getattr(vehicle_state, "adas_target_speed", None)
             current_target_speed = 90 if current_target_speed is None else current_target_speed
-            target_speed_step = (
-                10 if action_type is ActionType.INCREASE_TARGET_SPEED else -10
-            )
-            state_updates = {
-                "adas_target_speed": min(160, max(0, current_target_speed + target_speed_step))
-            }
-        elif action_type in {
-            ActionType.INCREASE_FOLLOWING_DISTANCE,
-            ActionType.DECREASE_FOLLOWING_DISTANCE,
-        }:
-            current_following_distance = getattr(
-                vehicle_state, "following_distance_level", None
-            )
-            current_following_distance = (
-                3 if current_following_distance is None else current_following_distance
-            )
-            following_distance_step = (
-                1 if action_type is ActionType.INCREASE_FOLLOWING_DISTANCE else -1
-            )
-            state_updates = {
-                "following_distance_level": min(
-                    5, max(1, current_following_distance + following_distance_step)
-                )
-            }
-        elif action_type in {
-            ActionType.INCREASE_FAN_SPEED,
-            ActionType.DECREASE_FAN_SPEED,
-        }:
+            step = 10 if action_type is ActionType.INCREASE_TARGET_SPEED else -10
+            state_updates = {"adas_target_speed": min(160, max(0, current_target_speed + step))}
+        elif action_type in {ActionType.INCREASE_FOLLOWING_DISTANCE, ActionType.DECREASE_FOLLOWING_DISTANCE}:
+            current_following_distance = getattr(vehicle_state, "following_distance_level", None)
+            current_following_distance = 3 if current_following_distance is None else current_following_distance
+            step = 1 if action_type is ActionType.INCREASE_FOLLOWING_DISTANCE else -1
+            state_updates = {"following_distance_level": min(5, max(1, current_following_distance + step))}
+        elif action_type in {ActionType.INCREASE_FAN_SPEED, ActionType.DECREASE_FAN_SPEED}:
             current_fan_speed = getattr(vehicle_state, "fan_speed", None)
-            if current_fan_speed is None:
-                current_fan_speed = VehicleState().fan_speed or 3
-            fan_speed_step = (
-                1 if action_type is ActionType.INCREASE_FAN_SPEED else -1
-            )
-            state_updates = {
-                "fan_speed": min(7, max(0, current_fan_speed + fan_speed_step))
-            }
-        elif action_type in {
-            ActionType.INCREASE_AUDIO_VOLUME,
-            ActionType.DECREASE_AUDIO_VOLUME,
-        }:
+            current_fan_speed = VehicleState().fan_speed or 3 if current_fan_speed is None else current_fan_speed
+            step = 1 if action_type is ActionType.INCREASE_FAN_SPEED else -1
+            state_updates = {"fan_speed": min(7, max(0, current_fan_speed + step))}
+        elif action_type in {ActionType.INCREASE_AUDIO_VOLUME, ActionType.DECREASE_AUDIO_VOLUME}:
             current_audio_volume = getattr(vehicle_state, "audio_volume", None)
-            if current_audio_volume is None:
-                current_audio_volume = VehicleState().audio_volume or 20
-            audio_volume_step = (
-                5 if action_type is ActionType.INCREASE_AUDIO_VOLUME else -5
-            )
-            state_updates = {
-                "audio_volume": min(100, max(0, current_audio_volume + audio_volume_step))
-            }
+            current_audio_volume = VehicleState().audio_volume or 20 if current_audio_volume is None else current_audio_volume
+            step = 5 if action_type is ActionType.INCREASE_AUDIO_VOLUME else -5
+            state_updates = {"audio_volume": min(100, max(0, current_audio_volume + step))}
         if not state_updates:
             return
         for measure, value in state_updates.items():
@@ -621,6 +578,284 @@ class VehicleBridge:
         self._activity_detection_task = asyncio.create_task(self._detect_activity(scope))
         return True
 
+    def dumpFaceClusters(self) -> list[dict]:
+        return self.face_clusters.list_clusters()
+
+    def dumpSelectedFaceClusterId(self) -> str | None:
+        preferences = self.database_manager.current_state.get("DriverPreferences", DriverPreferences())
+        identifier = preferences.face_cluster_id
+        return identifier if identifier and self.face_clusters.contains_cluster(identifier) else None
+
+    def _setFaceClusterId(self, identifier: str) -> None:
+        stored_identifier = identifier or ""
+        self.database_manager.write_measure("DriverPreferences", "face_cluster_id", stored_identifier)
+        self.database_manager.write_measure("DriverEmotionState", "face_cluster_id", stored_identifier)
+        if not identifier:
+            self.database_manager.current_state["DriverPreferences"].face_cluster_id = None
+            self.database_manager.current_state["DriverEmotionState"].face_cluster_id = None
+
+    def selectFaceCluster(self, identifier: str | None) -> str | None:
+        if identifier is not None and not self.face_clusters.contains_cluster(identifier):
+            raise ValueError("Person cluster no longer exists")
+        self._setFaceClusterId(identifier or "")
+        self._emit("faceClustersChanged", {
+            "selectedId": identifier,
+            "clusters": self.dumpFaceClusters(),
+        })
+        return identifier
+
+    def startFaceRecognition(self) -> bool:
+        if self._face_detection_task is not None and not self._face_detection_task.done():
+            raise ValueError("Face acquisition is already running")
+        self._face_detection_task = asyncio.create_task(self._detect_face_clusters())
+        return True
+
+    def recognizeFace(self) -> bool:
+        if self._face_detection_task is not None and not self._face_detection_task.done():
+            raise ValueError("Face recognition is already running")
+        self._face_detection_task = asyncio.create_task(self._recognize_face_cluster())
+        return True
+
+    async def _capture_camera_frames(
+        self,
+        scope: str,
+        frame_count: int,
+        on_preview: Callable[[VideoFrame], None] | None = None,
+        on_frame: Callable[[VideoFrame], Awaitable[None]] | None = None,
+        on_stream_started: Callable[[], None] | None = None,
+    ) -> VideoFrames:
+        async with self._camera_capture_stream(scope) as video_capture:
+            if on_stream_started is not None:
+                on_stream_started()
+            capture_task = asyncio.create_task(video_capture.get_buffer_frames(scope, frame_count=frame_count))
+            last_preview_seconds: float | None = None
+            analyzed_seconds: set[float] = set()
+
+            async def observe(frame: VideoFrame) -> None:
+                nonlocal last_preview_seconds
+                if frame.seconds == last_preview_seconds:
+                    return
+                last_preview_seconds = frame.seconds
+                if on_preview is not None:
+                    on_preview(frame)
+                if on_frame is not None and frame.seconds not in analyzed_seconds:
+                    analyzed_seconds.add(frame.seconds)
+                    await on_frame(frame)
+
+            try:
+                while not capture_task.done():
+                    frame = video_capture.latest_buffer_frame(scope)
+                    if frame is not None:
+                        await observe(frame)
+                    await asyncio.sleep(0.1)
+                frames = await capture_task
+                for frame in frames.frames:
+                    await observe(frame)
+                return frames
+            finally:
+                if not capture_task.done():
+                    capture_task.cancel()
+                    await asyncio.gather(capture_task, return_exceptions=True)
+
+    @asynccontextmanager
+    async def _camera_capture_stream(self, scope: str):
+        video_capture = self.agent.video_capture
+        async with self._camera_capture_locks[scope]:
+            if self.agent.capture_sources.get(scope, "camera_stream") != "camera_stream":
+                raise RuntimeError("Select the camera stream as the capture source first")
+            active_source = video_capture.buffer_source(scope)
+            if active_source is not None and active_source[0] != "camera_stream":
+                raise RuntimeError("The camera capture source is changing; try again shortly")
+            video_capture.start_buffer(scope, "camera_stream")
+            try:
+                yield video_capture
+            finally:
+                video_capture.stop_buffer(scope)
+
+    async def _recognize_face_cluster(self) -> None:
+        self._emit("faceClustersChanged", {"busy": True, "recognizing": True})
+        try:
+            if not self.face_clusters.list_clusters():
+                self._setFaceClusterId("")
+                self.logger.info("Startup face recognition skipped: no registered clusters")
+                self._emit("faceClustersChanged", {
+                    "busy": False, "recognizing": True, "matched": False,
+                    "previewStreamActive": False, "selectedId": None, "clusters": [],
+                })
+                return
+
+            latest_detections: list[tuple[float, float, float, float]] = []
+            latest_preview_frame: str | None = None
+
+            async def analyze_frame(frame: VideoFrame) -> None:
+                nonlocal latest_detections, latest_preview_frame
+                samples = await asyncio.to_thread(
+                    self.face_clusters.extract_frame_samples,
+                    base64.b64decode(frame.image_base64),
+                )
+                latest_detections = [
+                    sample.detection_box for sample in samples if sample.detection_box is not None
+                ]
+                latest_preview_frame = frame.image_base64
+                self._emit("faceClustersChanged", {
+                    "busy": True, "recognizing": True, "previewStreamActive": True,
+                    "previewFrame": latest_preview_frame,
+                    "previewDetections": latest_detections,
+                    "detectedFaces": len(samples),
+                })
+
+            frames = await self._capture_camera_frames(
+                "internal",
+                6,
+                on_frame=analyze_frame,
+                on_stream_started=lambda: self._emit("faceClustersChanged", {
+                    "busy": True, "recognizing": True, "previewStreamActive": True,
+                }),
+            )
+            frame_bytes = [base64.b64decode(frame.image_base64) for frame in frames.frames]
+            recognition = await asyncio.to_thread(self.face_clusters.recognize_frames, frame_bytes)
+            matches = recognition["matches"]
+            identifier = matches[0]["id"] if matches else None
+            self._setFaceClusterId(identifier or "")
+            if identifier is not None:
+                self.logger.info(
+                    "Recognized registered driver",
+                    cluster_id=identifier,
+                    distance=matches[0]["distance"],
+                    detected_faces=recognition["faces_detected"],
+                )
+            elif recognition["faces_detected"] == 0:
+                self.logger.info("No face detected during driver recognition")
+            else:
+                self.logger.info(
+                    "Face detected but no registered person matched",
+                    detected_faces=recognition["faces_detected"],
+                )
+            self._emit("faceClustersChanged", {
+                "busy": False, "recognizing": True, "previewStreamActive": False,
+                "matched": identifier is not None, "selectedId": identifier,
+                "detectedFaces": recognition["faces_detected"],
+                "previewDetections": latest_detections,
+                "previewFrame": latest_preview_frame,
+                "clusters": self.dumpFaceClusters(),
+            })
+        except asyncio.CancelledError:
+            self._emit("faceClustersChanged", {
+                "busy": False, "recognizing": True, "previewStreamActive": False,
+            })
+            raise
+        except Exception as error:
+            self.logger.warning("Startup face recognition failed", error=str(error))
+            self._emit("faceClustersChanged", {
+                "busy": False, "recognizing": True, "previewStreamActive": False,
+                "error": "Could not recognize a face from the internal camera stream.",
+            })
+
+    async def _detect_face_clusters(self) -> None:
+        self._emit("faceClustersChanged", {"busy": True})
+        try:
+            live_samples = []
+            latest_detections: list[tuple[float, float, float, float]] = []
+            latest_preview_frame: str | None = None
+
+            async def analyze_frame(frame: VideoFrame) -> None:
+                nonlocal latest_detections, latest_preview_frame
+                samples = await asyncio.to_thread(
+                    self.face_clusters.extract_frame_samples,
+                    base64.b64decode(frame.image_base64),
+                )
+                live_samples.extend(samples)
+                latest_detections = [
+                    sample.detection_box for sample in samples if sample.detection_box is not None
+                ]
+                latest_preview_frame = frame.image_base64
+                self._emit("faceClustersChanged", {
+                    "busy": True, "previewStreamActive": True,
+                    "previewFrame": latest_preview_frame,
+                    "previewDetections": latest_detections,
+                    "detectedFaces": len(samples),
+                })
+
+            frames = await self._capture_camera_frames(
+                "internal",
+                6,
+                on_frame=analyze_frame,
+                on_stream_started=lambda: self._emit("faceClustersChanged", {
+                    "busy": True, "previewStreamActive": True,
+                }),
+            )
+            frame_bytes = [base64.b64decode(frame.image_base64) for frame in frames.frames]
+            result = await asyncio.to_thread(self.face_clusters.process_frames, frame_bytes)
+            matched_ids = result["matchedIds"]
+            selected_id = matched_ids[0] if len(matched_ids) == 1 else None
+            if selected_id:
+                self._setFaceClusterId(selected_id)
+            elif len(matched_ids) > 1:
+                self._setFaceClusterId("")
+            self.logger.info(
+                "Face acquisition completed",
+                detected_faces=result["detectedFaces"],
+                created_clusters=result["created"],
+                updated_clusters=result["updated"],
+            )
+            self._emit("faceClustersChanged", {
+                "busy": False, "previewStreamActive": False,
+                "selectedId": selected_id if len(matched_ids) <= 1 else None,
+                "previewDetections": latest_detections,
+                "previewFrame": latest_preview_frame,
+                **result,
+            })
+        except asyncio.CancelledError:
+            self._emit("faceClustersChanged", {
+                "busy": False, "previewStreamActive": False,
+            })
+            raise
+        except Exception as error:
+            self.logger.warning("Face recognition failed", error=str(error))
+            message = str(error) if "No usable faces" in str(error) or "Select and start" in str(error) else "Face recognition failed; check the DeepFace installation and camera."
+            no_faces = "No usable faces" in str(error)
+            if no_faces:
+                self._setFaceClusterId("")
+                self.logger.info("No face detected during manual acquisition")
+            self._emit("faceClustersChanged", {
+                "busy": False, "previewStreamActive": False,
+                "error": message,
+                "selectedId": None if no_faces else self.dumpSelectedFaceClusterId(),
+                "matched": not no_faces,
+                "detectedFaces": 0 if no_faces else None,
+                "clusters": self.dumpFaceClusters(),
+            })
+
+    def deleteFaceCluster(self, identifier: str) -> list[dict]:
+        selected = self.dumpSelectedFaceClusterId() == identifier
+        clusters = self.face_clusters.delete_cluster(identifier)
+        if selected:
+            self._setFaceClusterId("")
+        self._emit("faceClustersChanged", {
+            "clusters": clusters,
+            "selectedId": None if selected else self.dumpSelectedFaceClusterId(),
+        })
+        return clusters
+
+    def renameFaceCluster(self, identifier: str, name: str) -> list[dict]:
+        clusters = self.face_clusters.rename_cluster(identifier, name)
+        self._emit("faceClustersChanged", {
+            "clusters": clusters,
+            "selectedId": self.dumpSelectedFaceClusterId(),
+        })
+        return clusters
+
+    def mergeFaceClusters(self, source_id: str, target_id: str) -> list[dict]:
+        selected_source = self.dumpSelectedFaceClusterId() == source_id
+        clusters = self.face_clusters.merge_clusters(source_id, target_id)
+        if selected_source:
+            self._setFaceClusterId(target_id)
+        self._emit("faceClustersChanged", {
+            "clusters": clusters,
+            "selectedId": target_id if selected_source else self.dumpSelectedFaceClusterId(),
+        })
+        return clusters
+
     async def _detect_activity(self, scope: str = "internal") -> None:
         self._emit("activityDetectionChanged", {"busy": True, "scope": scope})
         try:
@@ -629,8 +864,14 @@ class VehicleBridge:
             video_path = active_source[1] if active_source and active_source[0] == source_name else None
             if source_name == "video_file" and video_path is None:
                 raise RuntimeError("Select and start an activity video before detection")
-            source = self.agent.video_capture.start_buffer(scope, source_name, video_path)
-            frames = await self.agent.video_capture.get_buffer_frames(scope)
+            if source_name == "camera_stream":
+                frames = await self._capture_camera_frames(
+                    scope, self.opt.activity_capture_frame_count
+                )
+                source = frames.source
+            else:
+                source = self.agent.video_capture.start_buffer(scope, source_name, video_path)
+                frames = await self.agent.video_capture.get_buffer_frames(scope)
             self._emit("activityDetectionChanged", {
                 "busy": True, "scope": scope, "source": source,
             })
@@ -676,9 +917,6 @@ class VehicleBridge:
             state_updates["activity"] = activity
             self.agent.video_capture.stop_buffer("external")
             self._emit("activityVideoStateChanged", {"scope": "external", "active": False})
-        elif (classname == "VehicleSecurityState" and varname == "sentry_mode_enabled"
-              and value and self.agent.capture_sources.get("external") == "camera_stream"):
-            self.agent.video_capture.start_buffer("external", "camera_stream")
         if classname == "VehicleSecurityState" and self.agent.is_listening:
             self._emit("vehicleSecurityStateChanged", state_updates)
 
@@ -693,9 +931,6 @@ class VehicleBridge:
             "scene": "scene_understanding_source",
         }[scope]
         setattr(self.opt, config_key, source)
-        if scope in {"internal", "external"} and source == "camera_stream":
-            if scope == "internal" or self.dumpVehicleSecurityState()["sentry_mode_enabled"]:
-                self.agent.video_capture.start_buffer(scope, source)
         self._emit("captureSourcesChanged", self.dumpCaptureSources())
         return source
 
@@ -713,6 +948,11 @@ class VehicleBridge:
             raise ValueError("Activity scope must be internal or external")
         if scope == "external" and not self.dumpVehicleSecurityState()["sentry_mode_enabled"]:
             raise ValueError("Enable sentry mode before external activity capture")
+        if (
+            self.agent.capture_sources.get(scope) == "camera_stream"
+            and self.agent.video_capture.buffer_source(scope) is None
+        ):
+            return True
         await self.agent.video_capture.wait_buffer_ready(scope)
         return True
 

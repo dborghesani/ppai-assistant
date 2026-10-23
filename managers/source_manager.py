@@ -57,6 +57,11 @@ class SourceManager:
             return None
 
         valid_fields = {field.name for field in fields(data_class)}
+        if name in {"DriverEmotionState", "DriverPreferences"}:
+            valid_fields = {
+                field.name for field in fields(data_class)
+                if field.metadata.get("knowledge", False)
+            }
         data = {key: value for key, value in values.items() if key in valid_fields}
         try:
             instance = data_class(**data)
@@ -398,7 +403,10 @@ class SourceManager:
                 or payload.get("data")
             )
             if isinstance(data, dict):
-                valid_fields = {f.name for f in fields(DriverEmotionState)}
+                valid_fields = {
+                    f.name for f in fields(DriverEmotionState)
+                    if f.metadata.get("knowledge", False)
+                }
                 provided = {k: v for k, v in data.items() if k in valid_fields}
                 driver_emotion = self._null_out_unprovided_fields(
                     DriverEmotionState(**provided), provided

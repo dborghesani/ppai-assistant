@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ class WebUIServer:
         "clearConversation",
         "dumpKnowledge",
         "detectActivity",
+        "deleteFaceCluster",
+        "renameFaceCluster",
         "duplicateSuppressionChanged",
         "eventProcessingChanged",
         "floatChanged",
@@ -34,6 +37,10 @@ class WebUIServer:
         "musicControl",
         "setScenario",
         "setDriverPreference",
+        "selectFaceCluster",
+        "recognizeFace",
+        "startFaceRecognition",
+        "mergeFaceClusters",
         "startConversation",
         "startVoiceInput",
         "stopConversation",
@@ -61,6 +68,8 @@ class WebUIServer:
         self._app.router.add_get("/", self._index)
         self._app.router.add_get("/ws", self._websocket)
         self._app.router.add_get("/health", self._health)
+        self._app.router.add_get("/face-clusters/{identifier}.jpg", self._face_thumbnail)
+        self._app.router.add_get("/face-preview.mjpeg", self._face_preview_stream)
         self._app.router.add_static("/static", static_dir)
         driving_video = getattr(getattr(bridge, "opt", None), "driving_video", "") or "recordings/rome.mp4"
         recordings_dir = PROJECT_ROOT / Path(driving_video).parent
@@ -96,6 +105,7 @@ class WebUIServer:
             "vehicleSecurityStateChanged",
             "captureSourcesChanged",
             "activityVideoStateChanged",
+            "faceClustersChanged",
         ):
             bridge.on(
                 event_name,
@@ -120,6 +130,10 @@ class WebUIServer:
         if detection is not None and not detection.done():
             detection.cancel()
             await asyncio.gather(detection, return_exceptions=True)
+        face_detection = getattr(self.bridge, "_face_detection_task", None)
+        if face_detection is not None and not face_detection.done():
+            face_detection.cancel()
+            await asyncio.gather(face_detection, return_exceptions=True)
         clients = tuple(self._clients)
         for client in clients:
             await client.close(code=1001, message=b"Server shutting down")
@@ -144,6 +158,59 @@ class WebUIServer:
 
     async def _health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "clients": len(self._clients)})
+
+    async def _face_thumbnail(self, request: web.Request) -> web.FileResponse:
+        store = getattr(self.bridge, "face_clusters", None)
+        if store is None:
+            raise web.HTTPNotFound()
+        try:
+            path = store.thumbnail_path(request.match_info["identifier"])
+        except ValueError as error:
+            raise web.HTTPNotFound() from error
+        if path is None:
+            raise web.HTTPNotFound()
+        return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+
+    async def _face_preview_stream(self, request: web.Request) -> web.StreamResponse:
+        task = getattr(self.bridge, "_face_detection_task", None)
+        video_capture = getattr(getattr(self.bridge, "agent", None), "video_capture", None)
+        if task is None or task.done() or video_capture is None:
+            raise web.HTTPNotFound()
+        if video_capture.buffer_source("internal") is None:
+            raise web.HTTPNotFound()
+
+        response = web.StreamResponse(
+            headers={
+                "Content-Type": "multipart/x-mixed-replace; boundary=frame",
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "X-Accel-Buffering": "no",
+            }
+        )
+        await response.prepare(request)
+        last_frame_seconds = None
+        try:
+            while video_capture.buffer_source("internal") is not None:
+                frame = video_capture.latest_buffer_frame("internal")
+                if frame is not None and frame.seconds != last_frame_seconds:
+                    image = base64.b64decode(frame.image_base64)
+                    part = (
+                        b"--frame\r\nContent-Type: image/jpeg\r\n"
+                        + f"Content-Length: {len(image)}\r\n\r\n".encode("ascii")
+                        + image
+                        + b"\r\n"
+                    )
+                    await response.write(part)
+                    last_frame_seconds = frame.seconds
+                await asyncio.sleep(0.03)
+        except ConnectionResetError:
+            pass
+        finally:
+            try:
+                await response.write(b"--frame--\r\n")
+                await response.write_eof()
+            except ConnectionResetError:
+                pass
+        return response
 
     async def _websocket(self, request: web.Request) -> web.WebSocketResponse:
         socket = web.WebSocketResponse(heartbeat=20)
@@ -177,6 +244,8 @@ class WebUIServer:
                         "internal": [], "external": [],
                     })(),
                     "driverPreferences": self.bridge.dumpDriverPreferences(),
+                    "faceClusters": getattr(self.bridge, "dumpFaceClusters", lambda: [])(),
+                    "selectedFaceClusterId": getattr(self.bridge, "dumpSelectedFaceClusterId", lambda: None)(),
                     "driverAgendaState": getattr(self.bridge, "dumpDriverAgendaState", lambda: {
                         "meeting_status": "none", "meeting_timing": "none",
                     })(),
